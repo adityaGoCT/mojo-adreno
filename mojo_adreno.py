@@ -2,13 +2,16 @@
 
   python3 mojo_adreno.py src/vecadd_gpu.mojo                  # all backends
   python3 mojo_adreno.py src/vecadd_gpu.mojo --backend turnip  # one backend
+  python3 mojo_adreno.py src/warpsum_gpu.mojo --accel sm_80    # NVIDIA flavor (32-lane warps)
 
 Pipeline (Mojo 1.2 has no Adreno/SPIR-V target, so the kernel is taken from Mojo's own LLVM IR):
-  1. mojo build --emit llvm --target-accelerator sm_80     -> per-kernel LLVM IR sidecar (NVPTX flavor)
-  2a. mojo2vk.py  -> Vulkan compute SPIR-V (LLVM 22 SPIR-V backend)
+  1. mojo build --emit llvm --target-accelerator gfx90a    -> per-kernel LLVM IR sidecar (unoptimized)
+       gfx90a (AMD CDNA2, default): WARP_SIZE = 64, the Adreno 710's subgroup size; sm_80: WARP_SIZE = 32
+  2a. mojo2vk.py  -> Vulkan compute SPIR-V (opt -O3, then LLVM 22's SPIR-V backend)
         turnip: SPIR-V 1.6, Vulkan 1.3, Mesa Turnip        stock: SPIR-V 1.4, Vulkan 1.1 + VK_KHR_spirv_1_4, int32 indices
   2b. mojo2cl.py  -> OpenCL C, compiled on the phone by Qualcomm's OpenCL driver
-  3. adb push + run (runner/vk_run, runner/cl_run): C[i] = A[i] + B[i] checked element by element
+  3. adb push + run (runner/vk_run, runner/cl_run): C[i] = A[i] + B[i] checked element by element, or
+     the warp sum of it for kernels marked "# mojo_adreno: check=warpsum" (width = the target's WARP_SIZE)
 Also: --backend cpu builds src/vecadd_cpu.mojo for aarch64 Android and runs it on the phone's CPU.
 The turnip backend needs Mesa Turnip in /data/local/tmp/turnip (see README); without it, it is skipped.
 """
@@ -26,6 +29,7 @@ NDK = pathlib.Path(os.environ.get("ANDROID_NDK", "/opt/homebrew/share/android-nd
 CC = NDK / "toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android34-clang"
 DEV = "/data/local/tmp/mojo"
 TURNIP = "/data/local/tmp/turnip"
+ACCEL = {"gfx90a": ("amdgcn", 64), "sm_80": ("nvptx", 32)}  # --target-accelerator -> (sidecar flavor, WARP_SIZE)
 os.environ.setdefault("ANDROID_SERIAL", os.environ.get("ADB_WIFI", "192.168.1.7:5555"))
 
 
@@ -42,39 +46,42 @@ def adb(*args):
 
 def build_runners(build):
     sh(CC, "-O2", "-o", build / "vk_run", HERE / "runner/vk_run.c", "-ldl", "-lm")  # Vulkan headers: NDK sysroot
-    sh(CC, "-O2", "-o", build / "cl_run", HERE / "runner/cl_run.c", "-ldl")
+    sh(CC, "-O2", "-o", build / "cl_run", HERE / "runner/cl_run.c", "-ldl", "-lm")
     adb("shell", f"mkdir -p {DEV}")
     adb("push", build / "vk_run", build / "cl_run", f"{DEV}/")
 
 
-def kernel_ir(src, build):
+def kernel_ir(src, build, accel):
     out = build / "kernel"
     out.mkdir(parents=True, exist_ok=True)
     for f in out.glob("*.ll"):
         f.unlink()
-    sh(MOJO, "build", "--emit", "llvm", "-O3", "--target-accelerator", "sm_80", "-o", out / "host.ll", src)
-    side = sorted(out.glob("*.nvptx.ll"))
+    sh(MOJO, "build", "--emit", "llvm", "-O3", "--target-accelerator", accel, "-o", out / "host.ll", src)
+    side = sorted(out.glob(f"*.{ACCEL[accel][0]}.ll"))
     if len(side) != 1:
         sys.exit(f"expected one kernel sidecar, found {side}")
     return side[0]
 
 
-def run(backend, ir, build, n, local):
+def run(backend, ir, build, n, local, check, opt):
     groups = (n + local - 1) // local
     if backend == "turnip" and adb("shell", f"test -e {TURNIP}/libvulkan.so").returncode:
         return None, f"SKIP: no Mesa Turnip in {TURNIP} (see README)"
+    if backend == "cpu" and check:
+        return None, "SKIP: the CPU path runs src/vecadd_cpu.mojo, not this kernel"
+    env = f"RUN_CHECK={check} " if check else ""
     if backend in ("turnip", "stock"):
         spv = build / f"vecadd_{backend}.spv"
         flags = ["--vulkan", "1.3"] if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
-        sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "-o", spv, *flags)
+        sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "--opt", opt, "-o", spv, *flags)
         adb("push", spv, f"{DEV}/")
-        env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
+        env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
         r = adb("shell", f"cd {DEV} && {env}./vk_run {spv.name} main {n} {groups}")
     elif backend == "opencl":
         cl = build / "vecadd.cl"
-        sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "-o", cl)
+        sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "--local", str(local), "-o", cl)
         adb("push", cl, f"{DEV}/")
-        r = adb("shell", f"cd {DEV} && ./cl_run src {cl.name} vecadd {n} {local}")
+        r = adb("shell", f"cd {DEV} && {env}./cl_run src {cl.name} vecadd {n} {local}")
     else:  # cpu
         obj = build / "vecadd_cpu.o"
         sh(MOJO, "build", "--emit", "object", "--target-triple", "aarch64-unknown-linux-android34",
@@ -94,17 +101,22 @@ def main():
                     choices=["turnip", "stock", "opencl", "cpu"])
     ap.add_argument("--n", type=int, default=1000003)
     ap.add_argument("--local", type=int, default=64)
+    ap.add_argument("--accel", default="gfx90a", choices=list(ACCEL),
+                    help="Mojo target whose kernel IR is retargeted (sets WARP_SIZE: gfx90a 64, sm_80 32)")
+    ap.add_argument("--opt", default="O3", choices=["O3", "O2", "O1", "none"], help="LLVM opt before llc (Vulkan)")
     a = ap.parse_args()
     build = HERE / "build"
     build.mkdir(parents=True, exist_ok=True)
-    print(f"phone: {os.environ['ANDROID_SERIAL']}")
+    m = re.search(r"#\s*mojo_adreno:\s*check=(\w+)", pathlib.Path(a.src).read_text())
+    check = f"{m.group(1)}:{ACCEL[a.accel][1]}" if m else ""
+    print(f"phone: {os.environ['ANDROID_SERIAL']}  accel: {a.accel} (WARP_SIZE {ACCEL[a.accel][1]})  check: {check or 'add'}")
     build_runners(build)
-    ir = kernel_ir(a.src, build) if set(a.backend) - {"cpu"} else None
+    ir = kernel_ir(a.src, build, a.accel) if set(a.backend) - {"cpu"} else None
     if ir:
         print(f"Mojo kernel IR: {ir.name}")
     results = {}
     for b in a.backend:
-        ok, out = run(b, ir, build, a.n, a.local)
+        ok, out = run(b, ir, build, a.n, a.local, check, a.opt)
         results[b] = ok
         print(f"\n== {b}\n{out}")
     print("\nsummary: " + "  ".join(f"{b}={'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}" for b, ok in results.items()))

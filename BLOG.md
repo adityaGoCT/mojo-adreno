@@ -21,6 +21,8 @@ Three lessons carried the most weight:
 
 The code is [this repo](README.md).
 
+*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the retargeted IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target).
+
 ## Why Mojo has no Adreno target
 
 Mojo picks a GPU with `--target-accelerator`, and `mojo build --print-supported-accelerators` lists three vendors: AMD (`gfx90a` to `gfx1250`), Apple (`apple-m1` to `apple-m5`) and NVIDIA (`sm_52` to `sm_121a`). Ask for anything else and the build fails in the standard library's GPU info table:
@@ -151,7 +153,7 @@ if r:
         out.append(f"  {res} = call i32 @{NVPTX_REG[reg]}.i32(i32 {c})")
 ```
 
-Anything else target-specific (`@llvm.nvvm.*`, `@llvm.amdgcn.*`) or any call to a non-intrinsic function stops the tool with an error rather than producing a wrong shader. Then `llc -O2 -filetype=obj` writes SPIR-V and `spirv-val` checks it.
+Anything else target-specific (`@llvm.nvvm.*`, `@llvm.amdgcn.*`) or any call to a non-intrinsic function stops the tool with an error rather than producing a wrong shader. Then `llc -O2 -filetype=obj` writes SPIR-V and `spirv-val` checks it. Since the [update](#update-october-25-optimized-ir-and-a-better-proxy-target), `opt -O3` runs first.
 
 The same kernel after the rewrite, for Turnip:
 
@@ -295,18 +297,21 @@ Two small C runners do the phone side. [`runner/vk_run.c`](runner/vk_run.c) is 2
 ```python
 if backend == "turnip" and adb("shell", f"test -e {TURNIP}/libvulkan.so").returncode:
     return None, f"SKIP: no Mesa Turnip in {TURNIP} (see README)"
+if backend == "cpu" and check:
+    return None, "SKIP: the CPU path runs src/vecadd_cpu.mojo, not this kernel"
+env = f"RUN_CHECK={check} " if check else ""
 if backend in ("turnip", "stock"):
     spv = build / f"vecadd_{backend}.spv"
     flags = ["--vulkan", "1.3"] if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
-    sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "-o", spv, *flags)
+    sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "--opt", opt, "-o", spv, *flags)
     adb("push", spv, f"{DEV}/")
-    env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
+    env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
     r = adb("shell", f"cd {DEV} && {env}./vk_run {spv.name} main {n} {groups}")
 elif backend == "opencl":
     cl = build / "vecadd.cl"
-    sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "-o", cl)
+    sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "--local", str(local), "-o", cl)
     adb("push", cl, f"{DEV}/")
-    r = adb("shell", f"cd {DEV} && ./cl_run src {cl.name} vecadd {n} {local}")
+    r = adb("shell", f"cd {DEV} && {env}./cl_run src {cl.name} vecadd {n} {local}")
 ```
 
 ## Results: four backends, two kernels, zero mismatches
@@ -326,6 +331,82 @@ A third kernel skips MAX and reads the SPIR-V builtin directly: `llvm_intrinsic[
 
 The runners also print wall-clock submit-and-wait time: 3.4 to 9.7 ms per run, for the 12 MB (three float arrays of 1M elements) each kernel moves. That is one cold dispatch per run, not a benchmark, and [Part 2](https://github.com/adityaGoCT/iree-adreno-genai-tuner/blob/main/BLOG-GEMM.md) showed how far one cold run on this phone can mislead.
 
+## Update, October 25: optimized IR and a better proxy target
+
+Two questions came up after the first version. Does retargeting from LLVM IR lose Mojo's optimizations? And could the pipeline start earlier, from Mojo's own MLIR dialects (KGEN, POP, LIT), and lower those to SPIR-V? Checking both changed the default target.
+
+### The sidecar is unoptimized, and `opt -O3` restores the missing passes
+
+`mojo build --help` describes the output this pipeline takes:
+
+```
+llvm (amdgpu, host, metal, nvptx)  - unoptimized LLVM IR; GPU targets also emit one IR sidecar file per kernel
+```
+
+The sidecar comes after Mojo's own stage: comptime parameters are resolved, generics specialized and calls inlined. But it comes before LLVM's optimization pipeline. Its empty blocks give it away: block `21` of `vecadd` holds only `br label %22`, which LLVM's `simplifycfg` would have removed. So [`mojo2vk.py`](mojo2vk.py) now runs `opt -O3` on the retargeted Vulkan IR before `llc`. It fully unrolls the four-iteration loop of `vecadd4`, and the result passes `spirv-val` and the phone.
+
+It bought no measurable speed on these kernels. Over 15 interleaved rounds, `vecadd4` on the stock driver took 6.05 ms at best without `opt` and 6.27 ms with it; Turnip was too noisy to call. These kernels are bound by memory, and the drivers' own compilers optimize the SPIR-V again. One catch: `opt` forms `llvm.usub.sat`, which LLVM 22's SPIR-V backend cannot select, so a small legalize step expands it to a compare and a select.
+
+### Mojo's MLIR is not reachable
+
+- `--emit` offers `llvm`, `asm`, `object`, `air` and executables; there is no MLIR output.
+- MLIR's `print-ir-after-all` family is compiled into the `mojo` binary, but nothing on the command line passes it through. `MODULAR_DEBUG` accepts only runtime `max-debug.*` options.
+- The binary holds about 100 op names each for `kgen.*`, `pop.*` and `lit.*`. None are documented, and they can change with every release.
+- Mojo links LLVM's NVPTX, AMDGPU, AArch64 and X86 backends, and no SPIR-V backend.
+
+KGEN also sits before comptime evaluation, so lowering from it would mean re-implementing much of Mojo's front end. An MLIR-level path would help with Vulkan's structured control flow and logical addressing, but it has to come from Modular as a real target.
+
+### What the NVIDIA build really costs: `WARP_SIZE`
+
+Compiling for `sm_80` bakes NVIDIA's warp width into the kernel. A kernel that stores `WARP_SIZE` shows it in the IR:
+
+| `--target-accelerator` | kernel IR |
+| --- | --- |
+| `sm_80` | `store i32 32` |
+| `gfx90a` | `store i32 64` |
+| `apple-m1` | `store i32 32` |
+
+The runner now prints the device's subgroup size: 64 on the stock driver, 128 on Turnip. AMD's CDNA2 (`gfx90a`) matches the stock driver's 64, so it is now the default: `mojo_adreno.py --accel gfx90a`, with `--accel sm_80` still available.
+
+### AMD as the proxy target
+
+The AMD sidecar differs from the NVIDIA one in two places. Thread and workgroup ids are `llvm.amdgcn.workitem.id` and `workgroup.id`. The block size is not a register but a 16-bit load at byte 12 of `llvm.amdgcn.implicitarg.ptr`, which the retargeters fold to the workgroup size. Warp operations differ more. For MAX's `warp.sum` in [`src/warpsum_gpu.mojo`](src/warpsum_gpu.mojo), `sm_80` emits five `shfl.sync.bfly` calls with clamp 31, so it reduces within 32-lane segments. `gfx90a` emits four DPP moves and then two `ds.bpermute` hops across the 64-lane wave:
+
+```llvm
+  %17 = call i32 @llvm.amdgcn.update.dpp.i32(i32 0, i32 %16, i32 177, i32 15, i32 15, i1 true)   ; quad_perm [1,0,3,2]
+  ...
+  %32 = call i32 @llvm.amdgcn.mbcnt.lo(i32 -1, i32 0)
+  %33 = call i32 @llvm.amdgcn.mbcnt.hi(i32 -1, i32 %32)                                      ; lane in the wave
+  %34 = xor i32 %33, 16
+  ...
+  %41 = call i32 @llvm.amdgcn.ds.bpermute(i32 %39, i32 %40)                                  ; read lane %39 / 4
+```
+
+Every one of these is a read from another lane, so on Vulkan each becomes `llvm.spv.wave.readlane`, which LLVM lowers to `OpGroupNonUniformShuffle`. The source lane is computed per instruction: the DPP pattern decoded (`quad_perm`, `row_shl`/`row_shr`/`row_ror`, `row_mirror`, `row_half_mirror`), `mbcnt` turned into the lane within its 64-lane wave, and `ds.bpermute`'s byte address turned into a lane of the same wave:
+
+```python
+out += [lane(res), f"  {res}.base = and i32 {res}.lane, -64", f"  {res}.w = lshr i32 {addr}, 2",
+        f"  {res}.wi = and i32 {res}.w, 63", f"  {res}.src = or i32 {res}.base, {res}.wi", readlane(res, "i32", val, f"{res}.src")]
+```
+
+Keeping each shuffle inside its aligned 64-lane wave (32-lane segment for NVPTX) makes the mapping correct for any hardware subgroup that is a multiple of the warp width, which covers Turnip's 128 as well. OpenCL has no general shuffle on this phone: Qualcomm offers `cl_khr_subgroups` and the vendor `cl_qcom_subgroup_shuffle`. So [`mojo2cl.py`](mojo2cl.py) runs warp ops on a virtual subgroup whose lanes are local ids, passing each value through `__local` memory:
+
+```python
+return [f"_shf[_lane] = as_uint({v});", "barrier(CLK_LOCAL_MEM_FENCE);",
+        f"{dst} = as_{CTYPE[ty]}(_shf[{src}]);", "barrier(CLK_LOCAL_MEM_FENCE);"]
+```
+
+The runners check the result against the warp width of the target, and against the other target's width as a control. n = 1,000,003, A[i] + B[i] = 3i:
+
+| kernel IR | checked as 32-lane sums | checked as 64-lane sums |
+| --- | --- | --- |
+| `gfx90a` | 1,000,000 mismatches on all three GPU backends | **0** on turnip, stock and opencl |
+| `sm_80` | **0** on turnip, stock and opencl | 1,000,000 mismatches on all three |
+
+The 3 elements that agree are the last, partial group. `vecadd` and `vecadd4` also pass through `gfx90a` on all four backends.
+
+So the NVIDIA build was not wrong. Mapped to 32-lane segments, it treats each 64-lane subgroup as two warps, and its warp-level work covers half of the hardware. The AMD build matches the stock driver's subgroup. Neither helps kernels that branch on the vendor (`is_nvidia_gpu()`, `is_amd_gpu()`) to use matrix-core or async-copy intrinsics: those have no SPIR-V counterpart, and the retargeters stop with an error.
+
 ## What did not work
 
 | attempt | outcome |
@@ -336,11 +417,13 @@ The runners also print wall-clock submit-and-wait time: 3.4 to 9.7 ms per run, f
 | `ptr null` as the resource name in `handlefrombinding` | crashes LLVM 22's SPIR-V instruction selector; a name string per buffer works (adds the Int8 capability; both drivers have shaderInt8) |
 | SPIR-V 1.3 for Vulkan 1.1 | LLVM 22's Vulkan output starts at SPIR-V 1.4; the stock driver accepts it via `VK_KHR_spirv_1_4` |
 | Numbered entry block | Mojo's unlabeled entry block is `%<#args>`; phis name it, so retargeted bodies keep that label |
+| Lowering from Mojo's MLIR (KGEN / POP / LIT) | not exposed in 1.2 (no `--emit mlir`, MLIR print flags unreachable, `MODULAR_DEBUG` is runtime-only); undocumented dialects; no SPIR-V backend in Mojo |
+| `opt -O3` output straight into `llc` | `llvm.usub.sat` cannot be selected by LLVM 22's SPIR-V backend; expanded to compare + select |
 | `uv pip install mojo` / `max` | hung after downloading twice; a clean retry (`-v`) installed both |
 
 ## Limits
 
-The retargeters cover the instruction subset of simple kernels: integer and float arithmetic, compares, casts, GEP, load and store, branches, phis. Not yet covered: shared memory, barriers, atomics, subgroup operations, `nctaid` and grid-stride loops (in the Vulkan path), element types other than float in the runners, and timing beyond wall-clock submit-and-wait. The pipeline also launches one thread per element whatever the kernel does. `vecadd4` is correct with that grid, but three quarters of its threads exit at the bound check.
+The retargeters cover the instruction subset of simple kernels: integer and float arithmetic, compares, casts, GEP, load and store, branches, phis, and (since the update) warp shuffles. Not yet covered: shared memory, barriers, atomics, ballot and vote, element types other than float in the runners, and timing beyond wall-clock submit-and-wait. The pipeline also launches one thread per element whatever the kernel does. `vecadd4` is correct with that grid, but three quarters of its threads exit at the bound check.
 
 ## Reproduce it
 
@@ -349,6 +432,8 @@ scripts/setup.sh                      # LLVM, spirv-tools, NDK, adb, .venv-mojo 
 export ANDROID_SERIAL=<phone ip>:5555  # adb devices
 python3 mojo_adreno.py src/vecadd_gpu.mojo
 python3 mojo_adreno.py src/vecadd4_gpu.mojo
+python3 mojo_adreno.py src/warpsum_gpu.mojo                   # MAX warp.sum, 64-lane warps (gfx90a)
+python3 mojo_adreno.py src/warpsum_gpu.mojo --accel sm_80     # the same from the NVIDIA build, 32-lane warps
 python3 mojo_adreno.py src/vecadd_gpu.mojo --backend turnip   # one backend (needs Turnip on the phone)
 ```
 

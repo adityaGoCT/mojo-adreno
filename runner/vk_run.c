@@ -1,7 +1,7 @@
 // Minimal Vulkan compute runner for the phone: runs one SPIR-V kernel that computes
-// C[i] = A[i] + B[i] (float32) and checks the result.
+// C[i] = A[i] + B[i] (float32), or a warp sum of it (RUN_CHECK, see check.h), and checks the result.
 //
-//   vk_run <kernel.spv> <entry> <n> <workgroups_x> [subgroup_size]
+//   vk_run <kernel.spv> <entry> <n> <workgroups_x>
 //
 // Bindings (set 0): 0 = A, 1 = B, 2 = C (n floats each), 3 = params (int64[4]: params[0] = n).
 // A[i] = i, B[i] = 2i, C is poisoned with NaN before the dispatch.
@@ -15,6 +15,8 @@
 #include <string.h>
 #include <time.h>
 #include <vulkan/vulkan.h>
+
+#include "check.h"
 
 #define CHECK(x)                                                              \
   do {                                                                        \
@@ -34,7 +36,8 @@
   X(vkCreateDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets)        \
   X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer)             \
   X(vkEndCommandBuffer) X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdDispatch) \
-  X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkGetPhysicalDeviceFeatures2) X(vkEnumerateDeviceExtensionProperties)
+  X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkGetPhysicalDeviceFeatures2) X(vkEnumerateDeviceExtensionProperties) \
+  X(vkGetPhysicalDeviceProperties2)
 
 #define DECL(f) static PFN_##f f;
 VK_FUNCS(DECL)
@@ -81,7 +84,7 @@ static double now_ms(void) {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 5) { fprintf(stderr, "usage: %s kernel.spv entry n workgroups_x [subgroup_size]\n", argv[0]); return 2; }
+  if (argc < 5) { fprintf(stderr, "usage: %s kernel.spv entry n workgroups_x\n", argv[0]); return 2; }
   const char* spv_path = argv[1];
   const char* entry = argv[2];
   int64_t n = atoll(argv[3]);
@@ -108,6 +111,10 @@ int main(int argc, char** argv) {
   vkGetPhysicalDeviceMemoryProperties(pd, &memprops);
   printf("device: %s  Vulkan %u.%u  driver 0x%x\n", props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
          VK_API_VERSION_MINOR(props.apiVersion), props.driverVersion);
+  VkPhysicalDeviceSubgroupProperties sgp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+  VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sgp};
+  vkGetPhysicalDeviceProperties2(pd, &p2);
+  printf("subgroup: size %u, operations 0x%x\n", sgp.subgroupSize, sgp.supportedOperations);
 
   uint32_t nq = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, NULL);
@@ -221,14 +228,13 @@ int main(int argc, char** argv) {
   CHECK(vkQueueWaitIdle(q));
   double ms = now_ms() - t0;
 
-  int64_t bad = 0, first_bad = -1;
-  for (int64_t i = 0; i < n; ++i) {
-    float c = ((float*)C.map)[i];
-    if (!(c == (float)(3 * i))) { if (first_bad < 0) first_bad = i; ++bad; }
-  }
+  int width = check_width();
+  int64_t first_bad;
   float* c = (float*)C.map;
-  printf("n=%lld groups=%u  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  submit+wait %.2f ms\n",
-         (long long)n, groups, c[0], c[1], c[2], c[3], c[n - 1], (long long)bad, (long long)first_bad, ms);
+  int64_t bad = count_bad(c, n, width, &first_bad);
+  printf("n=%lld groups=%u check=%s%.0d  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  submit+wait %.2f ms\n",
+         (long long)n, groups, width ? "warpsum:" : "add", width, c[0], c[1], c[2], c[3], c[n - 1], (long long)bad,
+         (long long)first_bad, ms);
   printf(bad ? "FAIL\n" : "PASS\n");
   return bad ? 1 : 0;
 }

@@ -1,6 +1,7 @@
 // Minimal OpenCL runner for the phone's Adreno (Qualcomm OpenCL 3.0): builds one kernel from
-// OpenCL C source or from SPIR-V IL and runs C[i] = A[i] + B[i] (float32) with signature
-// (global float* a, global float* b, global float* c, long n), then checks the result.
+// OpenCL C source or from SPIR-V IL and runs C[i] = A[i] + B[i] (float32), or a warp sum of it
+// (RUN_CHECK, see check.h), with signature (global float* a, global float* b, global float* c, long n),
+// then checks the result.
 //
 //   cl_run src <kernel.cl>  <kernel_name> <n> [local_size]
 //   cl_run il  <kernel.spv> <kernel_name> <n> [local_size]
@@ -12,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include "check.h"
 
 typedef int32_t cl_int;
 typedef uint32_t cl_uint;
@@ -119,10 +122,12 @@ int main(int argc, char** argv) {
   CK(clFinish(q));
   double ms = now_ms() - t0;
   CK(clEnqueueReadBuffer(q, C, CL_TRUE, 0, n * 4, c, 0, NULL, NULL));
-  int64_t bad = 0;
-  for (int64_t i = 0; i < n; ++i) bad += !(c[i] == (float)(3 * i));
-  printf("n=%lld global=%zu local=%zu  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld  run %.2f ms\n",
-         (long long)n, global, local, c[0], c[1], c[2], c[3], c[n - 1], (long long)bad, ms);
+  int width = check_width();
+  int64_t first_bad;
+  int64_t bad = count_bad(c, n, width, &first_bad);
+  printf("n=%lld global=%zu local=%zu check=%s%.0d  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  run %.2f ms\n",
+         (long long)n, global, local, width ? "warpsum:" : "add", width, c[0], c[1], c[2], c[3], c[n - 1], (long long)bad,
+         (long long)first_bad, ms);
   printf(bad ? "FAIL\n" : "PASS\n");
   return bad ? 1 : 0;
 }
