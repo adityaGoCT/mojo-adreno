@@ -75,7 +75,7 @@ def run(backend, ir, build, n, local, check, opt, reps, int32):
     env = (f"RUN_CHECK={check} " if check else "") + (f"RUN_REPS={reps} " if reps > 1 else "")
     if backend in ("turnip", "stock"):
         spv = build / f"vecadd_{backend}.spv"
-        flags = ["--vulkan", "1.3"] + (["--i32"] if int32 else []) if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
+        flags = ["--vulkan", "1.3"] + (["--i32"] if int32 else []) if backend == "turnip" else ["--vulkan", "1.1", "--i32", "--pad-shared"]
         sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "--opt", opt, "-o", spv, *flags)
         adb("push", spv, f"{DEV}/")
         env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""

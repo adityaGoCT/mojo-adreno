@@ -33,6 +33,7 @@ series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner)
 | `blocksum_gpu` | shared memory + barriers: a tree reduction per 64-thread block | PASS | PASS | PASS | n/a |
 | `matmul_naive_gpu` | 1024 × 1024 SGEMM from global memory | PASS | PASS | PASS | n/a |
 | `matmul_tiled_gpu` | 1024 × 1024 SGEMM, 16 × 16 tiles staged through shared memory | PASS | PASS | PASS | n/a |
+| `matmul_tiled_f16_gpu` | the same with fp16 tiles in shared memory (fp32 accumulation) | PASS | PASS | PASS | n/a |
 
 0 mismatches everywhere; every output element is checked on the phone. All of it passes with
 `--accel gfx90a` (default) and with `--accel sm_80`.
@@ -164,10 +165,24 @@ dispatches, 3 interleaved rounds, wall clock):
 | stock | 200 ms (10.7 GFLOP/s) | 293 ms (7.3 GFLOP/s) |
 | opencl | 409 ms (5.2 GFLOP/s) | 397 ms (5.4 GFLOP/s) |
 
+| backend | `matmul_tiled_gpu` (fp32 tiles) | `matmul_tiled_f16_gpu` (fp16 tiles) |
+|---|---|---|
+| turnip | 233 ms | 213 ms |
+| stock | 293 ms | 293 ms (tiles padded, see below) |
+| opencl | 396 ms | 343 ms |
+
 Tiling pays off on Turnip (2.9x) but not on Qualcomm's own compilers, which run the naive kernel
 well. One output per thread means two shared-memory loads per FMA; register tiling (several outputs
 per thread) is the next step. Mojo's `Int` is 64-bit and the Adreno has no native int64: `--int32`
 makes the naive kernel 1.6x faster on Turnip (the stock path always narrows).
+
+fp16 tiles need only `shaderFloat16` (both drivers have it): 16-bit storage features cover buffers,
+not workgroup memory. They exposed a stock-driver bug: with two `half` shared arrays, `a[N/2 + j]`
+and `b[j]` share storage. A kernel that only stores and reloads two 256-element arrays gets 1,024 of
+2,048 values wrong, while the same SPIR-V passes on Turnip. Padding each 8/16-bit shared array to 4
+bytes per element (`mojo2vk.py --pad-shared`, used for the stock backend) fixes it, so on that driver
+fp16 tiles save no shared memory. The small gains elsewhere follow from the kernel's shape: it is
+bound by the number of shared loads per FMA, not their size.
 
 ## What did not work (and why)
 
@@ -185,6 +200,7 @@ makes the naive kernel 1.6x faster on Turnip (the stock path always narrows).
 | `__spirv_ControlBarrier` (OpenCL builtin) in a Vulkan shader | not recognized for the Vulkan environment: becomes an external function (`Linkage` capability) |
 | Shared-array loads in loops with plain `llc` | loop strength reduction builds pointer induction variables; the SPIR-V backend crashes in `SPIRVLegalizePointerCast`; `-disable-lsr` |
 | `opt -O3` after retargeting | rebuilds byte-offset GEP chains on shared arrays; `opt` now runs before retargeting |
+| Two 16-bit shared arrays on the stock driver | they overlap (`a[N/2 + j]` aliases `b[j]`); identical SPIR-V passes on Turnip; `--pad-shared` |
 | Retargeting Mojo's IR without cleanup | strided `range()` loops leave allocas, `Optional` aggregates and lifetime markers; SROA + instcombine first |
 | `uv pip install mojo` / `max` | hung after downloading twice; a clean retry (`-v`) installed both |
 
@@ -196,6 +212,7 @@ mojo2vk.py         Mojo kernel IR -> Vulkan compute SPIR-V
 mojo2cl.py         Mojo kernel IR -> OpenCL C
 src/               vecadd_gpu.mojo (MAX gpu), vecadd4_gpu.mojo (loop), warpsum_gpu.mojo (warp.sum),
                    blocksum_gpu.mojo (shared memory), matmul_naive_gpu.mojo, matmul_tiled_gpu.mojo,
+                   matmul_tiled_f16_gpu.mojo (fp16 tiles),
                    vecadd_spv.mojo (SPIR-V intrinsic), vecadd_cpu.mojo
 runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side)
 probes/cl_probe.c  OpenCL platform / IL capability probe

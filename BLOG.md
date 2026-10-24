@@ -485,6 +485,24 @@ Tiling makes the kernel 2.9x faster on Turnip, but not on Qualcomm's own compile
 
 One more lesson: Mojo's `Int` is 64-bit, and the Adreno has no native 64-bit integers. The stock path always narrows to int32. On Turnip the new `--int32` flag does the same and makes the naive SGEMM 1.6x faster; it is opt-in because it is only safe for kernels without 64-bit data.
 
+### fp16 tiles, and a stock-driver bug
+
+Shared memory can hold fp16 too. [`src/matmul_tiled_f16_gpu.mojo`](src/matmul_tiled_f16_gpu.mojo) keeps the A and B tiles as `Float16`, multiplies in fp16 and accumulates in fp32. Global inputs and the output stay fp32, so the runners need no changes. Workgroup memory of 16-bit type needs only `shaderFloat16`, which both drivers have; the 16-bit storage features cover buffers.
+
+Turnip and OpenCL got it right the first time. The stock driver got 1,041,577 of 1,048,576 outputs wrong, and the identical SPIR-V passed on Turnip. A minimal kernel narrowed it down. It stores two 256-element `half` shared arrays and reads its own elements back, and on the stock driver 1,024 of 2,048 results come out wrong. The pairing is `sa[128 + j]` with `sb[j]`: the two arrays overlap. A single array is fine, and so is padding each array to 512 elements. So `mojo2vk.py --pad-shared` gives every 8- or 16-bit shared array 4 bytes per element, and `mojo_adreno.py` uses it for the stock backend:
+
+```python
+size = int(n) * max(1, 4 // SIZE[t]) if pad_shared and t in SIZE else int(n)
+```
+
+| backend | fp32 tiles | fp16 tiles |
+| --- | --- | --- |
+| turnip | 233 ms | 213 ms |
+| stock | 293 ms | 293 ms (padded) |
+| opencl | 396 ms | 343 ms |
+
+fp16 tiles help a little, by 9% on Turnip and 14% on OpenCL. This kernel is bound by how many shared-memory loads it issues per FMA, not by their size. fp16 pays off with more outputs per thread and packed `half2` math, which is the register-tiling step.
+
 ## What did not work
 
 | attempt | outcome |
@@ -501,6 +519,7 @@ One more lesson: Mojo's `Int` is 64-bit, and the Adreno has no native 64-bit int
 | `__spirv_ControlBarrier` in a Vulkan shader | not recognized for the Vulkan environment: an external function (`Linkage` capability) |
 | Shared-array loads in loops with plain `llc` | loop strength reduction builds pointer induction variables; crash in `SPIRVLegalizePointerCast`; `-disable-lsr` |
 | `opt -O3` after retargeting | rebuilds byte-offset GEP chains on shared arrays; `opt` now runs before retargeting |
+| Two 16-bit shared arrays on the stock driver | they overlap (`a[N/2 + j]` aliases `b[j]`); identical SPIR-V passes on Turnip; `--pad-shared` |
 | Retargeting Mojo's IR without cleanup | strided `range()` loops leave allocas, `Optional` aggregates and lifetime markers; SROA + instcombine first |
 | `uv pip install mojo` / `max` | hung after downloading twice; a clean retry (`-v`) installed both |
 

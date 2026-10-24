@@ -159,7 +159,7 @@ def kernel_def(ir, kernel):
     return ir[m.end():i - 1], re.compile(r"\{\n(.*?)^\}", re.S | re.M).search(ir, i).group(1)
 
 
-def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
+def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
     arglist, body = kernel_def(ir, kernel)
     # numbered values/labels must count from %0 inside a function; ours lose their args and gain
     # a prologue, so give every numbered value and label a name
@@ -177,7 +177,11 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
         if re.search(re.escape(g) + r"(?![\w.$])", body):
             body = re.sub(re.escape(g) + r"(?![\w.$])", f"@shared.{j}", body)
             shared[f"@shared.{j}"] = (int(n), "i32" if i32 and t == "i64" else t)
-            gvars.append(f"@shared.{j} = internal addrspace(3) global [{n} x {shared[f'@shared.{j}'][1]}] poison, align {al or 4}")
+            # Qualcomm's Vulkan driver overlaps two 16-bit shared arrays (a[N/2 + j] aliases b[j]); padding
+            # each sub-32-bit array to 4 bytes per element avoids it (indices stay below N)
+            size = int(n) * max(1, 4 // SIZE[t]) if pad_shared and t in SIZE else int(n)
+            gvars.append(f"@shared.{j} = internal addrspace(3) global [{size} x {shared[f'@shared.{j}'][1]}] poison, align {al or 4}")
+            shared[f"@shared.{j}"] = (size, shared[f"@shared.{j}"][1])
     # barriers: NVPTX bar.sync / AMDGPU s_barrier (with its workgroup fences) -> one control barrier
     barrier = r"call void @llvm\.(?:nvvm\.barrier0|nvvm\.barrier\.cta\.sync\.aligned\.all|nvvm\.barrier\.sync|amdgcn\.s\.barrier)\((?:i32 0)?\)"
     if re.search(barrier, body):
@@ -451,6 +455,8 @@ def main():
     ap.add_argument("--i32", action="store_true", help="narrow 64-bit integers to 32 bits (no shaderInt64)")
     ap.add_argument("--vulkan", default="1.3", choices=["1.1", "1.3"],
                     help="1.3: SPIR-V 1.6 (Turnip); 1.1: SPIR-V 1.4 (stock driver, needs VK_KHR_spirv_1_4)")
+    ap.add_argument("--pad-shared", action="store_true",
+                    help="pad 8/16-bit shared arrays to 4 bytes per element (works around the stock driver)")
     ap.add_argument("--opt", default="O3", choices=["O3", "O2", "O1", "none"],
                     help="LLVM opt pipeline on the kernel IR before retargeting (Mojo's --emit llvm is unoptimized)")
     a = ap.parse_args()
@@ -468,7 +474,7 @@ def main():
     kir = optimize(ir, a.opt)
     out.with_suffix(".kernel.ll").write_text(kir)
     src = out.with_suffix(".vk.ll")
-    src.write_text(legalize(retarget(kir, kernel, local[:3], i32=a.i32, triple=triple)))
+    src.write_text(legalize(retarget(kir, kernel, local[:3], i32=a.i32, triple=triple, pad_shared=a.pad_shared)))
     r = subprocess.run([str(LLVM / "llc"), "-O2", "-disable-lsr", "-filetype=obj", "-o", str(out), str(src)],
                        capture_output=True, text=True)
     if r.returncode:
