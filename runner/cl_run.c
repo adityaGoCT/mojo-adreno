@@ -3,8 +3,8 @@
 // (RUN_CHECK, see check.h), with signature (global float* a, global float* b, global float* c, long n),
 // then checks the result.
 //
-//   cl_run src <kernel.cl>  <kernel_name> <n> [local_size]
-//   cl_run il  <kernel.spv> <kernel_name> <n> [local_size]
+//   cl_run src <kernel.cl>  <kernel_name> <n> [local_size] [workgroups]
+//   cl_run il  <kernel.spv> <kernel_name> <n> [local_size] [workgroups]   (default: one work-item per element)
 //
 // No OpenCL headers ship with the NDK: minimal declarations, libOpenCL.so loaded with dlopen.
 #include <dlfcn.h>
@@ -66,7 +66,7 @@ static double now_ms(void) {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 5) { fprintf(stderr, "usage: %s src|il file kernel_name n [local]\n", argv[0]); return 2; }
+  if (argc < 5) { fprintf(stderr, "usage: %s src|il file kernel_name n [local] [workgroups]\n", argv[0]); return 2; }
   int il = !strcmp(argv[1], "il");
   const char* name = argv[3];
   int64_t n = atoll(argv[4]);
@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
   CK(clSetKernelArg(k, 1, sizeof(cl_mem), &B));
   CK(clSetKernelArg(k, 2, sizeof(cl_mem), &C));
   CK(clSetKernelArg(k, 3, sizeof(int64_t), &kn));
-  size_t global = (size_t)((n + local - 1) / local * local);
+  size_t global = argc > 6 ? (size_t)atoll(argv[6]) * local : (size_t)((n + local - 1) / local * local);
   int nrep = reps();
   double* ms = malloc(nrep * sizeof *ms);
   for (int r = 0; r < nrep; ++r) {

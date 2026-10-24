@@ -34,6 +34,7 @@ series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner)
 | `matmul_naive_gpu` | 1024 × 1024 SGEMM from global memory | PASS | PASS | PASS | n/a |
 | `matmul_tiled_gpu` | 1024 × 1024 SGEMM, 16 × 16 tiles staged through shared memory | PASS | PASS | PASS | n/a |
 | `matmul_tiled_f16_gpu` | the same with fp16 tiles in shared memory (fp32 accumulation) | PASS | PASS | PASS | n/a |
+| `matmul_regtile_gpu` | 1024 × 1024 SGEMM, 128 × 128 workgroup tiles, 8 × 8 outputs per thread in registers | PASS | PASS | PASS | n/a |
 
 0 mismatches everywhere; every output element is checked on the phone. All of it passes with
 `--accel gfx90a` (default) and with `--accel sm_80`.
@@ -63,7 +64,8 @@ backend reports `SKIP` and the others still run.
 Options: `--accel gfx90a|sm_80` (the Mojo target whose kernel IR is retargeted), `--opt O3|O2|O1|none`
 (LLVM `opt` on the kernel IR before retargeting), `--n`, `--local` (workgroup size), `--dim` (matrix
 size), `--reps` (timed dispatches), `--int32` (32-bit integers on Turnip too). A kernel's first line
-can set its check and defaults: `# mojo_adreno: check=matmul dim=1024 local=256`. Environment overrides: `ANDROID_SERIAL`
+can set its check and defaults: `# mojo_adreno: check=matmul dim=1024 local=256`, plus `outputs=K`
+when each thread writes K outputs (the launch is then n / (local × K) workgroups). Environment overrides: `ANDROID_SERIAL`
 (or `ADB_WIFI`), `ANDROID_NDK` (default
 `/opt/homebrew/share/android-ndk`), `MOJO` (default `.venv-mojo/bin/mojo`), `LLVM_BIN` (default
 `/opt/homebrew/opt/llvm/bin`; needs LLVM 22 or later for the SPIR-V resource intrinsics).
@@ -184,6 +186,44 @@ bytes per element (`mojo2vk.py --pad-shared`, used for the stock backend) fixes 
 fp16 tiles save no shared memory. The small gains elsewhere follow from the kernel's shape: it is
 bound by the number of shared loads per FMA, not their size.
 
+## Register tiling
+
+`matmul_regtile_gpu.mojo` gives each thread a block of C in registers: per k step it loads TM values
+of A and TN of B from shared memory and does TM × TN FMAs. Its tile sizes and thread mapping are
+compile-time constants; five settings, all correct on all three backends (1024³, best of 10
+dispatches, 3 interleaved rounds):
+
+| variant | workgroup tile, BK | per thread | mapping | turnip | stock | opencl |
+|---|---|---|---|---|---|---|
+| A | 64², 16 | 4 × 4 | contiguous | 46.5 ms | 117 ms | 111 ms |
+| C | 128², 8 | 8 × 8 | strided | 52.8 ms | **56.0 ms** | **57.9 ms** |
+| E | 128², 16 | 8 × 8 | contiguous | 35.3 ms | 91.7 ms | 87.3 ms |
+| F | 128², 16 | 8 × 8 | chunks of 4, strided | 32.8 ms | 66.6 ms | 65.6 ms |
+| G (committed) | 128², 8 | 8 × 8 | chunks of 4, strided | **32.5 ms (66 GFLOP/s)** | 65.7 ms | 67.0 ms |
+
+Against the earlier kernels (fp32):
+
+| backend | naive | tiled, 1 output per thread | register-tiled (G) |
+|---|---|---|---|
+| turnip | 669 ms | 233 ms | 32.5 ms (7.2x over tiled) |
+| stock | 200 ms | 293 ms | 65.7 ms (4.5x) |
+| opencl | 409 ms | 396 ms | 67.0 ms (5.9x) |
+
+What decided the variants:
+- Mesa's compiler merges a thread's consecutive shared-memory loads into vector loads, so it wants
+  contiguous chunks; Qualcomm's compilers do best with fully strided threads (variant C). Chunks of 4,
+  strided across the tile, are the compromise.
+- The index form matters. Written as `As[k * BM + ty * VM + offm(i)]` (runtime base, then a
+  compile-time offset), `opt` keeps the loads as one base plus constant offsets and Mesa vectorizes
+  them; computing `ty * VM + offm(i)` first lets `opt` hoist four separate row offsets out of the
+  loop, and the same kernel ran 2.4x slower on Turnip.
+- LLVM's vectorizers are off in the pre-retarget `opt`: SLP fused the 8 × 8 outer product into
+  `<16 x float>` math, which Vulkan cannot express (vectors stop at 4 lanes).
+- `--int32` no longer matters: the index math is amortized over 64 FMAs.
+
+66 GFLOP/s is 18% of the 368 GFLOP/s fp32 peak measured in Part 2. The best variant differs by
+driver, which is a job for a tuner.
+
 ## What did not work (and why)
 
 | attempt | outcome |
@@ -201,6 +241,9 @@ bound by the number of shared loads per FMA, not their size.
 | Shared-array loads in loops with plain `llc` | loop strength reduction builds pointer induction variables; the SPIR-V backend crashes in `SPIRVLegalizePointerCast`; `-disable-lsr` |
 | `opt -O3` after retargeting | rebuilds byte-offset GEP chains on shared arrays; `opt` now runs before retargeting |
 | Two 16-bit shared arrays on the stock driver | they overlap (`a[N/2 + j]` aliases `b[j]`); identical SPIR-V passes on Turnip; `--pad-shared` |
+| LLVM's vectorizers in the pre-retarget `opt` | SLP turns a register tile into `<16 x float>` math; Vulkan vectors stop at 4 lanes (llc: unable to legalize); vectorizers off |
+| Register-tile indices computed as `ty * VM + i` first | `opt` hoists the row offsets as separate registers and Mesa no longer merges the loads: 2.4x slower on Turnip |
+| `InlineArray` for register tiles | not importable from Mojo 1.2's `std.collections`; `stack_allocation` arrays with compile-time indices become registers after SROA |
 | Retargeting Mojo's IR without cleanup | strided `range()` loops leave allocas, `Optional` aggregates and lifetime markers; SROA + instcombine first |
 | `uv pip install mojo` / `max` | hung after downloading twice; a clean retry (`-v`) installed both |
 
@@ -212,7 +255,7 @@ mojo2vk.py         Mojo kernel IR -> Vulkan compute SPIR-V
 mojo2cl.py         Mojo kernel IR -> OpenCL C
 src/               vecadd_gpu.mojo (MAX gpu), vecadd4_gpu.mojo (loop), warpsum_gpu.mojo (warp.sum),
                    blocksum_gpu.mojo (shared memory), matmul_naive_gpu.mojo, matmul_tiled_gpu.mojo,
-                   matmul_tiled_f16_gpu.mojo (fp16 tiles),
+                   matmul_tiled_f16_gpu.mojo (fp16 tiles), matmul_regtile_gpu.mojo (register tiles),
                    vecadd_spv.mojo (SPIR-V intrinsic), vecadd_cpu.mojo
 runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side)
 probes/cl_probe.c  OpenCL platform / IL capability probe
@@ -232,7 +275,7 @@ mask and `laneid`; AMDGPU `ds.bpermute`, `update.dpp` with full row/bank masks, 
 shared memory and barriers. Not yet: atomics, ballot/vote, dynamic shared memory, pointer phis or
 selects on Vulkan (logical addressing), multi-dimensional workgroups, non-float element types in the
 runners, and GPU timestamps (timing is wall-clock submit+wait). The grid is one thread per element,
-or dim² / local workgroups for `check=matmul` kernels.
+or n / (local × outputs) workgroups when the kernel's marker gives `outputs=`.
 
 ## License
 

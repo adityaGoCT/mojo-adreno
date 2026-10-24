@@ -21,7 +21,7 @@ Three lessons carried the most weight:
 
 The code is [this repo](README.md).
 
-*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM.
+*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM, and a [third](#update-october-25-third-register-tiling) adds register tiling: 66 GFLOP/s.
 
 ## Why Mojo has no Adreno target
 
@@ -302,7 +302,7 @@ if backend == "cpu" and check:
 env = (f"RUN_CHECK={check} " if check else "") + (f"RUN_REPS={reps} " if reps > 1 else "")
 if backend in ("turnip", "stock"):
     spv = build / f"vecadd_{backend}.spv"
-    flags = ["--vulkan", "1.3"] + (["--i32"] if int32 else []) if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
+    flags = ["--vulkan", "1.3"] + (["--i32"] if int32 else []) if backend == "turnip" else ["--vulkan", "1.1", "--i32", "--pad-shared"]
     sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "--opt", opt, "-o", spv, *flags)
     adb("push", spv, f"{DEV}/")
     env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
@@ -311,7 +311,7 @@ elif backend == "opencl":
     cl = build / "vecadd.cl"
     sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "--local", str(local), "-o", cl)
     adb("push", cl, f"{DEV}/")
-    r = adb("shell", f"cd {DEV} && {env}./cl_run src {cl.name} vecadd {n} {local}")
+    r = adb("shell", f"cd {DEV} && {env}./cl_run src {cl.name} vecadd {n} {local} {groups}")
 ```
 
 ## Results: four backends, two kernels, zero mismatches
@@ -503,6 +503,57 @@ size = int(n) * max(1, 4 // SIZE[t]) if pad_shared and t in SIZE else int(n)
 
 fp16 tiles help a little, by 9% on Turnip and 14% on OpenCL. This kernel is bound by how many shared-memory loads it issues per FMA, not by their size. fp16 pays off with more outputs per thread and packed `half2` math, which is the register-tiling step.
 
+## Update, October 25 (third): register tiling
+
+The tiled SGEMM did two shared-memory loads per FMA. Register tiling gives each thread a block of C to keep in registers: per k step it loads TM values of A and TN of B and does TM × TN FMAs. [`src/matmul_regtile_gpu.mojo`](src/matmul_regtile_gpu.mojo) makes the tile sizes and the thread mapping compile-time constants. With 8 × 8 per thread, a step costs 16 loads for 64 FMAs:
+
+```mojo
+    var acc = stack_allocation[TM * TN, Float32]()  # registers once SROA has run
+    ...
+        for k in range(BK):
+            comptime for i in range(TM):
+                af[i] = As[k * BM + ty * VM + offm(i)]
+            comptime for j in range(TN):
+                bf[j] = Bs[k * BN + tx * VN + offn(j)]
+            comptime for i in range(TM):
+                comptime for j in range(TN):
+                    acc[i * TN + j] += af[i] * bf[j]
+```
+
+`comptime for` unrolls at compile time, so every index into `acc`, `af` and `bf` is a constant and SROA turns the arrays into registers. `InlineArray` would be the obvious type, but it cannot be imported from `std.collections` in Mojo 1.2. Each thread now writes 64 outputs, so a kernel's marker line can say `outputs=64` and `mojo_adreno.py` launches n / (256 × 64) workgroups.
+
+The first build failed in `llc` with "unable to legalize" on a 16-value instruction. The target-neutral `opt -O3` had SLP-vectorized the outer product into `<16 x float>` math, and Vulkan vectors stop at four lanes. The drivers vectorize for the real hardware anyway, so the vectorizers are now off in that step.
+
+Then I swept five settings of the constants. All of them are correct on all three backends (1024³, best of 10 dispatches, 3 interleaved rounds):
+
+| variant | workgroup tile, BK | per thread | mapping | turnip | stock | opencl |
+| --- | --- | --- | --- | --- | --- | --- |
+| A | 64², 16 | 4 × 4 | contiguous | 46.5 ms | 117 ms | 111 ms |
+| C | 128², 8 | 8 × 8 | strided | 52.8 ms | **56.0 ms** | **57.9 ms** |
+| E | 128², 16 | 8 × 8 | contiguous | 35.3 ms | 91.7 ms | 87.3 ms |
+| F | 128², 16 | 8 × 8 | chunks of 4, strided | 32.8 ms | 66.6 ms | 65.6 ms |
+| G | 128², 8 | 8 × 8 | chunks of 4, strided | **32.5 ms** | 65.7 ms | 67.0 ms |
+
+The drivers disagree. Mesa's compiler merges a thread's consecutive shared-memory loads into vector loads, so it wants contiguous rows and columns. Qualcomm's two compilers do best when neighbouring threads take neighbouring columns (strided, variant C). Chunks of 4, strided across the tile, are the compromise. G is the committed default: 66 GFLOP/s on Turnip, within 15% of the best on the stock driver and on OpenCL.
+
+The index form mattered as much as the mapping. My first version of the mapping computed each thread's row as a helper, `ty * VM + offm(i)`, and then added `k * BM`. `opt` hoisted the four row offsets out of the k loop as separate registers, Mesa no longer saw consecutive addresses, and the same configuration ran 2.4x slower on Turnip (110 ms instead of 46 ms). The fix is to write `k * BM + ty * VM + offm(i)`: a runtime base first, then a compile-time constant. `opt` keeps that as one base pointer plus constant offsets:
+
+```llvm
+  %139 = load float, ptr addrspace(3) %138, align 4
+  %140 = getelementptr inbounds nuw i8, ptr addrspace(3) %138, i32 4
+  %141 = load float, ptr addrspace(3) %140, align 4
+```
+
+Against the earlier fp32 kernels:
+
+| backend | naive | tiled, 1 output per thread | register-tiled (G) |
+| --- | --- | --- | --- |
+| turnip | 669 ms | 233 ms | 32.5 ms (66 GFLOP/s) |
+| stock | 200 ms | 293 ms | 65.7 ms (33 GFLOP/s) |
+| opencl | 409 ms | 396 ms | 67.0 ms (32 GFLOP/s) |
+
+That is 4.5 to 7.2x over the tiled kernel. `--int32` no longer matters, because the index math is spread over 64 FMAs. 66 GFLOP/s is still only 18% of the 368 GFLOP/s fp32 peak from Part 2. The rest is the same ground Part 2 covered for fp16: vectorized global loads, double buffering, `half2` math, and a tuner that picks the constants per driver.
+
 ## What did not work
 
 | attempt | outcome |
@@ -520,6 +571,8 @@ fp16 tiles help a little, by 9% on Turnip and 14% on OpenCL. This kernel is boun
 | Shared-array loads in loops with plain `llc` | loop strength reduction builds pointer induction variables; crash in `SPIRVLegalizePointerCast`; `-disable-lsr` |
 | `opt -O3` after retargeting | rebuilds byte-offset GEP chains on shared arrays; `opt` now runs before retargeting |
 | Two 16-bit shared arrays on the stock driver | they overlap (`a[N/2 + j]` aliases `b[j]`); identical SPIR-V passes on Turnip; `--pad-shared` |
+| LLVM's vectorizers in the pre-retarget `opt` | SLP turns a register tile into `<16 x float>` math; Vulkan vectors stop at 4 lanes; vectorizers off |
+| Register-tile indices computed as `ty * VM + i` first | `opt` hoists the row offsets as separate registers and Mesa no longer merges the loads: 2.4x slower on Turnip |
 | Retargeting Mojo's IR without cleanup | strided `range()` loops leave allocas, `Optional` aggregates and lifetime markers; SROA + instcombine first |
 | `uv pip install mojo` / `max` | hung after downloading twice; a clean retry (`-v`) installed both |
 
@@ -538,6 +591,7 @@ python3 mojo_adreno.py src/warpsum_gpu.mojo                   # MAX warp.sum, 64
 python3 mojo_adreno.py src/warpsum_gpu.mojo --accel sm_80     # the same from the NVIDIA build, 32-lane warps
 python3 mojo_adreno.py src/blocksum_gpu.mojo                  # shared memory + barriers
 python3 mojo_adreno.py src/matmul_tiled_gpu.mojo --reps 10    # 1024^3 SGEMM, best of 10 dispatches
+python3 mojo_adreno.py src/matmul_regtile_gpu.mojo --reps 10  # register-tiled: 8 x 8 outputs per thread
 python3 mojo_adreno.py src/vecadd_gpu.mojo --backend turnip   # one backend (needs Turnip on the phone)
 ```
 
@@ -545,6 +599,6 @@ Outputs, including the intermediate `*.vk.ll` and `vecadd.cl`, land in `build/`.
 
 ## What's next
 
-- **Register tiling** for the SGEMM (several outputs per thread), then GPU timestamps instead of wall-clock timing.
+- **The rest of the SGEMM:** vectorized global loads, double buffering, `half2` math, GPU timestamps instead of wall-clock timing, and per-driver constants from a tuner.
 - **A Mojo GEMM** through the same path, timed with [Part 2](https://github.com/adityaGoCT/iree-adreno-genai-tuner/blob/main/BLOG-GEMM.md)'s harness and compared with the tuned GLSL kernels.
 - **Grid-from-kernel:** derive the dispatch size from the kernel's launch parameters instead of one thread per element.

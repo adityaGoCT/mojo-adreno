@@ -117,9 +117,12 @@ def narrow_i64(body):
 def optimize(ir, level="O3"):
     """opt on Mojo's unoptimized kernel IR, before retargeting. Even level "none" runs SROA +
     instcombine + simplifycfg: they remove the allocas, Optional aggregates and lifetime markers that
-    iterators leave behind. The triple is dropped so that only target-independent rewrites happen
+    iterators leave behind. Vectorizers are off. The triple is dropped so that only target-independent rewrites happen
     (Homebrew LLVM 22 also cannot parse Mojo's amdgpu9.0a triple)."""
-    passes = ["-passes=sroa,instcombine<no-verify-fixpoint>,simplifycfg"] if level == "none" else [f"-{level}"]
+    # no vectorizers: they fuse register tiles into <16 x float> math (Vulkan vectors stop at 4 lanes),
+    # and the drivers' compilers vectorize for the real hardware anyway
+    passes = (["-passes=sroa,instcombine<no-verify-fixpoint>,simplifycfg"] if level == "none"
+              else [f"-{level}", "-vectorize-slp=false", "-vectorize-loops=false"])
     r = subprocess.run([str(LLVM / "opt"), *passes, "-S", "-o", "-"],
                        input=re.sub(r"^target triple = .*$", "", ir, flags=re.M), capture_output=True, text=True)
     if r.returncode:

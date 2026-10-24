@@ -15,6 +15,7 @@ Pipeline (Mojo 1.2 has no Adreno/SPIR-V target, so the kernel is taken from Mojo
        # mojo_adreno: check=warpsum                     sums over WARP_SIZE lanes
        # mojo_adreno: check=blocksum local=64           sums over each workgroup
        # mojo_adreno: check=matmul dim=1024 local=256   C = A @ B for dim x dim matrices
+     outputs=K in the marker: each thread writes K outputs, so the launch is n / (local * K) workgroups
 Also: --backend cpu builds src/vecadd_cpu.mojo for aarch64 Android and runs it on the phone's CPU.
 The turnip backend needs Mesa Turnip in /data/local/tmp/turnip (see README); without it, it is skipped.
 """
@@ -66,8 +67,8 @@ def kernel_ir(src, build, accel):
     return side[0]
 
 
-def run(backend, ir, build, n, local, check, opt, reps, int32):
-    groups = (n + local - 1) // local
+def run(backend, ir, build, n, local, check, opt, reps, int32, outputs=1):
+    groups = (n + local * outputs - 1) // (local * outputs)
     if backend == "turnip" and adb("shell", f"test -e {TURNIP}/libvulkan.so").returncode:
         return None, f"SKIP: no Mesa Turnip in {TURNIP} (see README)"
     if backend == "cpu" and check:
@@ -84,7 +85,7 @@ def run(backend, ir, build, n, local, check, opt, reps, int32):
         cl = build / "vecadd.cl"
         sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "--local", str(local), "-o", cl)
         adb("push", cl, f"{DEV}/")
-        r = adb("shell", f"cd {DEV} && {env}./cl_run src {cl.name} vecadd {n} {local}")
+        r = adb("shell", f"cd {DEV} && {env}./cl_run src {cl.name} vecadd {n} {local} {groups}")
     else:  # cpu
         obj = build / "vecadd_cpu.o"
         sh(MOJO, "build", "--emit", "object", "--target-triple", "aarch64-unknown-linux-android34",
@@ -129,7 +130,7 @@ def main():
         print(f"Mojo kernel IR: {ir.name}")
     results = {}
     for b in a.backend:
-        ok, out = run(b, ir, build, a.n, a.local, check, a.opt, a.reps, a.int32)
+        ok, out = run(b, ir, build, a.n, a.local, check, a.opt, a.reps, a.int32, int(mark.get("outputs", 1)))
         results[b] = ok
         print(f"\n== {b}\n{out}")
     print("\nsummary: " + "  ".join(f"{b}={'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}" for b, ok in results.items()))
