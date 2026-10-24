@@ -1,0 +1,6 @@
+/build
+/.venv-mojo
+__pycache__/
+*.pyc
+*.spv
+.DS_Store
