@@ -107,27 +107,34 @@ int main(int argc, char** argv) {
   CK(err);
 
   float *a = malloc(n * 4), *b = malloc(n * 4), *c = malloc(n * 4);
-  for (int64_t i = 0; i < n; ++i) { a[i] = (float)i; b[i] = (float)(2 * i); }
+  check_t ck = get_check(n);
+  fill_inputs(a, b, n, ck);
   memset(c, 0xFF, n * 4);
+  int64_t kn = kernel_n(n, ck);
   cl_mem A = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, n * 4, a, &err); CK(err);
   cl_mem B = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, n * 4, b, &err); CK(err);
   cl_mem C = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, n * 4, c, &err); CK(err);
   CK(clSetKernelArg(k, 0, sizeof(cl_mem), &A));
   CK(clSetKernelArg(k, 1, sizeof(cl_mem), &B));
   CK(clSetKernelArg(k, 2, sizeof(cl_mem), &C));
-  CK(clSetKernelArg(k, 3, sizeof(int64_t), &n));
+  CK(clSetKernelArg(k, 3, sizeof(int64_t), &kn));
   size_t global = (size_t)((n + local - 1) / local * local);
-  t0 = now_ms();
-  CK(clEnqueueNDRangeKernel(q, k, 1, NULL, &global, &local, 0, NULL, NULL));
-  CK(clFinish(q));
-  double ms = now_ms() - t0;
+  int nrep = reps();
+  double* ms = malloc(nrep * sizeof *ms);
+  for (int r = 0; r < nrep; ++r) {
+    t0 = now_ms();
+    CK(clEnqueueNDRangeKernel(q, k, 1, NULL, &global, &local, 0, NULL, NULL));
+    CK(clFinish(q));
+    ms[r] = now_ms() - t0;
+  }
+  qsort(ms, nrep, sizeof *ms, cmp_double);
   CK(clEnqueueReadBuffer(q, C, CL_TRUE, 0, n * 4, c, 0, NULL, NULL));
-  int width = check_width();
   int64_t first_bad;
-  int64_t bad = count_bad(c, n, width, &first_bad);
-  printf("n=%lld global=%zu local=%zu check=%s%.0d  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  run %.2f ms\n",
-         (long long)n, global, local, width ? "warpsum:" : "add", width, c[0], c[1], c[2], c[3], c[n - 1], (long long)bad,
-         (long long)first_bad, ms);
+  int64_t bad = count_bad(a, b, c, n, ck, &first_bad);
+  printf("n=%lld global=%zu local=%zu check=%s  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  run %.2f ms",
+         (long long)n, global, local, getenv("RUN_CHECK") ? getenv("RUN_CHECK") : "add", c[0], c[1], c[2], c[3],
+         c[n - 1], (long long)bad, (long long)first_bad, ms[0]);
+  printf(nrep > 1 ? " (best of %d, median %.2f ms)\n" : "\n", nrep, ms[nrep / 2]);
   printf(bad ? "FAIL\n" : "PASS\n");
   return bad ? 1 : 0;
 }

@@ -21,7 +21,7 @@ Three lessons carried the most weight:
 
 The code is [this repo](README.md).
 
-*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the retargeted IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target).
+*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM.
 
 ## Why Mojo has no Adreno target
 
@@ -299,10 +299,10 @@ if backend == "turnip" and adb("shell", f"test -e {TURNIP}/libvulkan.so").return
     return None, f"SKIP: no Mesa Turnip in {TURNIP} (see README)"
 if backend == "cpu" and check:
     return None, "SKIP: the CPU path runs src/vecadd_cpu.mojo, not this kernel"
-env = f"RUN_CHECK={check} " if check else ""
+env = (f"RUN_CHECK={check} " if check else "") + (f"RUN_REPS={reps} " if reps > 1 else "")
 if backend in ("turnip", "stock"):
     spv = build / f"vecadd_{backend}.spv"
-    flags = ["--vulkan", "1.3"] if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
+    flags = ["--vulkan", "1.3"] + (["--i32"] if int32 else []) if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
     sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "--opt", opt, "-o", spv, *flags)
     adb("push", spv, f"{DEV}/")
     env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
@@ -343,7 +343,7 @@ Two questions came up after the first version. Does retargeting from LLVM IR los
 llvm (amdgpu, host, metal, nvptx)  - unoptimized LLVM IR; GPU targets also emit one IR sidecar file per kernel
 ```
 
-The sidecar comes after Mojo's own stage: comptime parameters are resolved, generics specialized and calls inlined. But it comes before LLVM's optimization pipeline. Its empty blocks give it away: block `21` of `vecadd` holds only `br label %22`, which LLVM's `simplifycfg` would have removed. So [`mojo2vk.py`](mojo2vk.py) now runs `opt -O3` on the retargeted Vulkan IR before `llc`. It fully unrolls the four-iteration loop of `vecadd4`, and the result passes `spirv-val` and the phone.
+The sidecar comes after Mojo's own stage: comptime parameters are resolved, generics specialized and calls inlined. But it comes before LLVM's optimization pipeline. Its empty blocks give it away: block `21` of `vecadd` holds only `br label %22`, which LLVM's `simplifycfg` would have removed. So [`mojo2vk.py`](mojo2vk.py) now runs `opt -O3` (at first on the retargeted Vulkan IR before `llc`; since the [second update](#update-october-25-later-shared-memory-and-barriers), on the kernel IR before retargeting). It fully unrolls the four-iteration loop of `vecadd4`, and the result passes `spirv-val` and the phone.
 
 It bought no measurable speed on these kernels. Over 15 interleaved rounds, `vecadd4` on the stock driver took 6.05 ms at best without `opt` and 6.27 ms with it; Turnip was too noisy to call. These kernels are bound by memory, and the drivers' own compilers optimize the SPIR-V again. One catch: `opt` forms `llvm.usub.sat`, which LLVM 22's SPIR-V backend cannot select, so a small legalize step expands it to a compare and a select.
 
@@ -407,6 +407,84 @@ The 3 elements that agree are the last, partial group. `vecadd` and `vecadd4` al
 
 So the NVIDIA build was not wrong. Mapped to 32-lane segments, it treats each 64-lane subgroup as two warps, and its warp-level work covers half of the hardware. The AMD build matches the stock driver's subgroup. Neither helps kernels that branch on the vendor (`is_nvidia_gpu()`, `is_amd_gpu()`) to use matrix-core or async-copy intrinsics: those have no SPIR-V counterpart, and the retargeters stop with an error.
 
+## Update, October 25 (later): shared memory and barriers
+
+A tiled kernel needs two things the retargeters did not have: memory shared by a workgroup, and barriers. [`src/matmul_tiled_gpu.mojo`](src/matmul_tiled_gpu.mojo) is the textbook SGEMM: each 256-thread workgroup computes one 16 × 16 tile of C and stages tiles of A and B through shared memory.
+
+```mojo
+    var sa = stack_allocation[TILE * TILE, Float32, address_space=AddressSpace.SHARED]()
+    var sb = stack_allocation[TILE * TILE, Float32, address_space=AddressSpace.SHARED]()
+    ...
+    for k0 in range(0, dim, TILE):
+        sa[t] = a[row * dim + k0 + tx]
+        sb[t] = b[(k0 + ty) * dim + col]
+        barrier()
+        for k in range(TILE):
+            acc += sa[ty * TILE + k] * sb[k * TILE + tx]
+        barrier()
+    c[row * dim + col] = acc
+```
+
+In the IR, each shared buffer is a module-level `addrspace(3)` array indexed with ordinary GEPs. `barrier()` depends on the target:
+
+```llvm
+@..._global_alloc_0._gpu_shared_mem = internal addrspace(3) global [256 x float] undef, align 4
+  call void @llvm.nvvm.barrier.cta.sync.aligned.all(i32 0)          ; sm_80
+  fence syncscope("workgroup") release                              ; gfx90a
+  call void @llvm.amdgcn.s.barrier()
+  fence syncscope("workgroup") acquire
+```
+
+Both map cleanly. On Vulkan a shared array becomes a `Workgroup` variable and the barrier becomes `OpControlBarrier`. On OpenCL they become a `__local` array and `barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE)`. Getting LLVM 22 to produce valid SPIR-V for that took four fixes.
+
+**Clean up Mojo's IR first.** The strided `range(0, dim, TILE)` loop compiles to unoptimized IR full of iterator machinery: private `alloca`s, `addrspacecast`s to generic pointers, `Optional` aggregates built with `insertvalue`, `llvm.lifetime` markers. SROA and instcombine remove all of it, so the kernel IR now goes through `opt` first. The triple is removed for that step, which keeps it target-neutral. Homebrew's LLVM 22 also cannot parse Mojo's `amdgpu9.0a` triple spelling.
+
+**Run `opt -O3` before retargeting, not after.** After retargeting, `opt -O3` rebuilt the shared-array accesses as byte-offset chains (`getelementptr i8, ptr addrspace(3) %1, i64 4`), which Vulkan's logical addressing cannot express. Run before retargeting, it optimizes raw pointer arithmetic that the retargeter then folds: every pointer is tracked as (buffer or shared array, element index) through GEP chains.
+
+```python
+if bidx is not None:  # GEP chain: offsets add up
+    out.append(f"  {res}.ix = add i32 {bidx}, {idx}")
+    idx = f"{res}.ix"
+ptrs[res] = (k, idx)
+if k in shared:
+    out.append(f"  {res} = getelementptr inbounds [{shared[k][0]} x {e}], ptr addrspace(3) {k}, i32 0, i32 {idx}")
+```
+
+**Disable loop strength reduction in `llc`.** A shared-array load inside a loop crashed the SPIR-V backend in `SPIRVLegalizePointerCast`. I narrowed it with hand-written shaders: straight-line loads and storage-buffer loads in loops were fine, and only a shared-array index that comes from a loop phi crashed. `or i32 %i, 0` on the index avoided the crash where `add i32 %i, 0` did not. That pointed at LSR, which sees through `add`: it turns the index into a pointer induction variable, a pointer phi that logical addressing cannot express. `llc -disable-lsr` fixes it.
+
+**Patch the barrier's memory semantics.** LLVM 22's only barrier intrinsic, `llvm.spv.group.memory.barrier.with.group.sync`, lowers to `OpControlBarrier Workgroup Workgroup SequentiallyConsistent` with no storage class, and spirv-val rejects that for Vulkan (VUID-10866). The OpenCL builtin `__spirv_ControlBarrier` is not recognized in the Vulkan environment. So `mojo2vk.py` disassembles the module, swaps in AcquireRelease | UniformMemory | WorkgroupMemory (328), and reassembles:
+
+```python
+for line in dis.splitlines():
+    line = re.sub(r"^(\s*OpControlBarrier %\S+ %\S+) %\S+\s*$", rf"\1 {sem}", line)
+    out.append(line)
+    if re.match(r"\s*%uint = OpTypeInt 32 0\s*$", line):
+        out.append(f"{sem} = OpConstant %uint 328")
+```
+
+Like `__syncthreads()`, the barrier then orders global memory as well as shared memory. On the stock driver it costs nothing over WorkgroupMemory alone: 293.4 ms against 294.5 ms.
+
+### Results
+
+Three new kernels join the earlier ones:
+- `blocksum_gpu`: a shared-memory tree reduction per 64-thread block.
+- `matmul_naive_gpu`: the same SGEMM reading only from global memory.
+- `matmul_tiled_gpu`: the tiled SGEMM above.
+
+The SGEMM inputs are small integers (A[i] = i mod 7 − 3, B[i] = i mod 5 − 2), so every one of the 1,048,576 outputs of a 1024³ product must match a double-precision reference exactly. All six GPU kernels pass on turnip, stock and opencl, for both `--accel gfx90a` and `--accel sm_80`: 36 combinations, 0 mismatches. As a control, I removed the barriers from the tiled SGEMM and about 99.5% of its outputs came out wrong on all three backends.
+
+Timing the two SGEMMs (best of 10 dispatches, 3 interleaved rounds, wall clock):
+
+| backend | `matmul_naive_gpu` | `matmul_tiled_gpu` |
+| --- | --- | --- |
+| turnip | 669 ms (3.2 GFLOP/s); 409 ms with `--int32` | 232 ms (9.2 GFLOP/s) |
+| stock | 200 ms (10.7 GFLOP/s) | 293 ms (7.3 GFLOP/s) |
+| opencl | 409 ms (5.2 GFLOP/s) | 397 ms (5.4 GFLOP/s) |
+
+Tiling makes the kernel 2.9x faster on Turnip, but not on Qualcomm's own compilers, which run the naive kernel well. With one output per thread the tiled kernel does two shared-memory loads per FMA, and all of these are a long way from the 368 GFLOP/s fp32 peak measured in Part 2. Register tiling, several outputs per thread as in Part 2's schedules, is what the next kernel needs.
+
+One more lesson: Mojo's `Int` is 64-bit, and the Adreno has no native 64-bit integers. The stock path always narrows to int32. On Turnip the new `--int32` flag does the same and makes the naive SGEMM 1.6x faster; it is opt-in because it is only safe for kernels without 64-bit data.
+
 ## What did not work
 
 | attempt | outcome |
@@ -419,11 +497,16 @@ So the NVIDIA build was not wrong. Mapped to 32-lane segments, it treats each 64
 | Numbered entry block | Mojo's unlabeled entry block is `%<#args>`; phis name it, so retargeted bodies keep that label |
 | Lowering from Mojo's MLIR (KGEN / POP / LIT) | not exposed in 1.2 (no `--emit mlir`, MLIR print flags unreachable, `MODULAR_DEBUG` is runtime-only); undocumented dialects; no SPIR-V backend in Mojo |
 | `opt -O3` output straight into `llc` | `llvm.usub.sat` cannot be selected by LLVM 22's SPIR-V backend; expanded to compare + select |
+| LLVM 22's barrier intrinsic as is | SequentiallyConsistent semantics without a storage class: invalid in Vulkan; patched to 0x148 |
+| `__spirv_ControlBarrier` in a Vulkan shader | not recognized for the Vulkan environment: an external function (`Linkage` capability) |
+| Shared-array loads in loops with plain `llc` | loop strength reduction builds pointer induction variables; crash in `SPIRVLegalizePointerCast`; `-disable-lsr` |
+| `opt -O3` after retargeting | rebuilds byte-offset GEP chains on shared arrays; `opt` now runs before retargeting |
+| Retargeting Mojo's IR without cleanup | strided `range()` loops leave allocas, `Optional` aggregates and lifetime markers; SROA + instcombine first |
 | `uv pip install mojo` / `max` | hung after downloading twice; a clean retry (`-v`) installed both |
 
 ## Limits
 
-The retargeters cover the instruction subset of simple kernels: integer and float arithmetic, compares, casts, GEP, load and store, branches, phis, and (since the update) warp shuffles. Not yet covered: shared memory, barriers, atomics, ballot and vote, element types other than float in the runners, and timing beyond wall-clock submit-and-wait. The pipeline also launches one thread per element whatever the kernel does. `vecadd4` is correct with that grid, but three quarters of its threads exit at the bound check.
+The retargeters cover the instruction subset of simple kernels: integer and float arithmetic, compares, casts, min and max, GEP, load and store, branches and phis. Since the updates they also cover warp shuffles, static shared memory and barriers. Not yet covered: atomics, ballot and vote, dynamic shared memory, pointer phis or selects on Vulkan, multi-dimensional workgroups, element types other than float in the runners, and GPU timestamps. The pipeline also launches one thread per element whatever the kernel does. `vecadd4` is correct with that grid, but three quarters of its threads exit at the bound check.
 
 ## Reproduce it
 
@@ -434,6 +517,8 @@ python3 mojo_adreno.py src/vecadd_gpu.mojo
 python3 mojo_adreno.py src/vecadd4_gpu.mojo
 python3 mojo_adreno.py src/warpsum_gpu.mojo                   # MAX warp.sum, 64-lane warps (gfx90a)
 python3 mojo_adreno.py src/warpsum_gpu.mojo --accel sm_80     # the same from the NVIDIA build, 32-lane warps
+python3 mojo_adreno.py src/blocksum_gpu.mojo                  # shared memory + barriers
+python3 mojo_adreno.py src/matmul_tiled_gpu.mojo --reps 10    # 1024^3 SGEMM, best of 10 dispatches
 python3 mojo_adreno.py src/vecadd_gpu.mojo --backend turnip   # one backend (needs Turnip on the phone)
 ```
 
@@ -441,6 +526,6 @@ Outputs, including the intermediate `*.vk.ll` and `vecadd.cl`, land in `build/`.
 
 ## What's next
 
-- **Shared memory and barriers** in both retargeters (`addrspace(3)` to `Workgroup` storage, `llvm.nvvm.barrier0` to a control barrier), the minimum for a tiled kernel.
+- **Register tiling** for the SGEMM (several outputs per thread), then GPU timestamps instead of wall-clock timing.
 - **A Mojo GEMM** through the same path, timed with [Part 2](https://github.com/adityaGoCT/iree-adreno-genai-tuner/blob/main/BLOG-GEMM.md)'s harness and compared with the tuned GLSL kernels.
 - **Grid-from-kernel:** derive the dispatch size from the kernel's launch parameters instead of one thread per element.

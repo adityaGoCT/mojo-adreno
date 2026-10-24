@@ -11,7 +11,10 @@ Pipeline (Mojo 1.2 has no Adreno/SPIR-V target, so the kernel is taken from Mojo
         turnip: SPIR-V 1.6, Vulkan 1.3, Mesa Turnip        stock: SPIR-V 1.4, Vulkan 1.1 + VK_KHR_spirv_1_4, int32 indices
   2b. mojo2cl.py  -> OpenCL C, compiled on the phone by Qualcomm's OpenCL driver
   3. adb push + run (runner/vk_run, runner/cl_run): C[i] = A[i] + B[i] checked element by element, or
-     the warp sum of it for kernels marked "# mojo_adreno: check=warpsum" (width = the target's WARP_SIZE)
+     what the kernel's marker line asks for (runner/check.h):
+       # mojo_adreno: check=warpsum                     sums over WARP_SIZE lanes
+       # mojo_adreno: check=blocksum local=64           sums over each workgroup
+       # mojo_adreno: check=matmul dim=1024 local=256   C = A @ B for dim x dim matrices
 Also: --backend cpu builds src/vecadd_cpu.mojo for aarch64 Android and runs it on the phone's CPU.
 The turnip backend needs Mesa Turnip in /data/local/tmp/turnip (see README); without it, it is skipped.
 """
@@ -63,16 +66,16 @@ def kernel_ir(src, build, accel):
     return side[0]
 
 
-def run(backend, ir, build, n, local, check, opt):
+def run(backend, ir, build, n, local, check, opt, reps, int32):
     groups = (n + local - 1) // local
     if backend == "turnip" and adb("shell", f"test -e {TURNIP}/libvulkan.so").returncode:
         return None, f"SKIP: no Mesa Turnip in {TURNIP} (see README)"
     if backend == "cpu" and check:
         return None, "SKIP: the CPU path runs src/vecadd_cpu.mojo, not this kernel"
-    env = f"RUN_CHECK={check} " if check else ""
+    env = (f"RUN_CHECK={check} " if check else "") + (f"RUN_REPS={reps} " if reps > 1 else "")
     if backend in ("turnip", "stock"):
         spv = build / f"vecadd_{backend}.spv"
-        flags = ["--vulkan", "1.3"] if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
+        flags = ["--vulkan", "1.3"] + (["--i32"] if int32 else []) if backend == "turnip" else ["--vulkan", "1.1", "--i32"]
         sh(sys.executable, HERE / "mojo2vk.py", ir, "--local", str(local), "--opt", opt, "-o", spv, *flags)
         adb("push", spv, f"{DEV}/")
         env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
@@ -99,16 +102,26 @@ def main():
     ap.add_argument("src", nargs="?", default=str(HERE / "src/vecadd_gpu.mojo"))
     ap.add_argument("--backend", nargs="+", default=["turnip", "stock", "opencl", "cpu"],
                     choices=["turnip", "stock", "opencl", "cpu"])
-    ap.add_argument("--n", type=int, default=1000003)
-    ap.add_argument("--local", type=int, default=64)
+    ap.add_argument("--n", type=int, default=1000003, help="elements (matmul kernels: dim * dim)")
+    ap.add_argument("--dim", type=int, help="matrix size for check=matmul kernels (default: the marker's dim)")
+    ap.add_argument("--local", type=int, help="workgroup size (default: the marker's local, else 64)")
+    ap.add_argument("--reps", type=int, default=1, help="timed dispatches per run (best and median are printed)")
+    ap.add_argument("--int32", action="store_true",
+                    help="turnip: narrow 64-bit integers to 32 bits like the stock path (faster index math on Adreno, "
+                         "which has no native int64; only for kernels without 64-bit data)")
     ap.add_argument("--accel", default="gfx90a", choices=list(ACCEL),
                     help="Mojo target whose kernel IR is retargeted (sets WARP_SIZE: gfx90a 64, sm_80 32)")
     ap.add_argument("--opt", default="O3", choices=["O3", "O2", "O1", "none"], help="LLVM opt before llc (Vulkan)")
     a = ap.parse_args()
     build = HERE / "build"
     build.mkdir(parents=True, exist_ok=True)
-    m = re.search(r"#\s*mojo_adreno:\s*check=(\w+)", pathlib.Path(a.src).read_text())
-    check = f"{m.group(1)}:{ACCEL[a.accel][1]}" if m else ""
+    m = re.search(r"#\s*mojo_adreno:(.*)", pathlib.Path(a.src).read_text())
+    mark = dict(re.findall(r"(\w+)=(\w+)", m.group(1))) if m else {}
+    a.local = a.local or int(mark.get("local", 64))
+    check = {"warpsum": f"warpsum:{ACCEL[a.accel][1]}", "blocksum": f"blocksum:{a.local}"}.get(mark.get("check"), "")
+    if mark.get("check") == "matmul":
+        a.dim = a.dim or int(mark.get("dim", 256))
+        a.n, check = a.dim * a.dim, f"matmul:{a.dim}"
     print(f"phone: {os.environ['ANDROID_SERIAL']}  accel: {a.accel} (WARP_SIZE {ACCEL[a.accel][1]})  check: {check or 'add'}")
     build_runners(build)
     ir = kernel_ir(a.src, build, a.accel) if set(a.backend) - {"cpu"} else None
@@ -116,7 +129,7 @@ def main():
         print(f"Mojo kernel IR: {ir.name}")
     results = {}
     for b in a.backend:
-        ok, out = run(b, ir, build, a.n, a.local, check, a.opt)
+        ok, out = run(b, ir, build, a.n, a.local, check, a.opt, a.reps, a.int32)
         results[b] = ok
         print(f"\n== {b}\n{out}")
     print("\nsummary: " + "  ".join(f"{b}={'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}" for b, ok in results.items()))

@@ -162,12 +162,10 @@ int main(int argc, char** argv) {
   vkGetDeviceQueue(dev, qfam, 0, &q);
 
   buf_t A = make_buffer(n * 4), B = make_buffer(n * 4), C = make_buffer(n * 4), P = make_buffer(32);
-  for (int64_t i = 0; i < n; ++i) {
-    ((float*)A.map)[i] = (float)i;
-    ((float*)B.map)[i] = (float)(2 * i);
-  }
+  check_t ck = get_check(n);
+  fill_inputs((float*)A.map, (float*)B.map, n, ck);
   memset(C.map, 0xFF, n * 4);  // NaN poison
-  ((int64_t*)P.map)[0] = n;
+  ((int64_t*)P.map)[0] = kernel_n(n, ck);
 
   VkDescriptorSetLayoutBinding binds[4];
   for (int i = 0; i < 4; ++i)
@@ -223,18 +221,23 @@ int main(int argc, char** argv) {
   VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &cmd;
-  t0 = now_ms();
-  CHECK(vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE));
-  CHECK(vkQueueWaitIdle(q));
-  double ms = now_ms() - t0;
+  int nrep = reps();
+  double* ms = malloc(nrep * sizeof *ms);
+  for (int r = 0; r < nrep; ++r) {
+    t0 = now_ms();
+    CHECK(vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE));
+    CHECK(vkQueueWaitIdle(q));
+    ms[r] = now_ms() - t0;
+  }
+  qsort(ms, nrep, sizeof *ms, cmp_double);
 
-  int width = check_width();
   int64_t first_bad;
   float* c = (float*)C.map;
-  int64_t bad = count_bad(c, n, width, &first_bad);
-  printf("n=%lld groups=%u check=%s%.0d  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  submit+wait %.2f ms\n",
-         (long long)n, groups, width ? "warpsum:" : "add", width, c[0], c[1], c[2], c[3], c[n - 1], (long long)bad,
-         (long long)first_bad, ms);
+  int64_t bad = count_bad((float*)A.map, (float*)B.map, c, n, ck, &first_bad);
+  printf("n=%lld groups=%u check=%s  C[0..3]=%g %g %g %g  C[n-1]=%g  mismatches=%lld (first %lld)  submit+wait %.2f ms",
+         (long long)n, groups, getenv("RUN_CHECK") ? getenv("RUN_CHECK") : "add", c[0], c[1], c[2], c[3], c[n - 1],
+         (long long)bad, (long long)first_bad, ms[0]);
+  printf(nrep > 1 ? " (best of %d, median %.2f ms)\n" : "\n", nrep, ms[nrep / 2]);
   printf(bad ? "FAIL\n" : "PASS\n");
   return bad ? 1 : 0;
 }

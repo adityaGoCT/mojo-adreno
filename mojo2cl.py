@@ -5,8 +5,11 @@ clCreateProgramWithIL returns CL_INVALID_OPERATION), but it compiles OpenCL C. T
 the (small, already optimized) kernel IR that Mojo emits into equivalent OpenCL C: one C
 variable per SSA value, one label per basic block, phis resolved on the incoming edges.
 
-Pointers are carried as `__global uchar*` and offset in bytes, so typed and byte (i8) GEPs work
-alike; loads and stores cast to the element type. Thread indices:
+The IR first gets the same SROA / instcombine / simplifycfg cleanup as in mojo2vk.py (Mojo's
+--emit llvm is unoptimized; Qualcomm's compiler does the optimizing). Pointers are carried as
+`__global uchar*` (or `__local uchar*` for shared memory) and offset in bytes, so typed and byte (i8)
+GEPs work alike; loads and stores cast to the element type. Shared memory (addrspace(3) arrays)
+becomes __local arrays, NVPTX bar.sync / AMDGPU s_barrier become barrier(). Thread indices:
   NVPTX tid/ctaid/ntid/nctaid -> get_local_id / get_group_id / get_local_size / get_num_groups
   AMDGPU workitem.id / workgroup.id, implicitarg block sizes / counts -> the same
   llvm.spv.thread.id(.in.group) / group.id (host-IR kernels) -> get_global_id / get_local_id / get_group_id
@@ -18,13 +21,16 @@ keeps the lane layout independent of the driver's wave size. Needs a 1-D workgro
 multiple of the warp width, with every work-item reaching each shuffle.
 
   mojo2cl.py kernel.ll [--kernel NAME] [--name vecadd] [--local 64] -o vecadd.cl
-Supported: integer/float arithmetic, icmp/fcmp, select, casts, GEP, load/store, br, phi, ret.
+Supported: integer/float arithmetic, icmp/fcmp, select, casts, GEP, load/store, br, phi, ret, freeze,
+min/max/abs/fma/sqrt intrinsics.
 """
 
 import argparse
 import pathlib
 import re
 import sys
+
+from mojo2vk import kernel_def, optimize
 
 CTYPE = {"i1": "int", "i8": "char", "i16": "short", "i32": "int", "i64": "long", "half": "half",
          "float": "float", "double": "double"}
@@ -45,6 +51,10 @@ CALLS = {
 # AMDGPU implicit kernel arguments (code object v5): byte offset -> (OpenCL query, dimension)
 IMPLICITARG = {0: ("get_num_groups", 0), 4: ("get_num_groups", 1), 8: ("get_num_groups", 2),
                12: ("get_local_size", 0), 14: ("get_local_size", 1), 16: ("get_local_size", 2)}
+MATH = {"smin": "min", "smax": "max", "umin": "min", "umax": "max", "minnum": "fmin", "maxnum": "fmax",
+        "fabs": "fabs", "sqrt": "sqrt", "fma": "fma", "fmuladd": "fma", "abs": "abs"}
+BARRIER = r"(?:tail )?call void @llvm\.(?:nvvm\.barrier0|nvvm\.barrier\.cta\.sync\.aligned\.all|nvvm\.barrier\.sync|amdgcn\.s\.barrier)\((?:i32 0)?\)"
+LOCAL = {}  # shared-memory global -> C expression for its first byte
 SPV_CALLS = {"llvm.spv.thread.id": "get_global_id", "llvm.spv.thread.id.in.group": "get_local_id",
              "llvm.spv.group.id": "get_group_id"}
 
@@ -73,6 +83,8 @@ def val(v, ty=None):
     v = v.strip()
     if v.startswith("%"):
         return name(v)
+    if v in LOCAL:
+        return LOCAL[v]
     if v in ("true", "false"):
         return "1" if v == "true" else "0"
     if v in ("null", "zeroinitializer", "undef", "poison"):
@@ -111,15 +123,19 @@ def shuffle(st, dst, ty, v, src):
 
 
 def translate(ir, kernel, out_name, local=64):
-    m = re.search(r"^define\s+[^@]*?void\s+@\"?" + re.escape(kernel) + r"\"?\((.*?)\)[^{]*\{\n(.*?)^\}", ir, re.S | re.M)
-    if not m:
-        sys.exit(f"kernel @{kernel} not found")
+    arglist, kbody = kernel_def(ir, kernel)
     params, decl_vars, lines = [], {}, []
-    for a in split_top(m.group(1)):
+    for a in split_top(arglist):
         ty, v = a.split()[0], a.split()[-1]
         params.append(f"__global uchar* {name(v)}" if ty == "ptr" else f"{CTYPE[ty]} {name(v)}")
+    arrays = []  # shared memory: addrspace(3) arrays -> __local arrays
+    for j, (g, n, t) in enumerate(re.findall(r"^(@[\w.$]+) = (?:internal |private |dso_local )*(?:unnamed_addr )?"
+                                             r"addrspace\(3\) global \[(\d+) x (\w+)\]", ir, re.M)):
+        if re.search(re.escape(g) + r"(?![\w.$])", kbody):
+            LOCAL[g] = f"((__local uchar*)_shared{j})"
+            arrays.append(f"  __local {CTYPE[t]} _shared{j}[{n}];")
     blocks, cur = [], None
-    for raw in m.group(2).splitlines():
+    for raw in kbody.splitlines():
         line = re.sub(r";.*$", "", raw).rstrip()
         line = re.sub(r",\s*![\w.]+ !\d+", "", line)
         if not line.strip():
@@ -130,8 +146,8 @@ def translate(ir, kernel, out_name, local=64):
             blocks.append(cur)
             continue
         if cur is None:  # unlabeled entry block: LLVM numbers it after the (numbered) arguments
-            nargs = len(split_top(m.group(1)))
-            cur = [str(nargs) if all(re.search(r"%\d+$", x) for x in split_top(m.group(1))) else "entry", []]
+            nargs = len(split_top(arglist))
+            cur = [str(nargs) if all(re.search(r"%\d+$", x) for x in split_top(arglist)) else "entry", []]
             blocks.append(cur)
         cur[1].append(line.strip())
 
@@ -141,14 +157,15 @@ def translate(ir, kernel, out_name, local=64):
             p = re.match(r"(%[\w.]+) = phi (?:fast |nnan |ninf |contract )*(\w+) (.*)$", i)
             if p:
                 dst, ty, rest = p.groups()
-                decl_vars[name(dst)] = CTYPE.get(ty, "__global uchar*") if ty != "ptr" else "__global uchar*"
+                decl_vars[name(dst)] = (("__local" if rest.startswith("addrspace(3)") else "__global") + " uchar*"
+                                        if ty == "ptr" else CTYPE[ty])
                 for v, pred in re.findall(r"\[\s*([^,]+),\s*%([\w.$-]+)\s*\]", rest):
                     phis.setdefault((pred, lbl), []).append((name(dst), val(v, ty)))
 
     def emit_edge(src, dst):
         return [f"{d} = {v};" for d, v in phis.get((src, dst), [])] + [f"goto L_{dst.replace('.', '_')};"]
 
-    body, state = [], {"implicit": {}, "shuffle": False}
+    body, state = [], {"implicit": {}, "shuffle": False, "barrier": bool(re.search(BARRIER, kbody))}
     for lbl, ins in blocks:
         body.append(f"L_{lbl.replace('.', '_')}:;")
         for i in ins:
@@ -160,6 +177,7 @@ def translate(ir, kernel, out_name, local=64):
     if any(t == "half" for t in decl_vars.values()):
         out.append("#pragma OPENCL EXTENSION cl_khr_fp16 : enable")
     out.append(f"__kernel void {out_name}({', '.join(params)}) {{")
+    out += arrays
     if state["shuffle"]:
         out += [f"  __local uint _shf[{local}];", "  uint _lane = (uint)get_local_id(0);"]
     for v, t in sorted(decl_vars.items()):
@@ -170,9 +188,16 @@ def translate(ir, kernel, out_name, local=64):
 
 
 def translate_inst(i, decl, lbl, edge, st):
-    def d(dst, ty):
-        decl[name(dst)] = "__global uchar*" if ty == "ptr" else CTYPE[ty]
+    def d(dst, ty):  # ty: an LLVM type, or a C pointer type
+        decl[name(dst)] = ty if ty.endswith("*") else "__global uchar*" if ty == "ptr" else CTYPE[ty]
         return name(dst)
+
+    def space(asp):
+        return "__local" if asp == "3" else "__global"
+    if re.fullmatch(BARRIER, i):
+        return ["barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);"]
+    if re.fullmatch(r"fence syncscope\(\"workgroup\"\) \w+", i) and st["barrier"]:
+        return []  # AMDGPU brackets s_barrier with workgroup fences; barrier() already fences
     # AMDGPU block sizes / counts: loads at fixed offsets from llvm.amdgcn.implicitarg.ptr
     m = re.match(r"(%[\w.]+) = (?:tail )?call (?:noundef )?(?:align \d+ )?ptr addrspace\(4\) @llvm\.amdgcn\.implicitarg\.ptr\(\)", i)
     if m:
@@ -239,19 +264,32 @@ def translate_inst(i, decl, lbl, edge, st):
         if spv in SPV_CALLS:
             c = int(re.search(r"i32 (\d+)", args).group(1))
             return [f"{d(dst, ty)} = ({CTYPE[ty]}){SPV_CALLS[spv]}({c});"]
+        op = re.sub(r"^llvm\.|\.(?:[if]\d+)$", "", fn)
+        if op in MATH:
+            xs = [x.split() for x in split_top(args)]
+            xs = [val(x[-1], x[0]) for x in xs if x[0] != "i1"]  # (abs: drop the is_int_min_poison flag)
+            if op[0] == "u" or op == "abs":
+                u = UNSIGNED[ty]
+                xs = [f"({u}){x}" for x in xs] if op[0] == "u" else xs
+                return [f"{d(dst, ty)} = ({CTYPE[ty]}){MATH[op]}({', '.join(xs)});"]
+            return [f"{d(dst, ty)} = {MATH[op]}({', '.join(xs)});"]
         sys.exit(f"unsupported call: {i}")
-    m = re.match(r"(%[\w.]+) = getelementptr (?:inbounds |nuw |nusw )*(\w+), ptr(?: addrspace\(\d+\))? (%[\w.]+), (i\d+) (\S+)$", i)
+    m = re.match(r"(%[\w.]+) = getelementptr (?:inbounds |nuw |nusw )*(\w+), ptr(?: addrspace\((\d+)\))? ([%@][\w.$]+), (i\d+) (\S+)$", i)
     if m:
-        dst, ety, base, ity, idx = m.groups()
-        return [f"{d(dst, 'ptr')} = {val(base)} + ({val(idx, ity)}) * {SIZE[ety]};"]
-    m = re.match(r"(%[\w.]+) = load (?:volatile )?(\w+), ptr(?: addrspace\(\d+\))? (%[\w.]+)", i)
+        dst, ety, asp, base, ity, idx = m.groups()
+        return [f"{d(dst, space(asp) + ' uchar*')} = {val(base)} + ({val(idx, ity)}) * {SIZE[ety]};"]
+    m = re.match(r"(%[\w.]+) = load (?:volatile )?(\w+), ptr(?: addrspace\((\d+)\))? ([%@][\w.$]+)", i)
     if m:
-        dst, ty, p = m.groups()
-        return [f"{d(dst, ty)} = *(__global {CTYPE[ty]}*)({val(p)});"]
-    m = re.match(r"store (?:volatile )?(\w+) ([^,]+), ptr(?: addrspace\(\d+\))? (%[\w.]+)", i)
+        dst, ty, asp, p = m.groups()
+        return [f"{d(dst, ty)} = *({space(asp)} {CTYPE[ty]}*)({val(p)});"]
+    m = re.match(r"store (?:volatile )?(\w+) ([^,]+), ptr(?: addrspace\((\d+)\))? ([%@][\w.$]+)", i)
     if m:
-        ty, v, p = m.groups()
-        return [f"*(__global {CTYPE[ty]}*)({val(p)}) = {val(v, ty)};"]
+        ty, v, asp, p = m.groups()
+        return [f"*({space(asp)} {CTYPE[ty]}*)({val(p)}) = {val(v, ty)};"]
+    m = re.match(r"(%[\w.]+) = freeze (\w+) (\S+)$", i)
+    if m:
+        dst, ty, v = m.groups()
+        return [f"{d(dst, ty)} = {val(v, ty)};"]
     m = re.match(r"(%[\w.]+) = (\w+) (?:nuw |nsw |exact |disjoint |fast |nnan |ninf |contract |reassoc |afn |arcp )*(\w+) ([^,]+), (.+)$", i)
     if m and (m.group(2) in BINOP or m.group(2) in UBINOP or m.group(2) == "ashr"):
         dst, op, ty, a, b = m.groups()
@@ -276,7 +314,7 @@ def translate_inst(i, decl, lbl, edge, st):
     if m:
         dst, c, ty, a, b = m.groups()
         return [f"{d(dst, ty)} = {val(c)} ? {val(a, ty)} : {val(b, ty)};"]
-    m = re.match(r"(%[\w.]+) = (zext|sext|trunc|sitofp|uitofp|fptosi|fptoui|fpext|fptrunc|bitcast) (?:nneg )?(\w+) (\S+) to (\w+)$", i)
+    m = re.match(r"(%[\w.]+) = (zext|sext|trunc|sitofp|uitofp|fptosi|fptoui|fpext|fptrunc|bitcast)(?: nneg| nuw| nsw)* (\w+) (\S+) to (\w+)$", i)
     if m:
         dst, op, sty, v, dty = m.groups()
         if op == "zext" and sty in UNSIGNED:
@@ -306,7 +344,7 @@ def main():
     ap.add_argument("--local", type=int, default=64, help="workgroup size (sizes the __local shuffle buffer)")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
-    ir = pathlib.Path(a.ir).read_text()
+    ir = optimize(pathlib.Path(a.ir).read_text(), "none")
     kernel = a.kernel
     if kernel is None:
         defs = re.findall(r"^define\s+[^@]*?void\s+@\"?([\w.$]+)\"?\(", ir, re.M)

@@ -18,8 +18,12 @@ SPIR-V builtins. This tool rewrites one kernel function:
     (64-lane waves); correct whenever the hardware subgroup is a multiple of the warp size
   (host-IR kernels may call llvm.spv.thread.id etc. directly; those pass through)
 
-then sets the Vulkan triple, adds hlsl.shader="compute" + hlsl.numthreads, runs opt -O3 (Mojo's
---emit llvm is unoptimized IR) and llc.
+Mojo's --emit llvm is unoptimized IR, so the kernel first goes through a target-neutral opt -O3
+(--opt none: only the SROA / instcombine / simplifycfg cleanup that removes allocas and aggregates).
+Shared memory (addrspace(3) arrays) becomes Workgroup variables; barriers become OpControlBarrier.
+Logical addressing has no pointer arithmetic, so every pointer is tracked as (buffer or shared array,
+element index) through GEP chains. Then the Vulkan triple, hlsl.shader="compute" + hlsl.numthreads,
+and llc (without loop strength reduction, which would build pointer induction variables).
 
   mojo2vk.py kernel.ll --kernel vecadd --local 64 -o vecadd.spv
 """
@@ -101,24 +105,84 @@ def handle_suffix(elem):
 
 def narrow_i64(body):
     """Rewrite 64-bit integer arithmetic to 32 bits (for drivers without shaderInt64, e.g. the stock
-    Adreno Vulkan 1.1 driver). Valid while every index and length fits in int32."""
+    Adreno Vulkan 1.1 driver). Valid while every index and length fits in int32; constants outside
+    int32 (overflow guards such as INT64_MAX - 15) are clamped to its range."""
+    body = re.sub(r"\brange\([^)]*\)\s*", "", body)  # value-range hints would not survive the clamp
     body = re.sub(r"\bi64\b", "i32", body)
-    body = re.sub(r"(%[\w.]+) = (?:zext|sext|trunc) (?:nneg )?i32 (%[\w.]+|-?\d+) to i32", r"\1 = add i32 \2, 0", body)
-    return body
+    body = re.sub(r"(%[\w.]+) = (?:zext|sext|trunc)(?: nneg| nuw| nsw)* i32 (%[\w.]+|-?\d+) to i32", r"\1 = add i32 \2, 0", body)
+    clamp = lambda m: str(min(max(int(m.group(0)), -2**31), 2**31 - 1))  # noqa: E731
+    return re.sub(r"(?<![\w.%@$+-])-?\d{10,}(?![\w.])", clamp, body)
+
+
+def optimize(ir, level="O3"):
+    """opt on Mojo's unoptimized kernel IR, before retargeting. Even level "none" runs SROA +
+    instcombine + simplifycfg: they remove the allocas, Optional aggregates and lifetime markers that
+    iterators leave behind. The triple is dropped so that only target-independent rewrites happen
+    (Homebrew LLVM 22 also cannot parse Mojo's amdgpu9.0a triple)."""
+    passes = ["-passes=sroa,instcombine<no-verify-fixpoint>,simplifycfg"] if level == "none" else [f"-{level}"]
+    r = subprocess.run([str(LLVM / "opt"), *passes, "-S", "-o", "-"],
+                       input=re.sub(r"^target triple = .*$", "", ir, flags=re.M), capture_output=True, text=True)
+    if r.returncode:
+        sys.exit("opt failed:\n" + r.stderr)
+    return r.stdout
+
+
+def fix_barriers(spv, env):
+    """LLVM 22 lowers llvm.spv.group.memory.barrier.with.group.sync to OpControlBarrier with
+    SequentiallyConsistent semantics and no storage class, which Vulkan forbids. Use AcquireRelease |
+    UniformMemory | WorkgroupMemory (0x148): like NVPTX bar.sync, it orders shared and global memory."""
+    dis = subprocess.run(["spirv-dis", str(spv)], capture_output=True, text=True).stdout
+    if "OpControlBarrier" not in dis:
+        return
+    sem, out = "%barrier_semantics", []
+    for line in dis.splitlines():
+        line = re.sub(r"^(\s*OpControlBarrier %\S+ %\S+) %\S+\s*$", rf"\1 {sem}", line)
+        out.append(line)
+        if re.match(r"\s*%uint = OpTypeInt 32 0\s*$", line):
+            out.append(f"{sem} = OpConstant %uint 328")
+    r = subprocess.run(["spirv-as", "--target-env", env, "-o", str(spv), "-"], input="\n".join(out) + "\n",
+                       capture_output=True, text=True)
+    if r.returncode:
+        sys.exit("spirv-as (barrier fix) failed:\n" + r.stderr)
+
+
+def kernel_def(ir, kernel):
+    """(argument list, body) of `define ... void @kernel(...)`; argument attributes such as
+    captures(none) contain parentheses, so the argument list is matched by depth."""
+    m = re.search(r"^define\s+[^@\n]*?void\s+@\"?" + re.escape(kernel) + r"\"?\(", ir, re.M)
+    if not m:
+        sys.exit(f"kernel @{kernel} not found")
+    i, depth = m.end(), 1
+    while depth:
+        depth += {"(": 1, ")": -1}.get(ir[i], 0)
+        i += 1
+    return ir[m.end():i - 1], re.compile(r"\{\n(.*?)^\}", re.S | re.M).search(ir, i).group(1)
 
 
 def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
-    m = re.search(r"^define\s+(?:[\w\s]*?)void\s+@\"?" + re.escape(kernel) + r"\"?\((.*?)\)([^{]*)\{\n(.*?)^\}", ir, re.S | re.M)
-    if not m:
-        sys.exit(f"kernel @{kernel} not found")
+    arglist, body = kernel_def(ir, kernel)
     # numbered values/labels must count from %0 inside a function; ours lose their args and gain
     # a prologue, so give every numbered value and label a name
     num = lambda s: re.sub(r"%(\d+)\b", r"%v\1", s)  # noqa: E731
-    args = [num(a) for a in split_args(m.group(1))]
-    body = re.sub(r"^(\d+):", r"v\1:", num(m.group(3)), flags=re.M)
+    args = [num(a) for a in split_args(arglist)]
+    body = re.sub(r"^(\d+):", r"v\1:", num(body), flags=re.M)
     # the kernel's unlabeled entry block is implicitly numbered after its arguments (%0..%k-1 ->
     # block %k); phis name it, so the original body must start under that label
     entry = f"v{len(args)}" if all(re.search(r"%v\d+$", x) for x in args) else "body"
+    # shared memory: module-level addrspace(3) arrays -> Workgroup variables @shared.j
+    shared, gvars = {}, []
+    for j, (g, n, t, al) in enumerate(re.findall(
+            r"^(@[\w.$]+) = (?:internal |private |dso_local )*(?:unnamed_addr )?addrspace\(3\) global "
+            r"\[(\d+) x (\w+)\] (?:undef|poison|zeroinitializer)(?:, align (\d+))?", ir, re.M)):
+        if re.search(re.escape(g) + r"(?![\w.$])", body):
+            body = re.sub(re.escape(g) + r"(?![\w.$])", f"@shared.{j}", body)
+            shared[f"@shared.{j}"] = (int(n), "i32" if i32 and t == "i64" else t)
+            gvars.append(f"@shared.{j} = internal addrspace(3) global [{n} x {shared[f'@shared.{j}'][1]}] poison, align {al or 4}")
+    # barriers: NVPTX bar.sync / AMDGPU s_barrier (with its workgroup fences) -> one control barrier
+    barrier = r"call void @llvm\.(?:nvvm\.barrier0|nvvm\.barrier\.cta\.sync\.aligned\.all|nvvm\.barrier\.sync|amdgcn\.s\.barrier)\((?:i32 0)?\)"
+    if re.search(barrier, body):
+        body = re.sub(r"^\s*fence syncscope\(\"workgroup\"\) \w+\s*$\n?", "", body, flags=re.M)
+        body = re.sub(r"(?:tail )?" + barrier, "call void @llvm.spv.group.memory.barrier.with.group.sync()", body)
     if i32:
         body = narrow_i64(body)
         args = [re.sub(r"\bi64\b", "i32", x) for x in args]
@@ -130,13 +194,18 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
         else:
             scalar_args.append((a.split()[0], name))
 
-    # element type of each pointer arg: from typed GEPs / direct loads and stores
+    # element type of each pointer arg: from typed GEPs and loads / stores on it or on pointers derived from it
+    root = {p: p for p in ptr_args}
+    for _ in range(2):  # GEP chains may be defined out of text order across blocks
+        for res, base in re.findall(r"(%[\w.]+) = getelementptr [^,]*, ptr(?: addrspace\(\d+\))? (%[\w.]+),", body):
+            if base in root:
+                root[res] = root[base]
     elem = {}
     for p in ptr_args:
-        pe = re.escape(p)
-        t = re.findall(r"getelementptr (?:inbounds |nuw |nusw )*(\w+), ptr(?: addrspace\(\d+\))? " + pe + r",", body)
-        t += re.findall(r"load (\w+), ptr(?: addrspace\(\d+\))? " + pe + r"\b", body)
-        t += re.findall(r"store (\w+) [^,]+, ptr(?: addrspace\(\d+\))? " + pe + r"\b", body)
+        mine = "|".join(re.escape(q) for q, r in root.items() if r == p)
+        t = re.findall(r"getelementptr (?:inbounds |nuw |nusw )*(\w+), ptr(?: addrspace\(\d+\))? (?:" + mine + r"),", body)
+        t += re.findall(r"load (\w+), ptr(?: addrspace\(\d+\))? (?:" + mine + r")\b", body)
+        t += re.findall(r"store (\w+) [^,]+, ptr(?: addrspace\(\d+\))? (?:" + mine + r")\b", body)
         t = [x for x in t if x != "i8"] or t
         elem[p] = t[0] if t else "float"
 
@@ -193,17 +262,21 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
 
     out = []
     implicit, consts = {}, {}  # AMDGPU implicitarg pointers -> byte offset; folded loads -> constant
+    # logical addressing has no pointer arithmetic: every pointer into a buffer or a shared array is
+    # tracked as (buffer k or @shared.j, i32 element index or None for element 0)
+    ptrs = {p: (k, None) for k, p in enumerate(ptr_args)}
+    ptrs.update({g: (g, None) for g in shared})
     for line in body.splitlines():
         line = re.sub(r",\s*![\w.]+ !\d+", "", line)  # drop metadata attachments
         line = re.sub(r"\s+#\d+\s*$", "", line)          # drop attribute-group refs on calls
         if consts:
             line = re.sub(r"%[\w.]+(?![\w.])", lambda v: consts.get(v.group(0), v.group(0)), line)
             line = re.sub(r"^(\s*%[\w.]+) = (?:zext|sext) (?:nneg )?i\d+ (-?\d+) to (i\d+)\s*$", r"\1 = add \3 0, \2", line)
-        g = re.match(r"\s*(%[\w.]+) = getelementptr (?:inbounds |nuw |nusw )*(\w+), ptr(?: addrspace\(\d+\))? (%[\w.]+), (i64|i32) (%[\w.]+|-?\d+)\s*$", line)
-        if g and g.group(3) in ptr_args:
+        g = re.match(r"\s*(%[\w.]+) = getelementptr (?:inbounds |nuw |nusw )*(\w+), ptr(?: addrspace\(\d+\))? ([%@][\w.$]+), (i64|i32) (%[\w.]+|-?\d+)\s*$", line)
+        if g and g.group(3) in ptrs:
             res, gty, base, ity, idx = g.groups()
-            k = ptr_args.index(base)
-            e = elem[base]
+            k, bidx = ptrs[base]
+            e = shared[k][1] if k in shared else elem[ptr_args[k]]
             if gty == "i8" and e != "i8":  # byte offset -> element index
                 sh = SIZE[e].bit_length() - 1
                 if idx.lstrip("-").isdigit():
@@ -211,19 +284,27 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
                 else:
                     out.append(f"  {res}.ei = ashr exact {ity} {idx}, {sh}")
                     idx = f"{res}.ei"
+            elif gty != e and gty in SIZE and SIZE[gty] % SIZE[e] == 0:  # e.g. i64 steps over i32 elements
+                out.append(f"  {res}.ei = mul {ity} {idx}, {SIZE[gty] // SIZE[e]}")
+                idx = f"{res}.ei"
             elif gty != e:
-                sys.exit(f"unsupported GEP element type {gty} on {base} (buffer of {e})")
-            if ity == "i64":
-                if idx.lstrip("-").isdigit():
-                    i32 = idx
-                else:
-                    out.append(f"  {res}.i32 = trunc i64 {idx} to i32")
-                    i32 = f"{res}.i32"
+                sys.exit(f"unsupported GEP element type {gty} on {base} (elements of {e})")
+            if ity == "i64" and not idx.lstrip("-").isdigit():
+                out.append(f"  {res}.i32 = trunc i64 {idx} to i32")
+                idx = f"{res}.i32"
+            if bidx is not None:  # GEP chain: offsets add up
+                out.append(f"  {res}.ix = add i32 {bidx}, {idx}")
+                idx = f"{res}.ix"
+            ptrs[res] = (k, idx)
+            if k in shared:
+                out.append(f"  {res} = getelementptr inbounds [{shared[k][0]} x {e}], ptr addrspace(3) {k}, i32 0, i32 {idx}")
             else:
-                i32 = idx
-            out.append(f"  {res} = call ptr addrspace(11) @llvm.spv.resource.getpointer.p11.{handle_suffix(e)}({handle_type(e)} %h.{k}, i32 {i32})")
-            sb.add(res)
+                out.append(f"  {res} = call ptr addrspace(11) @llvm.spv.resource.getpointer.p11.{handle_suffix(e)}({handle_type(e)} %h.{k}, i32 {idx})")
+                sb.add(res)
             continue
+        if re.match(r"\s*%[\w.]+ = (?:phi|select)\b.*\bptr\b", line) and any(
+                re.search(re.escape(p) + r"(?![\w.$])", line) for p in ptrs):
+            sys.exit(f"unsupported pointer phi/select (logical addressing): {line.strip()}")
         r = re.match(r"\s*(%[\w.]+) = (?:tail )?call (?:noundef )?(?:range\([^)]*\) )?i32 @llvm\.nvvm\.read\.ptx\.sreg\.(tid|ctaid|nctaid|ntid)\.([xyz])\(\)", line)
         r = r or re.match(r"\s*(%[\w.]+) = (?:tail )?call (?:noundef )?(?:range\([^)]*\) )?i32 @llvm\.amdgcn\.(workitem|workgroup)\.id\.([xyz])\(\)", line)
         if r:
@@ -329,10 +410,14 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
         text = re.sub(r"ptr(?: addrspace\(\d+\))? " + re.escape(v) + r"\b", f"ptr addrspace(11) {v}", text)
     if re.search(r"\bcall\b(?!.*@llvm\.)", text):
         sys.exit("kernel still calls non-intrinsic functions (inline them first)")
-    # keep declarations of intrinsics the body still uses (e.g. llvm.spv.thread.id from host IR)
-    for d in re.findall(r"^declare .*@(llvm\.[\w.]+)\(.*$", ir, re.M):
-        if f"@{d}(" in text and not d.startswith(("llvm.nvvm", "llvm.amdgcn")):
-            decls.add(re.search(r"^declare .*@" + re.escape(d) + r"\(.*$", ir, re.M).group(0))
+    # keep declarations of intrinsics the body still uses (e.g. llvm.spv.thread.id from host IR, llvm.smin)
+    for d in re.findall(r"^declare .*@llvm\.[\w.]+\(.*$", ir, re.M):
+        d = narrow_i64(d) if i32 else d
+        f = re.search(r"@(llvm\.[\w.]+)\(", d).group(1)
+        if f"@{f}(" in text and not f.startswith(("llvm.nvvm", "llvm.amdgcn")):
+            decls.add(d)
+    if "@llvm.spv.group.memory.barrier.with.group.sync()" in text:
+        decls.add("declare void @llvm.spv.group.memory.barrier.with.group.sync()")
     decls = {re.sub(r"\s+#\d+\s*$", "", d) for d in decls}
     lx, ly, lz = local
     return "\n".join([
@@ -340,6 +425,7 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE):
         f'target triple = "{triple}"',
         "",
         *names,
+        *gvars,
         "",
         "define void @main() #0 {",
         "entry:",
@@ -366,7 +452,7 @@ def main():
     ap.add_argument("--vulkan", default="1.3", choices=["1.1", "1.3"],
                     help="1.3: SPIR-V 1.6 (Turnip); 1.1: SPIR-V 1.4 (stock driver, needs VK_KHR_spirv_1_4)")
     ap.add_argument("--opt", default="O3", choices=["O3", "O2", "O1", "none"],
-                    help="LLVM opt pipeline on the retargeted IR before llc (Mojo's --emit llvm is unoptimized)")
+                    help="LLVM opt pipeline on the kernel IR before retargeting (Mojo's --emit llvm is unoptimized)")
     a = ap.parse_args()
     local = [int(x) for x in a.local.split(",")] + [1, 1]
     ir = pathlib.Path(a.ir).read_text()
@@ -378,22 +464,17 @@ def main():
         kernel = defs[0]
     print(f"kernel: {kernel}")
     triple = TRIPLE if a.vulkan == "1.3" else "spirv-unknown-vulkan1.1-compute"
-    ll = retarget(ir, kernel, local[:3], i32=a.i32, triple=triple)
     out = pathlib.Path(a.out)
+    kir = optimize(ir, a.opt)
+    out.with_suffix(".kernel.ll").write_text(kir)
     src = out.with_suffix(".vk.ll")
-    src.write_text(ll)
-    if a.opt != "none":
-        opt = out.with_suffix(".vk.opt.ll")
-        r = subprocess.run([str(LLVM / "opt"), f"-{a.opt}", "-S", "-o", str(opt), str(src)], capture_output=True, text=True)
-        if r.returncode:
-            sys.exit("opt failed:\n" + r.stderr)
-        opt.write_text(legalize(opt.read_text()))
-        src = opt
-    r = subprocess.run([str(LLVM / "llc"), "-O2", "-filetype=obj", "-o", str(out), str(src)],
+    src.write_text(legalize(retarget(kir, kernel, local[:3], i32=a.i32, triple=triple)))
+    r = subprocess.run([str(LLVM / "llc"), "-O2", "-disable-lsr", "-filetype=obj", "-o", str(out), str(src)],
                        capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"llc failed{' (try --opt none)' if a.opt != 'none' else ''}:\n" + r.stderr)
     env = "vulkan1.3" if a.vulkan == "1.3" else "vulkan1.1spv1.4"
+    fix_barriers(out, env)
     r = subprocess.run(["spirv-val", "--target-env", env, str(out)], capture_output=True, text=True)
     print(f"{out}: {out.stat().st_size} bytes, spirv-val {'OK' if r.returncode == 0 else 'FAILED: ' + r.stderr.strip()}")
     sys.exit(r.returncode)
