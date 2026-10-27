@@ -16,7 +16,7 @@ summary: turnip=PASS  stock=PASS  opencl=PASS  cpu=PASS
 
 Write-up, code first: **[Running Mojo GPU Kernels on an Adreno Phone GPU](BLOG.md)**. Demo:
 **[Llama 3.2 1B generating text on the phone with Mojo kernels](llama/README.md)** (48 of 48 tokens
-identical to PyTorch; 3.6 tokens/s on Mesa Turnip, 0.72 on the stock driver). It is Part 3 of a
+identical to PyTorch; 3.5 tokens/s on both the stock driver and Mesa Turnip). It is Part 3 of a
 series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner) live in
 [adityaGoCT/iree-adreno-genai-tuner](https://github.com/adityaGoCT/iree-adreno-genai-tuner).
 
@@ -120,7 +120,10 @@ control (n = 1,000,003):
 | `gfx90a` | 1,000,000 mismatches (all three GPU backends) | **0** on turnip, stock, opencl |
 | `sm_80` | **0** on turnip, stock, opencl | 1,000,000 mismatches (all three) |
 
-Both are correct for the warp width they were compiled with. The NVIDIA flavour simply treats a
+Both are correct for the warp width they were compiled with. For workgroups of at most 64 threads
+the `gfx90a` warp sum is recognized as a whole and becomes one native `OpGroupNonUniformFAdd`: as six
+shuffles it made a GEMV 3.4x slower on the stock driver, whose fast xor shuffles are wrong after loops
+(see [`llama/README.md`](llama/README.md)). The NVIDIA flavour simply treats a
 64-lane subgroup as two 32-lane warps, so warp-level work covers half of it. Kernels that branch on
 the vendor (`is_nvidia_gpu()`, `is_amd_gpu()`) and use matrix-core or async-copy intrinsics are not
 retargetable either way.

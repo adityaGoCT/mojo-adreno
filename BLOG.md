@@ -21,7 +21,7 @@ Three lessons carried the most weight:
 
 The code is [this repo](README.md).
 
-*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM, and a [third](#update-october-25-third-register-tiling) adds register tiling: 66 GFLOP/s. A [fourth](#update-october-27-llama-32-1b-on-the-phone) runs Llama 3.2 1B on the phone with these kernels.
+*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM, and a [third](#update-october-25-third-register-tiling) adds register tiling: 66 GFLOP/s. A [fourth](#update-october-27-llama-32-1b-on-the-phone) runs Llama 3.2 1B on the phone with these kernels, at 3.5 tokens/s on both drivers.
 
 ## Why Mojo has no Adreno target
 
@@ -561,19 +561,31 @@ The kernels so far were benchmarks. [`llama/`](llama/README.md) puts them to wor
 MAX's graph compiler and runtime have no Android build and no SPIR-V output, so MAX cannot run a model on this phone by itself. The demo keeps Mojo and MAX's `gpu` module for the part that reaches the device, the kernels, and replaces the rest. Seven Mojo kernels cover decode: embedding, RMSNorm, fp16-weight GEMV (plain and with the residual add), RoPE with the KV-cache write, grouped-query attention, and SiLU-multiply. [`llama/llama_vk.c`](llama/llama_vk.c) is a small Vulkan program on the phone. It loads the fp16 weights, with the embedding split into 125 MB chunks because the stock driver binds at most 128 MB per buffer, and pre-records the 150 dispatches of one token. Then it runs the prompt and decodes greedily. [`llama/run.py`](llama/run.py) on the Mac exports the weights, runs PyTorch on the same fp16-rounded weights as the reference, builds, pushes, and compares:
 
 ```
-  prompt: 46 tokens in 62234 ms
+  prompt: 46 tokens in 11457 ms
 The sky appears blue because of a phenomenon called Rayleigh scattering, in which shorter wavelengths
 of light, such as blue and violet, are scattered more than longer wavelengths, like red and orange,
 by the tiny molecules of gases in the atmosphere.
-  decode: 47 tokens, 1392.0 ms/token (0.72 tokens/s)
+  decode: 47 tokens, 285.3 ms/token (3.50 tokens/s)
 
-logits after the prompt: max |phone - PyTorch| = 6.89e-05 (logit range -7.1 .. 27.0)
+logits after the prompt: max |phone - PyTorch| = 6.20e-05 (logit range -7.1 .. 27.0)
 tokens: phone 48, PyTorch 48, identical for the first 48
 ```
 
-That is the stock Qualcomm driver. On Mesa Turnip the same kernels decode at 276 ms per token (3.6 tokens/s), 57% of the DRAM bandwidth limit for reading 2.47 GB of weights per token. The stock driver runs the GEMVs at about a third of Turnip's speed. Packed 32-bit weight loads and four rows per workgroup both left it unchanged, so closing that gap is a tuning project of its own.
+That is the stock Qualcomm driver; Mesa Turnip runs at the same speed, 282 ms per token. Both are at 55% of the DRAM bandwidth limit for reading 2.47 GB of weights per token.
 
-Getting there surfaced four more problems in the pipeline:
+The stock driver did not start there. Its first run took 1,392 ms per token, with the GEMVs at a third of Turnip's speed, and packed 32-bit loads or four rows per workgroup changed nothing. The question was whether the driver or the route through LLVM IR was to blame, so I wrote the same GEMV in GLSL, compiled it with `glslc`, and swapped it in ([`llama/ab/`](llama/ab/)). Per dispatch of the 64 MB gate/up GEMV on the stock driver:
+
+| variant | ms | result |
+| --- | --- | --- |
+| Mojo route, warp sum as 6 generic subgroup shuffles | 46.5 | correct |
+| GLSL, 6 generic `subgroupShuffle` | 45.6 | correct |
+| GLSL, 6 `subgroupShuffleXor` | 14.6 | wrong |
+| GLSL, `subgroupAdd` | 13.7 | correct |
+| Mojo route, warp sum as one `OpGroupNonUniformFAdd` | 14.7 | correct |
+
+The route was to blame, and specifically one lowering. LLVM 22's SPIR-V backend has a single shuffle intrinsic, `llvm.spv.wave.readlane`, which becomes a generic `OpGroupNonUniformShuffle`, and Qualcomm's compiler runs generic shuffles slowly. The xor form is fast but wrong there, because the driver does not reconverge a subgroup after a loop and offers no extension that would make it. A native reduction is both fast and correct. So `mojo2vk.py` now recognizes Mojo's warp sum, the six butterfly steps of DPP moves and `ds.bpermute` hops each followed by an add, and emits one `llvm.spv.wave.reduce.sum` when the workgroup has at most 64 threads. Decode went from 1,392 to 285 ms per token, and all 48 kernel builds stay exact.
+
+Getting there surfaced four more problems in the pipeline, beyond the shuffle lowering:
 
 - **Float literals.** Mojo's LLVM prints `f0x3FB8AA3B` and `-1.000000e+30`, and LLVM 22 rejects both. `mojo2vk.py` now rewrites them, and maps Mojo's AMD `exp` and `rsqrt` intrinsics to portable ones.
 - **Narrowing to int32.** The stock path's int32 narrowing clamped a bit mask, `0x7FFFFFFE00` from Mojo's index arithmetic, to `INT32_MAX`. Attention then read the wrong KV-cache slots. Constants now wrap in bitwise and wrapping arithmetic, and are clamped only in compares, selects and min/max.

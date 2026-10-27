@@ -52,6 +52,11 @@ LANE = "llvm.spv.subgroup.local.invocation.id"
 
 def dpp_src(r, ctrl, lane):
     """IR computing the source lane of an AMDGPU DPP move -> (lines, src, in-row-valid flag or None)."""
+    perm = [(ctrl >> (2 * i)) & 3 for i in range(4)]
+    if ctrl <= 0xFF and all(perm[i] == i ^ perm[0] for i in range(4)):  # quad_perm that is lane ^ k
+        return [f"  {r}.src = xor i32 {lane}, {perm[0]}"], f"{r}.src", None
+    if ctrl == 0x128:  # row_ror:8 = lane ^ 8 within a 16-lane row
+        return [f"  {r}.src = xor i32 {lane}, 8"], f"{r}.src", None
     if ctrl <= 0xFF:  # quad_perm: lane reads (lane & ~3) | perm[lane & 3]
         return [f"  {r}.q = and i32 {lane}, 3", f"  {r}.qs = shl i32 {r}.q, 1", f"  {r}.qp = lshr i32 {ctrl}, {r}.qs",
                 f"  {r}.p = and i32 {r}.qp, 3", f"  {r}.qb = and i32 {lane}, -4", f"  {r}.src = or i32 {r}.qb, {r}.p"], f"{r}.src", None
@@ -159,10 +164,13 @@ def optimize(ir, level="O3"):
     return r.stdout
 
 
-def fix_barriers(spv, env):
-    """LLVM 22 lowers llvm.spv.group.memory.barrier.with.group.sync to OpControlBarrier with
-    SequentiallyConsistent semantics and no storage class, which Vulkan forbids. Use AcquireRelease |
-    UniformMemory | WorkgroupMemory (0x148): like NVPTX bar.sync, it orders shared and global memory."""
+def fix_spirv(spv, env):
+    """A rewrite LLVM 22 cannot express, done on the disassembly.
+    OpControlBarrier: llvm.spv.group.memory.barrier.with.group.sync gets SequentiallyConsistent
+      semantics and no storage class, which Vulkan forbids. Use AcquireRelease | UniformMemory |
+      WorkgroupMemory (0x148): like NVPTX bar.sync, it orders shared and global memory.
+    (No OpGroupNonUniformShuffleXor rewrite of xor-indexed shuffles: it is fast on Qualcomm's driver
+    but returns wrong values after loops and branches, which that driver does not reconverge.)"""
     dis = subprocess.run(["spirv-dis", str(spv)], capture_output=True, text=True).stdout
     if "OpControlBarrier" not in dis:
         return
@@ -175,7 +183,7 @@ def fix_barriers(spv, env):
     r = subprocess.run(["spirv-as", "--target-env", env, "-o", str(spv), "-"], input="\n".join(out) + "\n",
                        capture_output=True, text=True)
     if r.returncode:
-        sys.exit("spirv-as (barrier fix) failed:\n" + r.stderr)
+        sys.exit("spirv-as (SPIR-V fixes) failed:\n" + r.stderr)
 
 
 def kernel_def(ir, kernel):
@@ -303,6 +311,48 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
         decls.add(f"declare {ty} @llvm.spv.wave.readlane.{m}({ty}, i32)")
         return f"  {res} = call {ty} @llvm.spv.wave.readlane.{m}({ty} {val}, i32 {src})"
 
+    defs = dict(re.findall(r"^\s*(%[\w.]+) = (.*?)\s*$", body, re.M))
+
+    def butterfly(addr):
+        """Mojo's warp reductions call ds.bpermute(4 * select(..., lane ^ K, lane)) with lane from mbcnt:
+        a butterfly step, lane ^ K inside the 64-lane wave. -> K, or None for any other address."""
+        m = re.match(r"(?:shl (?:nuw )?(?:nsw )?i32 (%[\w.]+), 2|mul (?:nuw )?(?:nsw )?i32 (%[\w.]+), 4)$", defs.get(addr, ""))
+        m = m and re.match(r"select i1 %[\w.]+, i32 (%[\w.]+), i32 (%[\w.]+)$", defs.get(m.group(1) or m.group(2), ""))
+        x = m and re.match(r"xor i32 (%[\w.]+), (\d+)$", defs.get(m.group(1), ""))
+        if x and x.group(1) == m.group(2) and "@llvm.amdgcn.mbcnt.hi" in defs.get(m.group(2), "") and int(x.group(2)) < 64:
+            return int(x.group(2))
+        return None
+
+    # Mojo's warp.sum on gfx90a is a 64-lane butterfly: s' = s + shuffle(s) through DPP quad_perm 177,
+    # quad_perm 78, row_half_mirror, row_ror:8, then ds.bpermute to lane ^ 16 and lane ^ 32. As shuffles
+    # it is correct but 3.3x slower on Qualcomm's compiler (and the fast xor form is wrong there), so a
+    # workgroup of at most 64 threads, where a subgroup reduction is exactly the warp sum, gets one
+    # OpGroupNonUniformFAdd: llvm.spv.wave.reduce.sum on the first value, copies for the other steps.
+    drop, reduce_at = set(), {}
+    steps = {}  # fadd result -> (its input, the shuffle call, the bitcast of that call)
+    for res, a, b in re.findall(r"^\s*(%[\w.]+) = fadd (?:\w+ )*float (%[\w.]+), (%[\w.]+)\s*$", body, re.M):
+        cb = re.match(r"bitcast i32 (%[\w.]+) to float$", defs.get(b, ""))
+        call = cb and re.match(r"(?:tail )?call i32 @llvm\.amdgcn\.(update\.dpp\.i32\(i32 0, i32 (%[\w.]+), i32 (\d+), i32 15, i32 15, i1 true\)"
+                               r"|ds\.bpermute\(i32 (%[\w.]+), i32 (%[\w.]+)\))$", defs.get(cb.group(1), ""))
+        if call:
+            src = call.group(2) or call.group(5)
+            mask = int(call.group(3)) if call.group(3) else butterfly(call.group(4))
+            if re.match(rf"bitcast float {re.escape(a)} to i32$", defs.get(src, "")):
+                steps[res] = (a, cb.group(1), b, mask)
+    if local[0] * local[1] * local[2] <= 64:
+        for res, (a, _, _, mask) in steps.items():
+            chain, cur = [res], res
+            while len(chain) < 6:
+                nxt = [r for r, st in steps.items() if st[0] == cur]
+                if len(nxt) != 1:
+                    break
+                cur = nxt[0]
+                chain.append(cur)
+            if [steps[r][3] for r in chain] == [177, 78, 0x141, 0x128, 16, 32] and a not in steps:
+                reduce_at[chain[0]] = a  # the reduction; each later step copies the one before
+                reduce_at.update(zip(chain[1:], chain))
+                drop |= {steps[r][1] for r in chain} | {steps[r][2] for r in chain}
+
     out = []
     implicit, consts = {}, {}  # AMDGPU implicitarg pointers -> byte offset; folded loads -> constant
     # logical addressing has no pointer arithmetic: every pointer into a buffer or a shared array is
@@ -312,6 +362,16 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
     for line in body.splitlines():
         line = re.sub(r",\s*![\w.]+ !\d+", "", line)  # drop metadata attachments
         line = re.sub(r"\s+#\d+\s*$", "", line)          # drop attribute-group refs on calls
+        d = re.match(r"\s*(%[\w.]+) = ", line)
+        if d and d.group(1) in drop:  # a butterfly shuffle replaced by the subgroup reduction
+            continue
+        if d and d.group(1) in reduce_at:
+            first = reduce_at[d.group(1)] not in reduce_at
+            out.append(f"  {d.group(1)} = call float @llvm.spv.wave.reduce.sum.f32(float {reduce_at[d.group(1)]})" if first
+                       else f"  {d.group(1)} = fadd float {reduce_at[d.group(1)]}, -0.0")
+            if first:
+                decls.add("declare float @llvm.spv.wave.reduce.sum.f32(float)")
+            continue
         if consts:
             line = re.sub(r"%[\w.]+(?![\w.])", lambda v: consts.get(v.group(0), v.group(0)), line)
             line = re.sub(r"^(\s*%[\w.]+) = (?:zext|sext) (?:nneg )?i\d+ (-?\d+) to (i\d+)\s*$", r"\1 = add \3 0, \2", line)
@@ -395,7 +455,9 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
                 sys.exit(f"unsupported shfl (partial mask or segment width): {line.strip()}")
             L = f"{res}.lane"
             out.append(lane(res))
-            if mode == "bfly":
+            if mode == "bfly" and b.isdigit():
+                out.append(f"  {res}.src = xor i32 {L}, {int(b) & 31}")
+            elif mode == "bfly":
                 out += [f"  {res}.bm = and i32 {b}, 31", f"  {res}.src = xor i32 {L}, {res}.bm"]
             elif mode == "down":  # lanes past the segment end read their own value
                 out += [f"  {res}.seg = and i32 {L}, 31", f"  {res}.t = add i32 {res}.seg, {b}", f"  {res}.ok = icmp ule i32 {res}.t, 31",
@@ -423,6 +485,10 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
         r = re.match(r"\s*(%[\w.]+) = (?:tail )?call (?:noundef )?i32 @llvm\.amdgcn\.ds\.bpermute\(i32 ([^,]+), i32 ([^)]+)\)", line)
         if r:  # read the lane at byte address addr of this 64-lane wave
             res, addr, val = r.groups()
+            k = butterfly(addr)
+            if k is not None:  # lane ^ k: a cheaper index than the general form
+                out += [lane(res), f"  {res}.src = xor i32 {res}.lane, {k}", readlane(res, "i32", val, f"{res}.src")]
+                continue
             out += [lane(res), f"  {res}.base = and i32 {res}.lane, -64", f"  {res}.w = lshr i32 {addr}, 2",
                     f"  {res}.wi = and i32 {res}.w, 63", f"  {res}.src = or i32 {res}.base, {res}.wi", readlane(res, "i32", val, f"{res}.src")]
             continue
@@ -522,7 +588,7 @@ def main():
     if r.returncode:
         sys.exit(f"llc failed{' (try --opt none)' if a.opt != 'none' else ''}:\n" + r.stderr)
     env = "vulkan1.3" if a.vulkan == "1.3" else "vulkan1.1spv1.4"
-    fix_barriers(out, env)
+    fix_spirv(out, env)
     r = subprocess.run(["spirv-val", "--target-env", env, str(out)], capture_output=True, text=True)
     print(f"{out}: {out.stat().st_size} bytes, spirv-val {'OK' if r.returncode == 0 else 'FAILED: ' + r.stderr.strip()}")
     sys.exit(r.returncode)

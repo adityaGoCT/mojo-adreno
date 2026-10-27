@@ -7,19 +7,19 @@ compiled through this repo's Mojo → SPIR-V pipeline; a small C program schedul
 ```
 $ PY=../iree-adreno-genai-tuner/.venv-iree312/bin/python
 $ $PY llama/run.py --model ~/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/<rev>
-prompt: 46 tokens; model loaded and exported in 4 s
-reference (PyTorch fp32 on the Mac CPU): 48 tokens in 3.8 s
+prompt: 46 tokens; model loaded and exported in 5 s
+reference (PyTorch fp32 on the Mac CPU): 48 tokens in 4.0 s
 phone (stock):
   device: Adreno (TM) 710  Vulkan 1.1
-  weights: 103 tensors, 2.47 GB in 3.2 s
+  weights: 103 tensors, 2.47 GB in 2.5 s
   plan: 150 dispatches per token
-  prompt: 46 tokens in 62234 ms
+  prompt: 46 tokens in 11457 ms
 The sky appears blue because of a phenomenon called Rayleigh scattering, in which shorter wavelengths
 of light, such as blue and violet, are scattered more than longer wavelengths, like red and orange,
 by the tiny molecules of gases in the atmosphere.
-  decode: 47 tokens, 1392.0 ms/token (0.72 tokens/s)
+  decode: 47 tokens, 285.3 ms/token (3.50 tokens/s)
 
-logits after the prompt: max |phone - PyTorch| = 6.89e-05 (logit range -7.1 .. 27.0)
+logits after the prompt: max |phone - PyTorch| = 6.20e-05 (logit range -7.1 .. 27.0)
 tokens: phone 48, PyTorch 48, identical for the first 48
 ```
 
@@ -67,24 +67,47 @@ Prompt "Explain in two sentences why the sky is blue." (46 tokens with the Llama
 
 | backend | prompt (46 tokens) | decode | tokens identical to PyTorch | max logit difference |
 |---|---|---|---|---|
-| stock (Qualcomm Vulkan 1.1) | 62.2 s | 1392 ms/token (0.72 tokens/s) | 48 of 48 | 6.9e-5 |
-| turnip (Mesa) | 11.2 s | 276 ms/token (3.63 tokens/s) | 48 of 48 | 6.9e-5 |
+| stock (Qualcomm Vulkan 1.1) | 11.5 s | 283-285 ms/token (3.5 tokens/s) | 48 of 48 | 6.2e-5 |
+| turnip (Mesa) | 11.4 s | 282 ms/token (3.55 tokens/s) | 48 of 48 | 6.2e-5 |
 
 Decode reads all 2.47 GB of weights per token; at the 15.8 GB/s measured in Part 2 the floor is
-156 ms/token, so Turnip runs at 57% of the bandwidth limit. One token, one dispatch per submit
+156 ms/token, so both drivers run at 55% of the bandwidth limit. One token, one dispatch per submit
 (`LLAMA_DEBUG=1`, which adds about 0.4 ms of submit overhead to each):
 
-| kernel | count | stock | turnip |
-|---|---|---|---|
-| `gemv` gate/up (16384 x 2048) | 16 | 46.3 ms each (1.4 GB/s) | 14.2 ms each (4.7 GB/s) |
-| `gemv` lm_head chunk (32064 x 2048) | 4 | 82.9 ms each | 26.9 ms each |
-| `gemv_add` o/down | 32 | 7.7 ms each | 4.9 ms each |
-| `gemv` q/k/v (3072 x 2048) | 16 | 10.5 ms each | 2.9 ms each |
-| everything else | 82 | 42 ms in all | 42 ms in all |
+| kernel | count | stock, warp sum as shuffles | stock now | turnip now |
+|---|---|---|---|---|
+| `gemv` gate/up (16384 x 2048) | 16 | 46.5 ms each | 14.7 ms each | 14.5 ms each |
+| `gemv` lm_head chunk (32064 x 2048) | 4 | 83.7 ms each | 27.0 ms each | 27.1 ms each |
+| `gemv_add` o/down | 32 | 7.6 ms each | 4.9 ms each | 4.9 ms each |
+| `gemv` q/k/v (3072 x 2048) | 16 | 10.1 ms each | 3.0 ms each | 3.0 ms each |
 
-The stock driver runs the GEMVs at about a third of Turnip's speed. Two experiments ruled out the
-obvious causes: reading the weights as packed 32-bit words (two halves per load) and putting four
-rows in a 256-thread workgroup both left it unchanged.
+### A/B against GLSL: what the route through LLVM IR cost
+
+The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the
+Mojo -> LLVM -> SPIR-V route or the driver was to blame, the same GEMV was written in GLSL
+([`ab/`](ab/): same bindings, same 64 threads per row, same loads) and compiled with the NDK's
+`glslc`. Gate/up GEMV on the stock driver, ms per dispatch:
+
+| variant | ms | result |
+|---|---|---|
+| Mojo route, warp sum as 6 generic subgroup shuffles (`llvm.spv.wave.readlane`) | 46.5 | correct |
+| GLSL, 6 generic `subgroupShuffle` (`ab/gemv_shuf.comp`) | 45.6 | correct |
+| GLSL, 6 `subgroupShuffleXor` (`ab/gemv_xor.comp`) | 14.6 | **wrong** |
+| GLSL, `subgroupAdd` (`ab/gemv.comp`) | 13.7 | correct |
+| Mojo route, warp sum as one `OpGroupNonUniformFAdd` (now) | 14.7 | correct |
+
+Qualcomm's compiler runs generic subgroup shuffles slowly, and LLVM 22's SPIR-V backend has no other
+kind (`llvm.spv.wave.readlane`). The xor form is fast but wrong there: the driver does not reconverge
+a subgroup after the loop, and offers neither `VK_KHR_shader_subgroup_uniform_control_flow` nor
+`VK_KHR_shader_maximal_reconvergence`. A native reduction is fast and right, so `mojo2vk.py` now
+recognizes Mojo's warp sum (on gfx90a: 4 DPP moves and 2 `ds.bpermute` hops, each followed by an add)
+and emits one `llvm.spv.wave.reduce.sum` for workgroups of at most 64 threads. On Turnip both routes
+were already equal (14.1 ms Mojo, 14.5 ms GLSL). The SPIR-V shrank from 279 to 199 instructions
+(GLSL: 114).
+
+To repeat the A/B: compile `ab/*.comp` with `glslc -O --target-env=vulkan1.1`, copy the stock kernel
+directory on the phone, replace `gemv.spv` (and `gemv_add.spv`), and run `llama_vk` on it with
+`LLAMA_DEBUG=1`.
 
 ## What it took
 
@@ -96,6 +119,7 @@ rows in a 256-thread workgroup both left it unchanged.
 | `if / elif / elif` in `rope_kv`: invalid structured control flow from LLVM 22 | one `if / else` over exactly 1280 threads |
 | attention hung on the stock driver (device lost after 4-12 s) | every thread runs the same number of loop iterations |
 | then attention was 64x off on the stock driver: shuffles after the masked loop read inactive lanes | shared-memory reductions with barriers (Vulkan does not promise reconvergence) |
+| stock-driver GEMVs 3.4x slower than the same GLSL: generic subgroup shuffles are slow there, the xor form is wrong | Mojo's warp sum becomes one native subgroup reduction |
 | `out` is a Mojo keyword | parameters renamed |
 
 ## Reproduce
@@ -116,4 +140,4 @@ to `build/llama/` and the phone copy to `/data/local/tmp/llama/<model>`.
 ## Limits
 
 Batch 1, greedy only, 512 positions, fp16 weights (2.47 GB on the phone), the prompt processed
-token by token, the tokenizer on the Mac. The stock driver's GEMVs are about 3x slower than Turnip's.
+token by token, the tokenizer on the Mac.

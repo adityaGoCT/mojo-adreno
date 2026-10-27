@@ -1,7 +1,7 @@
 # y[r] += sum_c W[r, c] x[c] (the residual add) for fp16 W (rows x cols, row-major), fp32 x and y. One 64-thread workgroup (one 64-lane warp
 # on gfx90a) per row, then a warp sum. Per load instruction the 64 threads read 64 consecutive weights
-# (128 contiguous bytes): Qualcomm's compiler does not merge a thread's consecutive 16-bit loads, so
-# 4 consecutive weights per thread wasted most of each transaction (3.3x slower on the stock driver).
+# (128 contiguous bytes). mojo2vk.py turns warp_sum into one native subgroup reduction: as subgroup
+# shuffles it ran 3.4x slower on Qualcomm's Vulkan driver (llama/ab, llama/README.md).
 from max.gpu import block_idx, thread_idx
 from max.gpu.host import DeviceContext
 from max.gpu.primitives.warp import sum as warp_sum
