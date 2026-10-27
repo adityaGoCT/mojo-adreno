@@ -52,7 +52,9 @@ CALLS = {
 IMPLICITARG = {0: ("get_num_groups", 0), 4: ("get_num_groups", 1), 8: ("get_num_groups", 2),
                12: ("get_local_size", 0), 14: ("get_local_size", 1), 16: ("get_local_size", 2)}
 MATH = {"smin": "min", "smax": "max", "umin": "min", "umax": "max", "minnum": "fmin", "maxnum": "fmax",
-        "fabs": "fabs", "sqrt": "sqrt", "fma": "fma", "fmuladd": "fma", "abs": "abs"}
+        "fabs": "fabs", "sqrt": "sqrt", "fma": "fma", "fmuladd": "fma", "abs": "abs", "exp2": "exp2",
+        "amdgcn.exp2": "exp2", "amdgcn.rsq": "rsqrt", "nvvm.sqrt.approx.ftz.f": "sqrt", "nvvm.sqrt.approx.f": "sqrt",
+        "nvvm.rsqrt.approx.ftz.f": "rsqrt", "nvvm.rsqrt.approx.f": "rsqrt"}
 BARRIER = r"(?:tail )?call void @llvm\.(?:nvvm\.barrier0|nvvm\.barrier\.cta\.sync\.aligned\.all|nvvm\.barrier\.sync|amdgcn\.s\.barrier)\((?:i32 0)?\)"
 LOCAL = {}  # shared-memory global -> C expression for its first byte
 SPV_CALLS = {"llvm.spv.thread.id": "get_global_id", "llvm.spv.thread.id.in.group": "get_local_id",
@@ -92,6 +94,8 @@ def val(v, ty=None):
     if ty == "float" and re.fullmatch(r"0x[0-9A-Fa-f]{16}", v):  # LLVM hex double for a float const
         import struct
         return repr(struct.unpack(">d", bytes.fromhex(v[2:]))[0]) + "f"
+    if re.fullmatch(r"0xH[0-9A-Fa-f]{4}", v):  # half constant (bits)
+        return f"as_half((ushort)0x{v[3:]})"
     if ty in ("float", "half") and re.fullmatch(r"-?\d+\.\d*e?[+-]?\d*", v):
         return v + "f"
     if ty == "i64" and re.fullmatch(r"-?\d+", v):

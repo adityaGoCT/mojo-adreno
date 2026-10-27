@@ -32,6 +32,7 @@ import argparse
 import os
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 
@@ -105,13 +106,41 @@ def handle_suffix(elem):
 
 def narrow_i64(body):
     """Rewrite 64-bit integer arithmetic to 32 bits (for drivers without shaderInt64, e.g. the stock
-    Adreno Vulkan 1.1 driver). Valid while every index and length fits in int32; constants outside
-    int32 (overflow guards such as INT64_MAX - 15) are clamped to its range."""
-    body = re.sub(r"\brange\([^)]*\)\s*", "", body)  # value-range hints would not survive the clamp
+    Adreno Vulkan 1.1 driver). Valid while every index and length fits in int32. Constants outside
+    int32 wrap (two's complement) in bitwise and wrapping arithmetic, where a mask such as 0x7FFFFFFE00
+    must keep its low bits, and are clamped elsewhere (overflow guards such as INT64_MAX - 63 in
+    compares, selects, min/max); ashr shift amounts are capped at 31 (sign extraction)."""
+    body = re.sub(r"\brange\([^)]*\)\s*", "", body)  # value-range hints would not survive the rewrite
     body = re.sub(r"\bi64\b", "i32", body)
     body = re.sub(r"(%[\w.]+) = (?:zext|sext|trunc)(?: nneg| nuw| nsw)* i32 (%[\w.]+|-?\d+) to i32", r"\1 = add i32 \2, 0", body)
-    clamp = lambda m: str(min(max(int(m.group(0)), -2**31), 2**31 - 1))  # noqa: E731
-    return re.sub(r"(?<![\w.%@$+-])-?\d{10,}(?![\w.])", clamp, body)
+
+    def line(t):
+        op = re.match(r"\s*%[\w.]+ = (\w+)", t)
+        wrap = op and op.group(1) in ("and", "or", "xor", "add", "sub", "mul", "shl")
+        fix = (lambda v: (v + 2**31) % 2**32 - 2**31) if wrap else (lambda v: min(max(v, -2**31), 2**31 - 1))
+        t = re.sub(r"(?<![\w.%@$+-])-?\d{10,}(?![\w.])", lambda m: str(fix(int(m.group(0)))), t)
+        return re.sub(r"(= ashr (?:exact )?i32 [^,]+, )(3[2-9]|[4-6]\d)$", r"\g<1>31", t)
+    return "\n".join(line(t) for t in body.split("\n"))
+
+
+def legacy_floats(ir):
+    """Mojo's LLVM prints exact-bits float literals (f0x3FB8AA3B) and shortest decimals (-1.000000e+30);
+    LLVM 22 reads a float as the hex of the double with the same value (a half as 0xH..., a bfloat as
+    0xR...) and rejects decimals that are not exact in the type. Decimals are taken as float32 (these
+    kernels have no doubles)."""
+    def conv(m):
+        h = m.group(1)
+        if len(h) == 8:
+            return "0x%016X" % struct.unpack(">Q", struct.pack(">d", struct.unpack(">f", bytes.fromhex(h))[0]))[0]
+        if len(h) == 4:
+            return ("0xR" if "bfloat" in m.string[max(0, m.start() - 200):m.start()].split("\n")[-1] else "0xH") + h
+        return "0x" + h
+    def inexact(m):  # decimals LLVM 22 rejects for float (not exact in float32): use float32's value
+        v = float(m.group(0))
+        f = struct.unpack(">f", struct.pack(">f", v))[0]
+        return m.group(0) if f == v else "0x%016X" % struct.unpack(">Q", struct.pack(">d", f))[0]
+    ir = re.sub(r"(?<![\w.])-?\d+\.\d+e[+-]\d+(?![\w.])", inexact, ir)
+    return re.sub(r"\bf0x([0-9A-Fa-f]+)\b", conv, ir)
 
 
 def optimize(ir, level="O3"):
@@ -124,7 +153,7 @@ def optimize(ir, level="O3"):
     passes = (["-passes=sroa,instcombine<no-verify-fixpoint>,simplifycfg"] if level == "none"
               else [f"-{level}", "-vectorize-slp=false", "-vectorize-loops=false"])
     r = subprocess.run([str(LLVM / "opt"), *passes, "-S", "-o", "-"],
-                       input=re.sub(r"^target triple = .*$", "", ir, flags=re.M), capture_output=True, text=True)
+                       input=legacy_floats(re.sub(r"^target triple = .*$", "", ir, flags=re.M)), capture_output=True, text=True)
     if r.returncode:
         sys.exit("opt failed:\n" + r.stderr)
     return r.stdout
@@ -187,6 +216,13 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
             shared[f"@shared.{j}"] = (size, shared[f"@shared.{j}"][1])
     # barriers: NVPTX bar.sync / AMDGPU s_barrier (with its workgroup fences) -> one control barrier
     barrier = r"call void @llvm\.(?:nvvm\.barrier0|nvvm\.barrier\.cta\.sync\.aligned\.all|nvvm\.barrier\.sync|amdgcn\.s\.barrier)\((?:i32 0)?\)"
+    # target math intrinsics -> portable ones (AMDGPU exp2 / rsq; NVPTX sqrt / rsqrt approximations)
+    body = re.sub(r"(%[\w.]+) = (?:tail )?call (?:\w+ )*float @llvm\.(?:amdgcn\.exp2\.f32|nvvm\.ex2\.approx(?:\.ftz)?\.f)\(float ([^)]+)\)",
+                  r"\1 = call float @llvm.exp2.f32(float \2)", body)
+    body = re.sub(r"(%[\w.]+) = (?:tail )?call (?:\w+ )*float @llvm\.nvvm\.sqrt\.approx(?:\.ftz)?\.f\(float ([^)]+)\)",
+                  r"\1 = call float @llvm.sqrt.f32(float \2)", body)
+    body = re.sub(r"(%[\w.]+) = (?:tail )?call (?:\w+ )*float @llvm\.(?:amdgcn\.rsq\.f32|nvvm\.rsqrt\.approx(?:\.ftz)?\.f)\(float ([^)]+)\)",
+                  r"\1.s = call float @llvm.sqrt.f32(float \2)\n  \1 = fdiv float 1.0, \1.s", body)
     if re.search(barrier, body):
         body = re.sub(r"^\s*fence syncscope\(\"workgroup\"\) \w+\s*$\n?", "", body, flags=re.M)
         body = re.sub(r"(?:tail )?" + barrier, "call void @llvm.spv.group.memory.barrier.with.group.sync()", body)
@@ -423,6 +459,9 @@ def retarget(ir, kernel, local, i32=False, triple=TRIPLE, pad_shared=False):
         f = re.search(r"@(llvm\.[\w.]+)\(", d).group(1)
         if f"@{f}(" in text and not f.startswith(("llvm.nvvm", "llvm.amdgcn")):
             decls.add(d)
+    for f in ("exp2", "sqrt"):
+        if f"@llvm.{f}.f32(" in text:
+            decls.add(f"declare float @llvm.{f}.f32(float)")
     if "@llvm.spv.group.memory.barrier.with.group.sync()" in text:
         decls.add("declare void @llvm.spv.group.memory.barrier.with.group.sync()")
     decls = {re.sub(r"\s+#\d+\s*$", "", d) for d in decls}

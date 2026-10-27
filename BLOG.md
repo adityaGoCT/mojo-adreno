@@ -21,7 +21,7 @@ Three lessons carried the most weight:
 
 The code is [this repo](README.md).
 
-*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM, and a [third](#update-october-25-third-register-tiling) adds register tiling: 66 GFLOP/s.
+*Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM, and a [third](#update-october-25-third-register-tiling) adds register tiling: 66 GFLOP/s. A [fourth](#update-october-27-llama-32-1b-on-the-phone) runs Llama 3.2 1B on the phone with these kernels.
 
 ## Why Mojo has no Adreno target
 
@@ -553,6 +553,32 @@ Against the earlier fp32 kernels:
 | opencl | 409 ms | 396 ms | 67.0 ms (32 GFLOP/s) |
 
 That is 4.5 to 7.2x over the tiled kernel. `--int32` no longer matters, because the index math is spread over 64 FMAs. 66 GFLOP/s is still only 18% of the 368 GFLOP/s fp32 peak from Part 2. The rest is the same ground Part 2 covered for fp16: vectorized global loads, double buffering, `half2` math, and a tuner that picks the constants per driver.
+
+## Update, October 27: Llama 3.2 1B on the phone
+
+The kernels so far were benchmarks. [`llama/`](llama/README.md) puts them to work: Meta's Llama-3.2-1B-Instruct generating text on the Adreno 710, with every GPU kernel written in Mojo and compiled through this pipeline.
+
+MAX's graph compiler and runtime have no Android build and no SPIR-V output, so MAX cannot run a model on this phone by itself. The demo keeps Mojo and MAX's `gpu` module for the part that reaches the device, the kernels, and replaces the rest. Seven Mojo kernels cover decode: embedding, RMSNorm, fp16-weight GEMV (plain and with the residual add), RoPE with the KV-cache write, grouped-query attention, and SiLU-multiply. [`llama/llama_vk.c`](llama/llama_vk.c) is a small Vulkan program on the phone. It loads the fp16 weights, with the embedding split into 125 MB chunks because the stock driver binds at most 128 MB per buffer, and pre-records the 150 dispatches of one token. Then it runs the prompt and decodes greedily. [`llama/run.py`](llama/run.py) on the Mac exports the weights, runs PyTorch on the same fp16-rounded weights as the reference, builds, pushes, and compares:
+
+```
+  prompt: 46 tokens in 62234 ms
+The sky appears blue because of a phenomenon called Rayleigh scattering, in which shorter wavelengths
+of light, such as blue and violet, are scattered more than longer wavelengths, like red and orange,
+by the tiny molecules of gases in the atmosphere.
+  decode: 47 tokens, 1392.0 ms/token (0.72 tokens/s)
+
+logits after the prompt: max |phone - PyTorch| = 6.89e-05 (logit range -7.1 .. 27.0)
+tokens: phone 48, PyTorch 48, identical for the first 48
+```
+
+That is the stock Qualcomm driver. On Mesa Turnip the same kernels decode at 276 ms per token (3.6 tokens/s), 57% of the DRAM bandwidth limit for reading 2.47 GB of weights per token. The stock driver runs the GEMVs at about a third of Turnip's speed. Packed 32-bit weight loads and four rows per workgroup both left it unchanged, so closing that gap is a tuning project of its own.
+
+Getting there surfaced four more problems in the pipeline:
+
+- **Float literals.** Mojo's LLVM prints `f0x3FB8AA3B` and `-1.000000e+30`, and LLVM 22 rejects both. `mojo2vk.py` now rewrites them, and maps Mojo's AMD `exp` and `rsqrt` intrinsics to portable ones.
+- **Narrowing to int32.** The stock path's int32 narrowing clamped a bit mask, `0x7FFFFFFE00` from Mojo's index arithmetic, to `INT32_MAX`. Attention then read the wrong KV-cache slots. Constants now wrap in bitwise and wrapping arithmetic, and are clamped only in compares, selects and min/max.
+- **Reconvergence.** On the stock driver attention first hung: the GPU was declared lost after 4 to 12 s. The threads ran different numbers of score-loop iterations right before the warp shuffles. With the same trip count for every thread it no longer hung, but came out exactly 64 times too small. The shuffles read inactive lanes and returned each lane's own value, and six doublings make 64. Vulkan does not promise that a subgroup reconverges after divergent control flow, so attention now reduces through shared memory with barriers.
+- **Structured control flow.** An `if / elif / elif` whose branches share one exit produced invalid structured control flow from LLVM 22. `rope_kv` became a single `if / else`.
 
 ## What did not work
 

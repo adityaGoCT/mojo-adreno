@@ -14,7 +14,9 @@ $ python3 mojo_adreno.py src/vecadd_gpu.mojo
 summary: turnip=PASS  stock=PASS  opencl=PASS  cpu=PASS
 ```
 
-Write-up, code first: **[Running Mojo GPU Kernels on an Adreno Phone GPU](BLOG.md)**. It is Part 3 of a
+Write-up, code first: **[Running Mojo GPU Kernels on an Adreno Phone GPU](BLOG.md)**. Demo:
+**[Llama 3.2 1B generating text on the phone with Mojo kernels](llama/README.md)** (48 of 48 tokens
+identical to PyTorch; 3.6 tokens/s on Mesa Turnip, 0.72 on the stock driver). It is Part 3 of a
 series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner) live in
 [adityaGoCT/iree-adreno-genai-tuner](https://github.com/adityaGoCT/iree-adreno-genai-tuner).
 
