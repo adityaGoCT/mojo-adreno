@@ -1,0 +1,36 @@
+<section id="coopmat" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Matrix hardware: KHR cooperative matrices</h2>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.5;color:#DDE5F0;background:#172338;border-radius:14px;padding:28px 32px">acc = CoopMatrix[DType.float32, 16, 16, ACCUMULATOR].zero()<br>for k in range(0, K, 16):<br>&nbsp;&nbsp;&nbsp;&nbsp;a_tile = CoopMatrix[DType.float16, 16, 16, MATRIX_A].load(a + row * K + k, K)<br>&nbsp;&nbsp;&nbsp;&nbsp;b_tile = CoopMatrix[DType.float16, 16, 16, MATRIX_B].load(b + k * N + col, N)<br>&nbsp;&nbsp;&nbsp;&nbsp;acc = a_tile.multiply_add(b_tile, acc)<br>acc.cast[DType.float16]().store(c + row * N + col, N)&nbsp;&nbsp;<span style="color:#9DB7E0"># --target-accelerator adreno840</span></p>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Mojo</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">each operation is a marker call; the matrix travels as a handle</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Kernel ABI pass</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">buffer and index for each load and store; handles typed through the K loop</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">LLVM, patched</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">OpCooperativeMatrix*KHR in a shader, with the Vulkan memory model</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#7FA8F0">26/26</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">MAX test graphs compile for adreno840; fp16 matmuls use matrices</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#7FA8F0">213/213</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">kernels pass spirv-val for Vulkan 1.3</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#F08A3C">Not run</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">the Adreno 710’s drivers do not expose VK_KHR_cooperative_matrix</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 23 · max.gpu.compute.arch.mma_spirv · matmul/gpu/adreno in MAX’s kernels · compile-only</p>
+<aside>The Adreno 710 has no matrix units, but newer Adrenos do, and Vulkan reaches them through one extension: cooperative matrices. A cooperative matrix is a tile, here 16 by 16, that a whole subgroup loads, multiplies and stores together, while the driver decides which thread holds which element. We added a second target, adreno840, whose kernels can use them. In Mojo it is a small type, CoopMatrix: zero, load, multiply-add, cast and store, and the loop on the slide is a complete matrix multiply. Each operation is a call to a marker function that passes the matrix as an opaque handle. Our kernel pass already knew which buffer and element every pointer reaches, so it also rewrites the markers into the SPIR-V instructions, giving each handle its matrix type, including the accumulator that the K loop carries. LLVM’s SPIR-V backend knew these instructions, but only for OpenCL, so a 14-line patch lets Vulkan shaders use them. MAX’s matmul now takes a matrix kernel for fp16 shapes in multiples of 16 on that target, one subgroup per tile, accumulating in fp32. Compiled for that target, all 26 of our MAX test graphs build, one of them a new transposed half-precision matmul, every one of their 213 kernels passes the SPIR-V validator, and both half-precision matmuls take the matrix kernel. Nothing of it has run yet: neither driver on our Adreno 710 offers the extension, so the next step is a phone with an Adreno 8xx.</aside>
+</section>

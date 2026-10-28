@@ -26,7 +26,7 @@ Since Mojo's compiler went open source (August 2026), there is a second route: a
 compiles the same kernels and Llama straight to Vulkan SPIR-V, with no retargeter. See
 [Native SPIR-V target](#native-spir-v-target).
 
-Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (25 slides,
+Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (26 slides,
 PDF), the whole experiment from the retargeter to the native target and a compile-only test of MAX
 graphs. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (slides with speaker
 notes, in the browser), or as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html)
@@ -335,7 +335,7 @@ launches over `adb forward` to `vk_server.c`, a Vulkan executor on the phone. At
 the kernel's launch description to turn MAX's CUDA-style arguments (a pointer to each argument's
 bytes) into bindings at the allocation and offset each pointer points into, and params slots.
 
-All 25 graphs of the compile test run this way and match NumPy, or the same graph on MAX's CPU
+The 25 original graphs of the compile test all run this way and match NumPy, or the same graph on MAX's CPU
 device: the elementwise ops, cast, transpose, slice, concat, gather, the reductions, argmax,
 softmax, layer_norm, three matmuls, conv2d, both pools, and ResNet-18 (max error 5.7e-5 against
 the CPU, 8.3 s per image once the weights are on the phone).
@@ -363,6 +363,34 @@ MODULAR_DRIVER_PLUGINS="cpu@$PWD/bazel-bin/Target/CPUPlugin.so;vulkan@$HOME/runi
 `VK_REMOTE_PROFILE=1` prints the plugin's requests and waits, `VK_SERVER_PROFILE=1` (to
 `start_server.sh`) the server's batches, and `=2` times each launch on its own. Running MAX on the
 phone itself would need an Android build of its runtime.
+
+### Cooperative matrices (Adreno 8xx), compile-only
+
+The fork also has an `adreno840` target whose kernels can use KHR cooperative matrices
+(`SPV_KHR_cooperative_matrix`): 16x16 tiles that a subgroup loads, multiply-adds and stores
+together, which a driver with `VK_KHR_cooperative_matrix` runs on the GPU's matrix hardware. Mojo
+code uses `CoopMatrix` from `max.gpu.compute.arch.mma_spirv`; the compiler turns its operations into
+`OpCooperativeMatrixLoadKHR`, `OpCooperativeMatrixMulAddKHR`, `OpCooperativeMatrixStoreKHR` and
+`OpFConvert`, and MAX's matmul uses them for fp16 shapes that are multiples of 16
+(`max/kernels/src/linalg/matmul/gpu/adreno/` in the fork).
+
+`coopmat/matmul_coopmat_gpu.mojo` has two such kernels (fp32 output; B transposed with fp16
+output), and `coopmat/check.sh` compiles them for `adreno840` and validates the SPIR-V:
+
+```bash
+coopmat/check.sh     # needs ../modular built (branch adreno-spirv-target)
+```
+
+Both kernels pass `spirv-val`: two `OpCooperativeMatrixLoadKHR` (B column-major in the
+transposed one) and an `OpCooperativeMatrixMulAddKHR` in the K loop, then the store, and in the
+second an `OpFConvert` from the fp32 accumulator to fp16. In the fork, MAX's compile test for
+`vulkan:adreno840` compiles all 26 graphs (213 kernels, all valid), and both fp16 matmul graphs
+(`a @ b`, and `a @ b.T` as a transposed-B matmul) take the cooperative-matrix kernel.
+
+None of it runs here: neither driver on the Adreno 710 exposes `VK_KHR_cooperative_matrix`
+(`coopmat/vk_coopmat_probe.c` lists a driver's matrix extensions and, where there are any, the
+shapes it supports). Running it needs an Adreno 8xx phone whose driver exposes the extension with
+fp16 16x16x16 products.
 
 ## What did not work (and why)
 
@@ -402,6 +430,7 @@ runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
 remote/            MAX's remote device: driver plugin (Mac), Vulkan executor (phone), protocol, tests
+coopmat/           KHR cooperative matrices: Mojo kernels for adreno840, check.sh, driver probe
 docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
