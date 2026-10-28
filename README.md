@@ -249,7 +249,7 @@ The retargeters exist because Mojo 1.2.0 ships no SPIR-V target. Mojo's compiler
 (modular/modular, Apache 2.0), so the branch
 [`adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target) of
 [adityaGoCT/modular](https://github.com/adityaGoCT/modular) adds one: `--target-accelerator adreno710`
-(`spirv1.6-unknown-vulkan1.3-compute`). About 1,256 lines of C++ (target traits, kernel marking, and a
+(`spirv1.6-unknown-vulkan1.3-compute`). About 2,100 lines of C++ (target traits, kernel marking, and a
 backend whose LLVM pass does in-process what `mojo2vk.py` does on text: storage buffers per pointer,
 a params buffer for scalars, a `main` entry point), 406 lines of Mojo (stdlib and MAX plugins:
 SPIR-V builtins, GLSL.std.450 math, 64-lane warps, barrier, shuffles) and one new MAX hook,
@@ -283,14 +283,20 @@ Same eight kernels, same Turnip driver and runner; ms, median of 20 runs, SGEMMs
 The two barrier-heavy kernels are faster because the native `barrier()` orders shared memory only
 (as GLSL's `barrier()` does); the retargeter's also orders global memory. Llama 3.2 1B through the
 native target: 48 of 48 tokens identical to PyTorch, logits within 6.2e-5, 283.6 ms/token (mojo2vk:
-285.0 ms/token in the same session).
+285.0 ms/token in the same session). These were measured before the target began running LLVM's
+StructurizeCFG before codegen (see below); the kernels still pass `spirv-val`, and a rerun on the
+phone is pending.
 
 MAX graphs, compile only (MAX's virtual-device mode for `vulkan:adreno710`; nothing runs, since MAX
-has no Vulkan or Android runtime): 16 of 25 test graphs give SPIR-V that passes `spirv-val` for every
-kernel, including matmul, GEMV, the elementwise ops, sum and mean. softmax, layer_norm and
-max_pool2d hit an LLVM 24 SPIR-V bug; cast, concat, gather, argmax, conv2d and ResNet-18 still fail.
-Limits: Turnip only (no Vulkan 1.1 / int32 flavour for the stock driver, no OpenCL), and codegen at
--O0 to avoid two LLVM 24 SPIR-V backend bugs.
+has no Vulkan or Android runtime): all 25 test graphs give SPIR-V that passes `spirv-val` for every
+kernel, 211 kernels in all, from the elementwise ops, concat, gather, the reductions, softmax,
+layer_norm and three matmuls to conv2d, both pools and a full ResNet-18 (74 kernels). Getting the
+last nine took big arguments read from memory, pointers that pick a buffer at run time, structs
+accessed by parts, alignment checks, memset loops, inlined asserts, scalarized wide vectors, LLVM's
+StructurizeCFG before codegen (LLVM's SPIR-V structurizer misplaces merge blocks on some of Mojo's
+optimized kernels), and a one-line LLVM fix. None of these kernels has run yet. Limits: Turnip only
+(no Vulkan 1.1 / int32 flavour for the stock driver, no OpenCL), and codegen at -O0 to avoid an
+LLVM 24 SPIR-V crash in loop strength reduction.
 
 ## What did not work (and why)
 
