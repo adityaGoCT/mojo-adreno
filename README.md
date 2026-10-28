@@ -297,9 +297,33 @@ layer_norm and three matmuls to conv2d, both pools and a full ResNet-18 (74 kern
 last nine took big arguments read from memory, pointers that pick a buffer at run time, structs
 accessed by parts, alignment checks, memset loops, inlined asserts, scalarized wide vectors, LLVM's
 StructurizeCFG before codegen (LLVM's SPIR-V structurizer misplaces merge blocks on some of Mojo's
-optimized kernels), and a one-line LLVM fix. None of these kernels has run yet. Limits: Turnip only
+optimized kernels), and a one-line LLVM fix. Limits: Turnip only
 (no Vulkan 1.1 / int32 flavour for the stock driver, no OpenCL), and codegen at -O0 to avoid an
 LLVM 24 SPIR-V crash in loop strength reduction.
+
+### MAX's kernels on the phone
+
+MAX's runtime does not run on Android, so `max_kernels/test_max_kernels.py` plays its part for a
+few kernel families. Each SPIR-V module from the native target carries a launch description
+(`OpModuleProcessed "mojo.vulkan.abi {json}"`: which binding or params slot every pointer and
+scalar of the kernel's arguments goes to, and the workgroup size as specialization constants).
+The script fills in the arguments MAX's host code would pass, lays them out as the description
+says, runs the kernel with `runner/vk_launch.c` (a generic launcher) on Turnip, and compares the
+result with NumPy.
+
+```bash
+python3 max_kernels/test_max_kernels.py --compile   # compile the test graphs in ../modular, then run
+python3 max_kernels/test_max_kernels.py matmul gemv # some tests, from the last compile
+```
+
+All 43 kernels of 13 graphs pass: every variant of MAX's elementwise kernel (grid-stride, with
+and without the uneven-SIMD tail, 32- and 64-bit indices) for add, mul, relu, exp, tanh, gelu,
+sigmoid and silu, the f32 to f16 cast (within one f16 ulp: Vulkan leaves conversion rounding to
+the driver), transpose (a strided input), and MAX's naive matmul at 256x256 in f32 (max error
+4.5e-5) and f16, and as a 1x2048x2048 GEMV. The matmul launches 16x16 blocks, which the kernel
+now gets through the specialization constants; before, it was compiled as 64x1x1 and could not
+have been right. Reductions, softmax, concat, gather, pools, conv2d and ResNet-18 have not run yet:
+their arguments need more of MAX's host logic.
 
 ## What did not work (and why)
 
@@ -334,8 +358,10 @@ src/               vecadd_gpu.mojo (MAX gpu), vecadd4_gpu.mojo (loop), warpsum_g
                    blocksum_gpu.mojo (shared memory), matmul_naive_gpu.mojo, matmul_tiled_gpu.mojo,
                    matmul_tiled_f16_gpu.mojo (fp16 tiles), matmul_regtile_gpu.mojo (register tiles),
                    vecadd_spv.mojo (SPIR-V intrinsic), vecadd_cpu.mojo
-runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side)
+runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side),
+                   vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
+max_kernels/       MAX's own kernels from the native target, run on the phone and checked
 docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
