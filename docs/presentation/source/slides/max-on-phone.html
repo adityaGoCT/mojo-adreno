@@ -1,0 +1,19 @@
+<section id="max-on-phone" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">First MAX kernels on the phone</h2>
+<div style="display:flex;gap:40px;align-items:flex-start">
+<div style="width:320px;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:32px">
+<p style="font-size:96px;font-weight:700;line-height:1;color:#7FA8F0">43/43</p>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.35">kernels from 13 MAX graphs match NumPy on the Adreno</p>
+</div>
+<table style="flex:1;font-size:25px;color:#18212F">
+<tr><th style="width:62%">Kernels</th><th style="width:38%">Result</th></tr>
+<tr><td>add, mul, relu, exp, tanh, gelu, sigmoid, silu · 4 variants each</td><td><b>Pass</b> · error ≤ 3.8e-6</td></tr>
+<tr style="background:#EEF1F5"><td>f32→f16 cast, transpose</td><td><b>Pass</b> · 1 f16 ulp, exact</td></tr>
+<tr><td>Naive matmul 256² in f32 and f16, GEMV 1×2048²</td><td><b>Pass</b> · f32 error 4.5e-5</td></tr>
+</table>
+</div>
+<p style="font-size:28px;color:#4A5568;line-height:1.4">Each SPIR-V module now carries a launch description: where every pointer and number of the kernel’s arguments goes. A test script plays MAX’s runtime, and one generic launcher runs any kernel.</p>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">It caught a real bug: MAX launches matmul in 16×16 blocks, but Vulkan had a fixed 64×1×1. The size is now set per launch.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 21 · Mesa Turnip · max_kernels/test_max_kernels.py in mojo-adreno</p>
+<aside>Compiling is not the same as being right, so the next step was to run MAX’s own kernels on the phone. MAX’s runtime does not exist on Android, so a test script plays its part. For that it needs to know how a kernel takes its arguments, so every SPIR-V module from our target now carries a small launch description: for each pointer and each number in the kernel’s arguments, which buffer binding or parameter slot it goes to, and whether the kernel reads or writes each buffer. The script fills in the values MAX’s host code would pass, a single generic launcher runs the kernel on Turnip, and the result is compared with NumPy. All 43 kernels from 13 of the 25 graphs pass: every variant of MAX’s elementwise kernel for eight operations, the cast to half precision, transpose, and the plain matrix multiply in three shapes. The best part is the bug it caught. MAX picks the block size when it launches a kernel, and launches matrix multiply in 16 by 16 blocks; Vulkan fixes the workgroup size when the shader is compiled, and ours said 64 by 1. That kernel could never have been right. Now the workgroup size is a specialization constant, set when the runtime creates the pipeline for each launch. The rest of the graphs, reductions, concat, convolution and ResNet, need more of MAX’s host logic, which is what a real device for MAX would provide.</aside>
+</section>

@@ -23,7 +23,7 @@ The code is [this repo](README.md).
 
 *Update, October 25:* the pipeline now compiles Mojo for an AMD GPU (`gfx90a`) instead of NVIDIA, so warp operations use 64 lanes like the Adreno's subgroups. It also runs LLVM's `opt -O3` on the kernel IR and maps warp shuffles. See [the update](#update-october-25-optimized-ir-and-a-better-proxy-target). A [second update](#update-october-25-later-shared-memory-and-barriers) adds shared memory and barriers, with a tiled SGEMM, and a [third](#update-october-25-third-register-tiling) adds register tiling: 66 GFLOP/s. A [fourth](#update-october-27-llama-32-1b-on-the-phone) runs Llama 3.2 1B on the phone with these kernels, at 3.5 tokens/s on both drivers.
 
-*Update, October 28:* Mojo's compiler is open source now, so I also added a native `adreno710` Vulkan target to it, with no retargeter ([branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target); results in [the README](README.md#native-spir-v-target)). A 23-slide presentation with speaker notes covers the whole experiment: [view it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6), or as a [PDF](docs/presentation/mojo-and-max-on-adreno.pdf).
+*Update, October 28:* Mojo's compiler is open source now, so I also added a native `adreno710` Vulkan target to it, with no retargeter ([branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target); results in [the README](README.md#native-spir-v-target)). A 24-slide presentation with speaker notes covers the whole experiment: [view it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6), or as a [PDF](docs/presentation/mojo-and-max-on-adreno.pdf).
 
 ## Why Mojo has no Adreno target
 
