@@ -325,6 +325,25 @@ now gets through the specialization constants; before, it was compiled as 64x1x1
 have been right. Reductions, softmax, concat, gather, pools, conv2d and ResNet-18 have not run yet:
 their arguments need more of MAX's host logic.
 
+### A remote MAX device (in progress)
+
+To run whole MAX graphs, with MAX's own host code choosing kernels and arguments, `remote/` makes
+the phone a device of MAX on the Mac. `vulkan_remote_plugin.cpp` is a MAX driver plugin (the
+`M_driver_*` C interface in modular's `SDK/include/HAL`): it hands out device addresses for
+allocations and forwards copies, fills and launches over `adb forward` to `vk_server.c`, a Vulkan
+executor on the phone. At a launch it reads the kernel's launch description to turn MAX's
+CUDA-style arguments (a pointer to each argument's bytes) into bindings at the allocation and
+offset each pointer points into, and params slots.
+
+```bash
+python3 remote/test_plugin.py   # builds both, starts the server, drives the plugin through the HAL API
+```
+
+Through the plugin, MAX's naive matmul (256x256), its GEMV (1x2048x2048) and the four variants
+of its elementwise add run on the phone and match NumPy. Next: MAX itself on the plugin, which
+needs MAX built with its HAL device context (`--//:hal_device_context=true`) and
+`MODULAR_DRIVER_PLUGINS="vulkan@.../libM_driver_vulkan_remote.dylib"`.
+
 ## What did not work (and why)
 
 | attempt | outcome |
@@ -362,6 +381,7 @@ runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone
                    vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
+remote/            a remote MAX device: driver plugin (Mac), Vulkan executor (phone), protocol, test
 docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
