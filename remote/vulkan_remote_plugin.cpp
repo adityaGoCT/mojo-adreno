@@ -214,6 +214,7 @@ struct JsonParser {
 struct Leaf {
   int64_t arg = -1, offset = 0, bytes = 8;  // where the value sits in the arguments
   int blockDim = -1;                         // or a params slot holding block_dim.x/.y/.z
+  bool used = true;                          // a buffer the kernel reads or writes
 };
 
 struct Description {
@@ -251,8 +252,11 @@ bool describe(const std::string &spirv, Description &out) {
         if (!parser.parse(json) || json.kind != Json::Object)
           return lastError = "malformed launch description", false;
         if (const Json *buffers = json.get("buffers"))
-          for (const Json &b : buffers->items)
-            out.buffers.push_back({b.integer("arg"), b.integer("offset"), 8});
+          for (const Json &b : buffers->items) {
+            const Json *access = b.get("access");
+            out.buffers.push_back(
+                {b.integer("arg"), b.integer("offset"), 8, -1, !access || access->text != "none"});
+          }
         if (const Json *params = json.get("params"); params && params->kind == Json::Object) {
           out.hasParams = true;
           if (const Json *slots = params->get("slots"))
@@ -278,6 +282,7 @@ bool describe(const std::string &spirv, Description &out) {
 
 struct Memory {
   uint64_t buffer = 0;    // the server's buffer, for device memory
+  uint64_t base = 0;      // where this handle starts in it (a wrapped view)
   uint64_t address = 0;   // the device address MAX sees
   uint64_t size = 0;
   void *host = nullptr;   // pinned host memory instead
@@ -322,6 +327,9 @@ M_driver_status_t allocate(uint64_t size, M_driver_memory_t *memory) {
   m->address = nextAddress;
   nextAddress += (size + 0xffff) & ~0xffffull;  // 64 KiB apart: never adjacent
   byAddress[m->address] = m;
+  if (getenv("VK_REMOTE_DEBUG"))
+    fprintf(stderr, "vulkan_remote: alloc %llu bytes at %llx\n", static_cast<unsigned long long>(size),
+            static_cast<unsigned long long>(m->address));
   *memory = reinterpret_cast<M_driver_memory_t>(m);
   return M_DRIVER_STATUS_SUCCESS;
 }
@@ -334,7 +342,10 @@ M_driver_status_t release(M_driver_memory_t memory) {
     if (m->owning)
       free(m->host);
   } else {
-    byAddress.erase(m->address);
+    // A wrapped view shares its allocation's address: only the allocation's
+    // own handle is in the map.
+    if (auto it = byAddress.find(m->address); it != byAddress.end() && it->second == m)
+      byAddress.erase(it);
     if (m->owning && !call(OP_FREE, &m->buffer, 8))
       return failed();
   }
@@ -359,7 +370,7 @@ M_driver_status_t write(M_driver_memory_view_t dst, const void *src) {
   // In pieces: a request carries at most 4 GiB, and smaller ones keep memory use flat.
   constexpr uint64_t piece = 64ull << 20;
   for (uint64_t done = 0; done < dst->size; done += piece) {
-    uint64_t header[2] = {m->buffer, dst->offset + done};
+    uint64_t header[2] = {m->buffer, m->base + dst->offset + done};
     uint64_t n = std::min(piece, dst->size - done);
     if (!call(OP_WRITE, header, 16, static_cast<const char *>(src) + done, n))
       return failed();
@@ -378,7 +389,7 @@ M_driver_status_t read(void *dst, M_driver_memory_view_t src) {
   constexpr uint64_t piece = 64ull << 20;
   for (uint64_t done = 0; done < src->size; done += piece) {
     uint64_t n = std::min(piece, src->size - done);
-    uint64_t request[3] = {m->buffer, src->offset + done, n};
+    uint64_t request[3] = {m->buffer, m->base + src->offset + done, n};
     std::string out;
     if (!call(OP_READ, request, 24, nullptr, 0, &out))
       return failed();
@@ -399,7 +410,7 @@ M_driver_status_t copy(M_driver_memory_view_t dst, M_driver_memory_view_t src) {
   }
   if (d->host)
     return read(static_cast<char *>(d->host) + dst->offset, src);
-  uint64_t request[5] = {d->buffer, dst->offset, s->buffer, src->offset, dst->size};
+  uint64_t request[5] = {d->buffer, d->base + dst->offset, s->buffer, s->base + src->offset, dst->size};
   return call(OP_COPY, request, 40) ? M_DRIVER_STATUS_SUCCESS : failed();
 }
 
@@ -415,13 +426,27 @@ M_driver_status_t fill(M_driver_memory_view_t dst, uint64_t value, uint64_t valu
       memcpy(p + i, &value, std::min(valueSize, dst->size - i));
     return M_DRIVER_STATUS_SUCCESS;
   }
-  uint64_t request[5] = {m->buffer, dst->offset, dst->size, value, valueSize};
+  uint64_t request[5] = {m->buffer, m->base + dst->offset, dst->size, value, valueSize};
   return call(OP_FILL, request, 40) ? M_DRIVER_STATUS_SUCCESS : failed();
 }
 
 M_driver_status_t execute(Function *f, const M_driver_dim_t &grid, const M_driver_dim_t &block,
                           void **args, uint64_t *argSizes, uint32_t numArgs) {
   const Description &d = f->description;
+  if (getenv("VK_REMOTE_DEBUG")) {  // the launch as MAX passes it
+    fprintf(stderr, "vulkan_remote: launch grid %u %u %u block %u %u %u, %u args:", grid.x, grid.y, grid.z,
+            block.x, block.y, block.z, numArgs);
+    for (uint32_t i = 0; i < numArgs; ++i) {
+      fprintf(stderr, "\n  arg %u (%llu bytes):", i, static_cast<unsigned long long>(argSizes[i]));
+      for (uint64_t at = 0; at + 8 <= argSizes[i] && at < 512; at += 8)
+        fprintf(stderr, " %llx", static_cast<unsigned long long>(*reinterpret_cast<const uint64_t *>(
+                                     static_cast<const char *>(args[i]) + at)));
+    }
+    fprintf(stderr, "\n  description: %zu buffers, %zu params slots\n", d.buffers.size(), d.slots.size());
+    for (const Leaf &leaf : d.buffers)
+      fprintf(stderr, "    buffer: arg %lld offset %lld\n", static_cast<long long>(leaf.arg),
+              static_cast<long long>(leaf.offset));
+  }
   auto valueAt = [&](const Leaf &leaf, void *out) {
     if (leaf.arg < 0 || leaf.arg >= numArgs || !args[leaf.arg] ||
         static_cast<uint64_t>(leaf.offset + leaf.bytes) > argSizes[leaf.arg])
@@ -439,8 +464,10 @@ M_driver_status_t execute(Function *f, const M_driver_dim_t &grid, const M_drive
     uint64_t address = 0, offset = 0;
     if (!valueAt(leaf, &address))
       return lastError = "launch arguments do not match the kernel's description", M_DRIVER_STATUS_INVALID_ARG;
-    Memory *m = address ? memoryAt(address, offset) : nullBuffer;
-    if (!m && !address) {
+    // A pointer field the kernel never dereferences may hold anything (the
+    // host can store other data in it): bind the placeholder.
+    Memory *m = address && leaf.used ? memoryAt(address, offset) : nullBuffer;
+    if (!m && (!address || !leaf.used)) {
       M_driver_memory_t placeholder;
       if (M_driver_status_t status = allocate(256, &placeholder))
         return status;
@@ -448,7 +475,9 @@ M_driver_status_t execute(Function *f, const M_driver_dim_t &grid, const M_drive
     }
     if (!m || m->host)
       return lastError = "kernel argument is not a device address of this plugin", M_DRIVER_STATUS_INVALID_ARG;
-    bindings.push_back({m->buffer, offset});
+    if (m == nullBuffer)
+      offset = 0;
+    bindings.push_back({m->buffer, m->base + offset});
   }
   std::string params;
   for (const Leaf &leaf : d.slots) {
@@ -718,9 +747,11 @@ M_driver_status_t M_driver_memory_wrap(M_driver_context_t, uint64_t address, uin
   uint64_t offset = 0;
   auto *m = new Memory;
   if (Memory *base = memoryAt(address, offset); base && !base->host) {
-    if (offset)
-      return delete m, lastError = "wrapping the inside of an allocation", M_DRIVER_STATUS_INVALID_ARG;
-    *m = *base;
+    // A view of (part of) an allocation of this plugin.
+    m->buffer = base->buffer;
+    m->base = base->base + offset;
+    m->address = address;
+    m->size = size;
     m->owning = false;
   } else {
     m->host = reinterpret_cast<void *>(address);

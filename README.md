@@ -325,24 +325,34 @@ now gets through the specialization constants; before, it was compiled as 64x1x1
 have been right. Reductions, softmax, concat, gather, pools, conv2d and ResNet-18 have not run yet:
 their arguments need more of MAX's host logic.
 
-### A remote MAX device (in progress)
+### MAX on the phone: a remote device
 
-To run whole MAX graphs, with MAX's own host code choosing kernels and arguments, `remote/` makes
-the phone a device of MAX on the Mac. `vulkan_remote_plugin.cpp` is a MAX driver plugin (the
-`M_driver_*` C interface in modular's `SDK/include/HAL`): it hands out device addresses for
-allocations and forwards copies, fills and launches over `adb forward` to `vk_server.c`, a Vulkan
-executor on the phone. At a launch it reads the kernel's launch description to turn MAX's
-CUDA-style arguments (a pointer to each argument's bytes) into bindings at the allocation and
-offset each pointer points into, and params slots.
+MAX's runtime does not run on Android, so `remote/` makes the phone a device of MAX on the Mac:
+MAX keeps its graph compiler and host code on the Mac, and its kernels run on the Adreno.
+`vulkan_remote_plugin.cpp` is a MAX driver plugin (the `M_driver_*` C interface in modular's
+`SDK/include/HAL`): it hands out device addresses for allocations and forwards copies, fills and
+launches over `adb forward` to `vk_server.c`, a Vulkan executor on the phone. At a launch it reads
+the kernel's launch description to turn MAX's CUDA-style arguments (a pointer to each argument's
+bytes) into bindings at the allocation and offset each pointer points into, and params slots.
+
+All 25 graphs of the compile test run this way and match NumPy, or the same graph on MAX's CPU
+device: the elementwise ops, cast, transpose, slice, concat, gather, the reductions, argmax,
+softmax, layer_norm, three matmuls, conv2d, both pools, and ResNet-18 (max error 5.7e-5 against
+the CPU, 14 s: the remote link costs one round trip per launch).
 
 ```bash
-python3 remote/test_plugin.py   # builds both, starts the server, drives the plugin through the HAL API
+remote/start_server.sh        # builds both sides, starts vk_server on the phone; leave it running
+# in ../modular (branch adreno-spirv-target), with MAX's HAL device layer:
+BAZELISK_SKIP_WRAPPER=true ./bazelw build --config=disable-lint --//:hal_device_context=true \
+    //max/examples/vulkan_coverage:remote //Target:CPUPlugin.so
+MODULAR_DRIVER_PLUGINS="cpu@$PWD/bazel-bin/Target/CPUPlugin.so;vulkan@$HOME/runix/mojo-adreno/build/remote/libM_driver_vulkan_remote.dylib" \
+    BAZELISK_SKIP_WRAPPER=true ./bazelw run --config=disable-lint --//:hal_device_context=true \
+    //max/examples/vulkan_coverage:remote
 ```
 
-Through the plugin, MAX's naive matmul (256x256), its GEMV (1x2048x2048) and the four variants
-of its elementwise add run on the phone and match NumPy. Next: MAX itself on the plugin, which
-needs MAX built with its HAL device context (`--//:hal_device_context=true`) and
-`MODULAR_DRIVER_PLUGINS="vulkan@.../libM_driver_vulkan_remote.dylib"`.
+`python3 remote/test_plugin.py` drives the plugin alone through the HAL C API (no MAX build).
+Queues are synchronous and every operation is a round trip, so this is for correctness, not
+speed; running MAX on the phone itself would need an Android build of its runtime.
 
 ## What did not work (and why)
 
@@ -381,7 +391,7 @@ runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone
                    vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
-remote/            a remote MAX device: driver plugin (Mac), Vulkan executor (phone), protocol, test
+remote/            MAX's remote device: driver plugin (Mac), Vulkan executor (phone), protocol, tests
 docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
