@@ -1,0 +1,23 @@
+<section id="native-built" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What we added: an adreno710 target</h2>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">C++ · 1,256 LINES</p>
+<h3 style="font-size:32px;font-weight:600">In the compiler</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Target traits, kernel marking, and a backend whose 840-line pass turns each kernel into a Vulkan entry point.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">MOJO · 406 LINES</p>
+<h3 style="font-size:32px;font-weight:600">Two plugins</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">stdlib: ids as SPIR-V builtins, math as GLSL.std.450. MAX: 64-lane warps, barrier, shuffles.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#B4501A">MAX · 33 LINES</p>
+<h3 style="font-size:32px;font-weight:600">One new hook</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">warp_sum_fn: a target can give warp.sum one native reduction, so no pattern matching.</p>
+</div>
+</div>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;line-height:1.5;color:#DDE5F0;background:#172338;border-radius:14px;padding:32px">$ mojo build --emit asm --target-accelerator adreno710 kernel.mojo<br><span style="color:#9DB7E0"># one ready-to-load .spv per kernel, validated by spirv-val</span></p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 14 · code: adityaGoCT/modular, branch adreno-spirv-target · built with Bazel on an M4 Mac</p>
+<aside>So we built the compiler from source and gave it a real target called adreno710. It took three pieces. In the compiler, about 1,250 lines of C++: the target’s identity, which tells the compiler a Vulkan SPIR-V triple is a GPU; a lowering hook that marks kernel entry points; and a backend. Most of the backend is one 840-line LLVM pass that does in-process, with full type information, what our Python retargeter did on text: it turns pointer arguments into storage buffers and scalars into a parameter buffer, and rebuilds every address as a buffer and element index. Second, two Mojo plugins, using the extension points we just saw: the standard-library plugin reads thread and block indices from SPIR-V builtins and maps exp, sqrt and friends to native GLSL instructions; the MAX plugin sets 64-lane warps, the barrier and shuffles. Third, one small addition to MAX: a hook that lets a target implement a whole-warp sum natively. The result is one command, and out comes a SPIR-V binary per kernel.</aside>
+</section>

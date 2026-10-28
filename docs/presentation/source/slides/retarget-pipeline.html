@@ -1,0 +1,42 @@
+<section id="retarget-pipeline" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Act 1 · Borrow Mojo’s LLVM IR</h2>
+<div style="display:flex;align-items:center;gap:16px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Mojo kernel</h3>
+<p style="font-size:24px;color:#4A5568">MAX gpu module</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">LLVM IR</h3>
+<p style="font-size:24px;color:#4A5568">built for AMD gfx90a</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">opt -O3</h3>
+<p style="font-size:24px;color:#4A5568">target-neutral</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">mojo2vk.py</h3>
+<p style="font-size:24px;color:#4A5568">Vulkan rewrite</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">SPIR-V</h3>
+<p style="font-size:24px;color:#4A5568">LLVM 22, patched</p>
+</div>
+</div>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#EEF1F5;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">OpenCL branch</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">mojo2cl.py writes OpenCL C from the same IR, because Qualcomm’s OpenCL accepts no SPIR-V.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600;color:#F08A3C">On the phone</h3>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.4">A small C runner loads the shader, binds the buffers, dispatches and checks every output element.</p>
+</div>
+</div>
+<p style="font-size:28px;color:#4A5568">Why AMD’s gfx90a: its warps are 64 lanes wide, like Adreno’s subgroups, so <span style="color:#18212F">WARP_SIZE</span> comes out right.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 4 · blue: Mojo and LLVM as shipped · orange: our retargeters, 598 + 364 lines of Python</p>
+<aside>Act one. Mojo 1.2 cannot target this GPU, but it can write out the LLVM IR of a GPU kernel. So we compiled each kernel for an AMD GPU, gfx90a, and kept the IR. We picked AMD on purpose: Mojo resolves the warp size per target at compile time, and AMD’s 64-lane warps match the Adreno’s 64-lane subgroups, so code that depends on WARP_SIZE keeps working. That IR goes through LLVM’s optimizer with the target stripped, then through mojo2vk, a 598-line Python retargeter we wrote, and finally through LLVM 22’s SPIR-V backend to produce a Vulkan compute shader. Qualcomm’s OpenCL driver does not accept SPIR-V, so a second retargeter, mojo2cl, writes OpenCL C from the same IR and the driver compiles it on the phone. On the device, a small C program loads the shader, binds buffers, dispatches, and checks every single output element against a reference.</aside>
+</section>

@@ -1,0 +1,41 @@
+<section id="native-pipeline" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">The native pipeline, inside one compiler</h2>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Mojo</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">kernel source</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">KGEN, POP</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">plugins emit SPIR-V builtins</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">LLVM IR</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">Mojo’s own O3</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Vulkan ABI</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">buffers, indices, entry point</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">SPIR-V</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">LLVM 24, inside mojo</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600;color:#2563C9">What the target gains</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The kernel is compiled for the Adreno from the start: its warp size, builtins, math and barrier are chosen by the target, with full types.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600;color:#B4501A">What disappears</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The AMD stand-in target, text IR parsing, lane-move pattern matching, the barrier binary patch.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 15 · KGEN and POP: Mojo’s internal MLIR dialects</p>
+<aside>Here is the native pipeline. Everything now happens inside one compiler. Mojo source is parsed and elaborated in Mojo’s own MLIR dialects, KGEN and POP. Because the target is adreno710 from the start, our plugins decide at this stage what a thread index, a barrier or a warp sum becomes: they emit LLVM’s SPIR-V intrinsics directly. Mojo’s normal optimization pipeline runs on the LLVM IR, exactly as it does for NVIDIA and AMD. Then our Vulkan ABI pass reshapes the kernel into a Vulkan entry point, and LLVM 24’s SPIR-V backend, now linked into mojo, writes the binary. Compare with act one: there is no AMD stand-in target any more, no parsing of IR text with regular expressions, no recognizing AMD lane-permute sequences to undo them, and no patching of the finished binary, because LLVM 24 also fixed the barrier bug we patched before. What the target cannot remove are the limits of SPIR-V and the drivers themselves.</aside>
+</section>

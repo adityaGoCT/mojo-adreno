@@ -20,6 +20,19 @@ identical to PyTorch; 3.5 tokens/s on both the stock driver and Mesa Turnip). It
 series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner) live in
 [adityaGoCT/iree-adreno-genai-tuner](https://github.com/adityaGoCT/iree-adreno-genai-tuner).
 
+Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
+`adreno710` target inside the compiler itself, in
+[adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
+compiles the same kernels and Llama straight to Vulkan SPIR-V, with no retargeter. See
+[Native SPIR-V target](#native-spir-v-target).
+
+Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (23 slides,
+PDF), the whole experiment from the retargeter to the native target and a compile-only test of MAX
+graphs. Also as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html) (download and
+open it; ←/→ to move, N for notes) with [speaker notes](docs/presentation/mojo-and-max-on-adreno-speaker-notes.md).
+
+[![Mojo and MAX on Adreno, title slide](docs/presentation/cover.png)](docs/presentation/mojo-and-max-on-adreno.pdf)
+
 | backend | path |
 |---|---|
 | `turnip` | Mojo IR → `opt -O3` → `mojo2vk.py` → LLVM 22 SPIR-V backend (SPIR-V 1.6) → Vulkan 1.3 on Mesa Turnip |
@@ -229,11 +242,60 @@ What decided the variants:
 66 GFLOP/s is 18% of the 368 GFLOP/s fp32 peak measured in Part 2. The best variant differs by
 driver, which is a job for a tuner.
 
+## Native SPIR-V target
+
+The retargeters exist because Mojo 1.2.0 ships no SPIR-V target. Mojo's compiler is open source now
+(modular/modular, Apache 2.0), so the branch
+[`adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target) of
+[adityaGoCT/modular](https://github.com/adityaGoCT/modular) adds one: `--target-accelerator adreno710`
+(`spirv1.6-unknown-vulkan1.3-compute`). About 1,256 lines of C++ (target traits, kernel marking, and a
+backend whose LLVM pass does in-process what `mojo2vk.py` does on text: storage buffers per pointer,
+a params buffer for scalars, a `main` entry point), 406 lines of Mojo (stdlib and MAX plugins:
+SPIR-V builtins, GLSL.std.450 math, 64-lane warps, barrier, shuffles) and one new MAX hook,
+`warp_sum_fn`, so `warp.sum` becomes one subgroup reduction. Its
+[ADRENO.md](https://github.com/adityaGoCT/modular/blob/adreno-spirv-target/ADRENO.md) has the details.
+
+```bash
+git clone -b adreno-spirv-target https://github.com/adityaGoCT/modular ../modular   # or set MOJO_SRC
+(cd ../modular && ./bazelw build //Mojo/tools/mojo:mojo //Mojo/stdlib/std //max/mojo/max:max)
+python3 mojo_adreno.py src/blocksum_gpu.mojo --backend native turnip   # native target vs mojo2vk
+python3 llama/build_kernels.py --flavor native                         # build/llama/native/*.spv
+python3 llama/run.py --model <snapshot dir> --backend native          # Llama 3.2 1B; Python with torch, see llama/README.md
+```
+
+`--backend native` needs Mesa Turnip, like `turnip`. On a Mac with only the Command Line Tools, see
+ADRENO.md for running Bazel without Xcode.app.
+
+Same eight kernels, same Turnip driver and runner; ms, median of 20 runs, SGEMMs 1024³:
+
+| kernel | native target | mojo2vk | check |
+|---|---|---|---|
+| `vecadd_gpu` | 1.6-1.7 | 1.7-2.2 | PASS |
+| `vecadd4_gpu` | 11.1 | 10.0 | PASS |
+| `warpsum_gpu` | 2.31 | 2.30 | PASS |
+| `blocksum_gpu` | 6.3 | 13.7 | PASS |
+| `matmul_naive_gpu` | 670 | 670 | PASS |
+| `matmul_tiled_gpu` | 230 | 234 | PASS |
+| `matmul_tiled_f16_gpu` | 183 | 216 | PASS |
+| `matmul_regtile_gpu` | 34.4 | 34.9 | PASS |
+
+The two barrier-heavy kernels are faster because the native `barrier()` orders shared memory only
+(as GLSL's `barrier()` does); the retargeter's also orders global memory. Llama 3.2 1B through the
+native target: 48 of 48 tokens identical to PyTorch, logits within 6.2e-5, 283.6 ms/token (mojo2vk:
+285.0 ms/token in the same session).
+
+MAX graphs, compile only (MAX's virtual-device mode for `vulkan:adreno710`; nothing runs, since MAX
+has no Vulkan or Android runtime): 16 of 25 test graphs give SPIR-V that passes `spirv-val` for every
+kernel, including matmul, GEMV, the elementwise ops, sum and mean. softmax, layer_norm and
+max_pool2d hit an LLVM 24 SPIR-V bug; cast, concat, gather, argmax, conv2d and ResNet-18 still fail.
+Limits: Turnip only (no Vulkan 1.1 / int32 flavour for the stock driver, no OpenCL), and codegen at
+-O0 to avoid two LLVM 24 SPIR-V backend bugs.
+
 ## What did not work (and why)
 
 | attempt | outcome |
 |---|---|
-| Mojo GPU target for Adreno / SPIR-V | none: accelerators are NVIDIA `sm_*`, AMD `gfx*`, Apple `apple-m*` only |
+| Mojo GPU target for Adreno / SPIR-V | none in Mojo 1.2.0: accelerators are NVIDIA `sm_*`, AMD `gfx*`, Apple `apple-m*` only (the [native target](#native-spir-v-target) adds one to the open-source compiler) |
 | OpenCL with SPIR-V IL (`clCreateProgramWithIL`) | `-59 CL_INVALID_OPERATION`: Qualcomm OpenCL 3.0 reports no IL version and no `cl_khr_il_program` (`probes/cl_probe.c`) |
 | Running the kernel on the Mac's GPU for reference | needs Xcode's `metal` compiler (`xcrun metal` missing); not needed: the phone runners check every element |
 | `ptr null` as the resource name in `handlefrombinding` | crashes LLVM 22's SPIR-V instruction selector; a name string per buffer works (adds the Int8 capability; both drivers have shaderInt8) |
@@ -263,6 +325,8 @@ src/               vecadd_gpu.mojo (MAX gpu), vecadd4_gpu.mojo (loop), warpsum_g
                    matmul_tiled_f16_gpu.mojo (fp16 tiles), matmul_regtile_gpu.mojo (register tiles),
                    vecadd_spv.mojo (SPIR-V intrinsic), vecadd_cpu.mojo
 runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side)
+llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
+docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
 scripts/setup.sh   host tools and the Mojo venv

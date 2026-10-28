@@ -34,11 +34,12 @@ CC = NDK / "toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android34-c
 DEV = "/data/local/tmp/mojo"
 TURNIP = "/data/local/tmp/turnip"
 ACCEL = {"gfx90a": ("amdgcn", 64), "sm_80": ("nvptx", 32)}  # --target-accelerator -> (sidecar flavor, WARP_SIZE)
+MOJO_SRC = pathlib.Path(os.environ.get("MOJO_SRC", HERE.parent / "modular"))  # modular/modular built with the SPIR-V target
 os.environ.setdefault("ANDROID_SERIAL", os.environ.get("ADB_WIFI", "192.168.1.7:5555"))
 
 
-def sh(*cmd, check=True):
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
+def sh(*cmd, check=True, env=None):
+    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, env=env)
     if check and r.returncode:
         sys.exit(f"$ {' '.join(map(str, cmd))}\n{r.stdout}{r.stderr}")
     return r
@@ -67,9 +68,28 @@ def kernel_ir(src, build, accel):
     return side[0]
 
 
-def run(backend, ir, build, n, local, check, opt, reps, int32, outputs=1):
+def native_spv(src, build, local):
+    """The kernel compiled by a source-built Mojo with the Vulkan SPIR-V target (no retargeter):
+    `--target-accelerator adreno710 --emit asm` writes one .spv sidecar per kernel."""
+    out = build / "native"
+    out.mkdir(parents=True, exist_ok=True)
+    for f in out.glob("*.spv"):
+        f.unlink()
+    bazel_bin = MOJO_SRC / "bazel-bin"
+    # the MAX gate only checks that a MAX install exists; the compile never loads it
+    env = dict(os.environ, MOJO_SPIRV_LOCAL_SIZE=str(local),
+               MODULAR_MAX_PACKAGE_ROOT=str(HERE / ".venv-mojo/lib/python3.12/site-packages/modular"))
+    sh(bazel_bin / "Mojo/tools/mojo/mojo", "build", "--emit", "asm", "-O3", "--target-accelerator", "adreno710",
+       "-I", bazel_bin / "Mojo/stdlib/std", "-I", bazel_bin / "max/mojo/max", "-o", out / "host.s", src, env=env)
+    side = sorted(out.glob("*.spv"))
+    if len(side) != 1:
+        sys.exit(f"expected one SPIR-V sidecar, found {side}")
+    return side[0]
+
+
+def run(backend, ir, build, n, local, check, opt, reps, int32, outputs=1, src=None):
     groups = (n + local * outputs - 1) // (local * outputs)
-    if backend == "turnip" and adb("shell", f"test -e {TURNIP}/libvulkan.so").returncode:
+    if backend in ("turnip", "native") and adb("shell", f"test -e {TURNIP}/libvulkan.so").returncode:
         return None, f"SKIP: no Mesa Turnip in {TURNIP} (see README)"
     if backend == "cpu" and check:
         return None, "SKIP: the CPU path runs src/vecadd_cpu.mojo, not this kernel"
@@ -81,6 +101,11 @@ def run(backend, ir, build, n, local, check, opt, reps, int32, outputs=1):
         adb("push", spv, f"{DEV}/")
         env += f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if backend == "turnip" else ""
         r = adb("shell", f"cd {DEV} && {env}./vk_run {spv.name} main {n} {groups}")
+    elif backend == "native":  # Mojo's own SPIR-V target, run on Turnip (Vulkan 1.3)
+        spv = build / "native_kernel.spv"
+        spv.write_bytes(native_spv(src, build, local).read_bytes())
+        adb("push", spv, f"{DEV}/")
+        r = adb("shell", f"cd {DEV} && {env}LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 ./vk_run {spv.name} main {n} {groups}")
     elif backend == "opencl":
         cl = build / "vecadd.cl"
         sh(sys.executable, HERE / "mojo2cl.py", ir, "--name", "vecadd", "--local", str(local), "-o", cl)
@@ -102,7 +127,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src", nargs="?", default=str(HERE / "src/vecadd_gpu.mojo"))
     ap.add_argument("--backend", nargs="+", default=["turnip", "stock", "opencl", "cpu"],
-                    choices=["turnip", "stock", "opencl", "cpu"])
+                    choices=["turnip", "stock", "opencl", "cpu", "native"],
+                    help="native: compiled by a source-built Mojo with the Vulkan SPIR-V target (MOJO_SRC), on Turnip")
     ap.add_argument("--n", type=int, default=1000003, help="elements (matmul kernels: dim * dim)")
     ap.add_argument("--dim", type=int, help="matrix size for check=matmul kernels (default: the marker's dim)")
     ap.add_argument("--local", type=int, help="workgroup size (default: the marker's local, else 64)")
@@ -125,12 +151,12 @@ def main():
         a.n, check = a.dim * a.dim, f"matmul:{a.dim}"
     print(f"phone: {os.environ['ANDROID_SERIAL']}  accel: {a.accel} (WARP_SIZE {ACCEL[a.accel][1]})  check: {check or 'add'}")
     build_runners(build)
-    ir = kernel_ir(a.src, build, a.accel) if set(a.backend) - {"cpu"} else None
+    ir = kernel_ir(a.src, build, a.accel) if set(a.backend) - {"cpu", "native"} else None
     if ir:
         print(f"Mojo kernel IR: {ir.name}")
     results = {}
     for b in a.backend:
-        ok, out = run(b, ir, build, a.n, a.local, check, a.opt, a.reps, a.int32, int(mark.get("outputs", 1)))
+        ok, out = run(b, ir, build, a.n, a.local, check, a.opt, a.reps, a.int32, int(mark.get("outputs", 1)), a.src)
         results[b] = ok
         print(f"\n== {b}\n{out}")
     print("\nsummary: " + "  ".join(f"{b}={'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}" for b, ok in results.items()))

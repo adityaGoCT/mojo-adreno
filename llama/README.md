@@ -132,7 +132,11 @@ hf download meta-llama/Llama-3.2-1B-Instruct model.safetensors config.json gener
 $PY llama/run.py --model random --max-new 8                            # same shapes, random weights
 $PY llama/run.py --model <snapshot dir> --prompt "..." --max-new 48    # stock driver
 $PY llama/run.py --model <snapshot dir> --backend turnip               # Mesa Turnip
+$PY llama/run.py --model <snapshot dir> --backend native               # Turnip, Mojo's own SPIR-V target
 ```
+
+`--backend native` compiles the kernels with a source-built Mojo that has the `adreno710` Vulkan
+target ([Native SPIR-V target](../README.md#native-spir-v-target)): 283.6 ms/token, 48 of 48 tokens.
 
 The weights are not part of this repo (Llama 3.2 Community License); `run.py` writes the fp16 export
 to `build/llama/` and the phone copy to `/data/local/tmp/llama/<model>`.

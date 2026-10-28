@@ -1,0 +1,20 @@
+<section id="llama-result" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;color:#F08A3C;letter-spacing:1px">LLAMA 3.2 1B, DECODED ON THE ADRENO 710</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #F08A3C;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">48/48</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">generated tokens identical to PyTorch</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #F08A3C;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">283 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token, 3.5 tokens a second, on both Vulkan drivers</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #F08A3C;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">55%</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">of the memory-bandwidth limit, 156 ms a token</p>
+</div>
+</div>
+<p style="font-size:34px;line-height:1.45;color:#DDE5F0;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">“The sky appears blue because of a phenomenon called Rayleigh scattering, in which shorter wavelengths of light, such as blue and violet, are scattered more…”</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo and MAX on Adreno · 9 · prompt of 46 tokens in 11.5 s · logits within 6.2e-5 of PyTorch</p>
+<aside>And it works. Asked to explain in two sentences why the sky is blue, the phone generates 48 tokens, and all 48 are the same tokens PyTorch produces, which is a much stronger check than plausible-looking text. The logits after the prompt differ from PyTorch’s by at most 6.2 times ten to the minus five. Decode runs at 283 milliseconds a token, three and a half tokens a second, on both Qualcomm’s stock driver and Mesa Turnip. For scale: every token has to read the full 2.47 gigabytes of weights, and at the bandwidth we measured on this phone that alone takes about 156 milliseconds, so we are at 55 percent of the memory limit. The prompt is processed one token at a time and takes 11.5 seconds; batching it into matrix products is an obvious next step. But the more interesting story is how we got to 283, because the first working version on the stock driver ran at 1,392 milliseconds a token.</aside>
+</section>

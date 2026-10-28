@@ -1,0 +1,22 @@
+<section id="kernel-ladder" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Eight kernels pass on all three drivers</h2>
+<div style="display:flex;gap:56px;align-items:center">
+<div style="flex:1;display:flex;flex-direction:column;gap:20px">
+<p style="font-size:28px;color:#4A5568">SGEMM, 1024 × 1024 × 1024 fp32, ms per run</p>
+<table style="font-size:28px;color:#18212F">
+<tr><th style="width:40%">Kernel</th><th style="width:20%;text-align:right">Turnip</th><th style="width:20%;text-align:right">Stock</th><th style="width:20%;text-align:right">OpenCL</th></tr>
+<tr><td>Naive</td><td style="text-align:right">669</td><td style="text-align:right">200</td><td style="text-align:right">409</td></tr>
+<tr style="background:#EEF1F5"><td>Shared tiles</td><td style="text-align:right">233</td><td style="text-align:right">293</td><td style="text-align:right">396</td></tr>
+<tr><td>fp16 tiles</td><td style="text-align:right">213</td><td style="text-align:right">293</td><td style="text-align:right">343</td></tr>
+<tr style="background:#EEF1F5"><td>Register tiles</td><td style="text-align:right"><b>32.5</b></td><td style="text-align:right">65.7</td><td style="text-align:right">67.0</td></tr>
+</table>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Also passing: vector add, vec4 loads, warp sum, block sum.</p>
+</div>
+<div style="width:480px;display:flex;flex-direction:column;gap:12px;background:#101B2D;border-radius:16px;padding:40px">
+<p style="font-size:120px;font-weight:700;line-height:1;color:#F08A3C">66</p>
+<p style="font-size:30px;color:#DDE5F0;line-height:1.35">GFLOP/s, the best SGEMM: register tiles on Mesa Turnip</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 7 · every run checks every output element</p>
+<aside>With those fixes, all eight test kernels pass on all three drivers: vector add, vectorized vec4 loads, a warp sum, a block sum through shared memory, and four matrix multiplies. The SGEMM ladder is worth a look. The naive kernel is slowest on Turnip but surprisingly fastest on the stock driver, because Qualcomm’s compiler handles that simple loop well and the shared-memory versions poorly. Register tiling, where each thread computes an eight by eight block of outputs, is the big jump everywhere: 32.5 milliseconds on Turnip, about 66 GFLOP/s for a 1024-cubed multiply, and about twice that time on the stock Vulkan driver and on OpenCL. One lesson from tuning: the two drivers want different memory access shapes, Mesa contiguous chunks and Qualcomm strided ones, so a single kernel is never best on both.</aside>
+</section>

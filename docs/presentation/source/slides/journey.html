@@ -1,0 +1,33 @@
+<section id="journey" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Five acts</h2>
+<div style="display:flex;gap:20px">
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#B4501A">ACT 1</p>
+<h3 style="font-size:32px;font-weight:600">Retarget</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Rewrite Mojo’s LLVM IR into Vulkan and OpenCL. 8 kernels pass on 3 drivers.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#B4501A">ACT 2</p>
+<h3 style="font-size:32px;font-weight:600">Llama</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Llama 3.2 1B decode: 48 of 48 tokens match PyTorch, 283 ms a token.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #6B7280;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#4A5568">ACT 3</p>
+<h3 style="font-size:32px;font-weight:600">MAX</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">ResNet-18 through MAX on the Mac. No road from MAX to the phone.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">ACT 4</p>
+<h3 style="font-size:32px;font-weight:600">Native target</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Mojo built from source with an Adreno target. Same results, no retargeter.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">ACT 5</p>
+<h3 style="font-size:32px;font-weight:600">MAX runtime</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">The compiler side ports. The runtime and the model compiler do not, yet.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Orange: our own tools around Mojo. Blue: Mojo’s compiler itself, extended.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 3</p>
+<aside>The talk follows five acts. In act one, Mojo had no route to this GPU, so we took the LLVM IR that Mojo emits for an AMD GPU and rewrote it, with about a thousand lines of Python, into Vulkan SPIR-V and OpenCL C. Act two is the real test: Llama 3.2 1B, every decode step on the phone’s GPU, checked token by token against PyTorch. Act three is MAX: what it is, how it compiles a vision model, and why it had no road to the phone. In act four the ground moved: Modular open-sourced the Mojo compiler, so we built it ourselves and gave it a proper Adreno target, and the retargeter went away. Act five answers whether that makes MAX itself portable. Colour coding throughout: orange is tooling we wrote around Mojo, blue is Mojo’s own compiler, extended from the inside.</aside>
+</section>

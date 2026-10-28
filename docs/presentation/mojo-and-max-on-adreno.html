@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mojo and MAX on Adreno</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+html, body { margin: 0; height: 100%; background: #0B1220; }
+#stage { position: fixed; inset: 0; overflow: hidden; }
+section { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; box-sizing: border-box;
+  overflow: hidden; transform-origin: 0 0; }
+section:not(.current) { display: none !important; }
+section * { margin: 0; box-sizing: border-box; }
+section div:not([style*="display"]) { display: flex; flex-direction: column; }
+section h1 { font-size: 96px; font-weight: 600; line-height: 1.1; }
+section h2 { font-size: 64px; font-weight: 600; line-height: 1.15; }
+section h3 { font-size: 44px; font-weight: 600; line-height: 1.2; }
+section p { font-size: 32px; line-height: 1.4; }
+section table { border-collapse: collapse; }
+section th, section td { padding: 0.35em 0.6em; text-align: left; border-bottom: 1px solid #D5DAE1; vertical-align: top; }
+section th { font-weight: 600; border-bottom: 2px solid #18212F; }
+#bar { position: fixed; right: 16px; bottom: 12px; font: 14px system-ui, sans-serif; color: #A9B8CC; }
+#notes { position: fixed; left: 0; right: 0; bottom: 0; max-height: 40%; overflow: auto; display: none;
+  background: rgba(11, 18, 32, 0.95); color: #E8EDF5; font: 18px/1.5 system-ui, sans-serif; padding: 16px 24px; }
+@media print {
+  @page { size: 1920px 1080px; margin: 0; }
+  html, body { background: none; height: auto; }
+  #stage { position: static; }
+  section, section:not(.current) { position: relative; display: flex !important; transform: none !important;
+    page-break-after: always; }
+  #bar, #notes { display: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="stage">
+<section id="cover" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:center;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F08A3C;letter-spacing:2px">MOJO &#160;·&#160; MAX &#160;·&#160; VULKAN &#160;·&#160; ADRENO 710</p>
+<h1 style="font-size:96px;font-weight:600;line-height:1.08;width:1500px">Mojo and MAX on a phone GPU</h1>
+<p style="font-size:36px;color:#A9B8CC;line-height:1.4;width:1480px">How we ran Mojo kernels and Llama 3.2 1B on a Qualcomm Adreno 710: first by retargeting Mojo’s output, then through a native compiler target, and how far MAX itself is from the phone.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">moto g stylus 5G (2024) · Adreno 710 · Mojo 1.2 and a 1.3 build from source · MAX 26.7 · October 2026</p>
+</section>
+<section id="question" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:48px">
+<p style="font-size:28px;font-weight:600;color:#B4501A;letter-spacing:1px">THE QUESTION</p>
+<p style="font-size:56px;font-weight:600;line-height:1.2;width:1560px">Mojo and MAX ship for NVIDIA, AMD and Apple GPUs. Can they reach a phone GPU that only speaks Vulkan and OpenCL?</p>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#2563C9">The device</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">moto g stylus 5G (2024) with an Adreno 710 GPU, driven over adb from a Mac.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#2563C9">Three drivers</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Qualcomm’s stock Vulkan 1.1, Mesa Turnip (Vulkan 1.4, side-loaded) and Qualcomm OpenCL 3.0.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#2563C9">The toolchain</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Mojo 1.2 and MAX 26.7 as shipped; later, the Mojo compiler built from source.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 2</p>
+</section>
+<section id="journey" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Five acts</h2>
+<div style="display:flex;gap:20px">
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#B4501A">ACT 1</p>
+<h3 style="font-size:32px;font-weight:600">Retarget</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Rewrite Mojo’s LLVM IR into Vulkan and OpenCL. 8 kernels pass on 3 drivers.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#B4501A">ACT 2</p>
+<h3 style="font-size:32px;font-weight:600">Llama</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Llama 3.2 1B decode: 48 of 48 tokens match PyTorch, 283 ms a token.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #6B7280;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#4A5568">ACT 3</p>
+<h3 style="font-size:32px;font-weight:600">MAX</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">ResNet-18 through MAX on the Mac. No road from MAX to the phone.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">ACT 4</p>
+<h3 style="font-size:32px;font-weight:600">Native target</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Mojo built from source with an Adreno target. Same results, no retargeter.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">ACT 5</p>
+<h3 style="font-size:32px;font-weight:600">MAX runtime</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">The compiler side ports. The runtime and the model compiler do not, yet.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Orange: our own tools around Mojo. Blue: Mojo’s compiler itself, extended.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 3</p>
+</section>
+<section id="retarget-pipeline" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Act 1 · Borrow Mojo’s LLVM IR</h2>
+<div style="display:flex;align-items:center;gap:16px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Mojo kernel</h3>
+<p style="font-size:24px;color:#4A5568">MAX gpu module</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">LLVM IR</h3>
+<p style="font-size:24px;color:#4A5568">built for AMD gfx90a</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">opt -O3</h3>
+<p style="font-size:24px;color:#4A5568">target-neutral</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">mojo2vk.py</h3>
+<p style="font-size:24px;color:#4A5568">Vulkan rewrite</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">SPIR-V</h3>
+<p style="font-size:24px;color:#4A5568">LLVM 22, patched</p>
+</div>
+</div>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#EEF1F5;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">OpenCL branch</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">mojo2cl.py writes OpenCL C from the same IR, because Qualcomm’s OpenCL accepts no SPIR-V.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600;color:#F08A3C">On the phone</h3>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.4">A small C runner loads the shader, binds the buffers, dispatches and checks every output element.</p>
+</div>
+</div>
+<p style="font-size:28px;color:#4A5568">Why AMD’s gfx90a: its warps are 64 lanes wide, like Adreno’s subgroups, so <span style="color:#18212F">WARP_SIZE</span> comes out right.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 4 · blue: Mojo and LLVM as shipped · orange: our retargeters, 598 + 364 lines of Python</p>
+</section>
+<section id="retarget-rewrites" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What the retargeter rewrites</h2>
+<table style="font-size:26px;color:#18212F;width:1664px">
+<tr><th style="width:42%">In Mojo’s AMD kernel IR</th><th style="width:58%">In the Vulkan shader</th></tr>
+<tr><td>Raw pointer arguments</td><td>Storage buffers at (set 0, binding k)</td></tr>
+<tr style="background:#EEF1F5"><td>Scalar arguments</td><td>64-bit slots of a params buffer</td></tr>
+<tr><td>AMD thread and block registers</td><td>SPIR-V builtins: LocalInvocationId, WorkgroupId</td></tr>
+<tr style="background:#EEF1F5"><td>Pointer arithmetic</td><td>(buffer, element index) pairs, rebuilt at each access</td></tr>
+<tr><td>Shared arrays</td><td>Workgroup variables</td></tr>
+<tr style="background:#EEF1F5"><td>DPP and bpermute lane moves</td><td>Subgroup shuffles; warp.sum becomes one reduction</td></tr>
+<tr><td>s_barrier</td><td>OpControlBarrier, semantics patched in the binary</td></tr>
+<tr style="background:#EEF1F5"><td>64-bit integers</td><td>32-bit for the stock driver, which has no int64</td></tr>
+</table>
+<p style="font-size:28px;color:#4A5568">The core problem: Vulkan has logical addressing. A shader may not do pointer arithmetic.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 5</p>
+</section>
+<section id="driver-quirks" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Bugs in the way, and how we got around them</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">LLVM 22</p>
+<h3 style="font-size:28px;font-weight:600">Barrier semantics Vulkan rejects</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Patched in the SPIR-V binary.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">LLVM 22</p>
+<h3 style="font-size:28px;font-weight:600">Loop strength reduction crashes it</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">llc -disable-lsr.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">LLVM 22</p>
+<h3 style="font-size:28px;font-weight:600">if/elif chain, invalid structured CFG</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Kernel rewritten as one if/else.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Stock driver</p>
+<h3 style="font-size:28px;font-weight:600">Two 16-bit shared arrays overlap</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Pad to 4 bytes per element.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Stock driver</p>
+<h3 style="font-size:28px;font-weight:600">No reconvergence after loops</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Uniform loops, shared-memory reductions.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Stock driver</p>
+<h3 style="font-size:28px;font-weight:600">No 64-bit integers</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Index math narrowed to 32 bits.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Each one stopped a kernel cold or gave wrong answers. None is Mojo’s fault.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 6</p>
+</section>
+<section id="kernel-ladder" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Eight kernels pass on all three drivers</h2>
+<div style="display:flex;gap:56px;align-items:center">
+<div style="flex:1;display:flex;flex-direction:column;gap:20px">
+<p style="font-size:28px;color:#4A5568">SGEMM, 1024 × 1024 × 1024 fp32, ms per run</p>
+<table style="font-size:28px;color:#18212F">
+<tr><th style="width:40%">Kernel</th><th style="width:20%;text-align:right">Turnip</th><th style="width:20%;text-align:right">Stock</th><th style="width:20%;text-align:right">OpenCL</th></tr>
+<tr><td>Naive</td><td style="text-align:right">669</td><td style="text-align:right">200</td><td style="text-align:right">409</td></tr>
+<tr style="background:#EEF1F5"><td>Shared tiles</td><td style="text-align:right">233</td><td style="text-align:right">293</td><td style="text-align:right">396</td></tr>
+<tr><td>fp16 tiles</td><td style="text-align:right">213</td><td style="text-align:right">293</td><td style="text-align:right">343</td></tr>
+<tr style="background:#EEF1F5"><td>Register tiles</td><td style="text-align:right"><b>32.5</b></td><td style="text-align:right">65.7</td><td style="text-align:right">67.0</td></tr>
+</table>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Also passing: vector add, vec4 loads, warp sum, block sum.</p>
+</div>
+<div style="width:480px;display:flex;flex-direction:column;gap:12px;background:#101B2D;border-radius:16px;padding:40px">
+<p style="font-size:120px;font-weight:700;line-height:1;color:#F08A3C">66</p>
+<p style="font-size:30px;color:#DDE5F0;line-height:1.35">GFLOP/s, the best SGEMM: register tiles on Mesa Turnip</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 7 · every run checks every output element</p>
+</section>
+<section id="llama-design" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Act 2 · Llama 3.2 1B on the phone’s GPU</h2>
+<div style="display:flex;align-items:center;gap:16px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Export</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">fp16, fused q/k/v and gate/up: 2.47 GB, 103 tensors</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">7 Mojo kernels</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">embed, rmsnorm, gemv, gemv_add, rope_kv, attention, silu_mul</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">llama_vk.c</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">398 lines of C: buffers, pipelines, 150 dispatches a token</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Check</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">tokens and logits against PyTorch fp32</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#EEF1F5;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Small kernels</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">All of decode is 219 lines of Mojo. The GEMVs read nearly every weight byte, and end in warp.sum.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#EEF1F5;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Driver limits shape the export</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The stock driver binds at most 128 MB, so the 525 MB embedding table is split into 4 chunks.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 8 · meta-llama/Llama-3.2-1B-Instruct, official weights</p>
+</section>
+<section id="llama-result" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;color:#F08A3C;letter-spacing:1px">LLAMA 3.2 1B, DECODED ON THE ADRENO 710</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #F08A3C;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">48/48</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">generated tokens identical to PyTorch</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #F08A3C;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">283 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token, 3.5 tokens a second, on both Vulkan drivers</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #F08A3C;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">55%</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">of the memory-bandwidth limit, 156 ms a token</p>
+</div>
+</div>
+<p style="font-size:34px;line-height:1.45;color:#DDE5F0;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">“The sky appears blue because of a phenomenon called Rayleigh scattering, in which shorter wavelengths of light, such as blue and violet, are scattered more…”</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo and MAX on Adreno · 9 · prompt of 46 tokens in 11.5 s · logits within 6.2e-5 of PyTorch</p>
+</section>
+<section id="warp-fix" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">A 4.9× slowdown was one lowering</h2>
+<p style="font-size:28px;color:#4A5568">Stock driver · one 64 MB fp16 GEMV, ms per dispatch · the same kernel in GLSL as the yardstick</p>
+<div style="display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">Mojo route, warp.sum as shuffles</p>
+<div style="width:760px;height:40px;background:#2563C9;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">46.5</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">GLSL, generic shuffles</p>
+<div style="width:745px;height:40px;background:#D9661F;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">45.6</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">GLSL, ShuffleXor</p>
+<div style="width:239px;height:40px;background:#F2C7A8;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">14.6 <span style="color:#B4501A">· wrong sums</span></p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">GLSL, subgroupAdd</p>
+<div style="width:224px;height:40px;background:#D9661F;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">13.7</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px"><b>Mojo route, warp.sum as one reduction</b></p>
+<div style="width:240px;height:40px;background:#2563C9;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">14.7 · correct</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Llama on the stock driver: <b>1,392 → 285 ms a token</b>, still 48 of 48 tokens right.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 10 · blue: Mojo through LLVM · orange: GLSL through glslc</p>
+</section>
+<section id="max-what" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Act 3 · How MAX runs a model</h2>
+<div style="display:flex;align-items:center;gap:16px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">1 · Graph API</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">the model, written in Python</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">2 · MO IR</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">MAX’s graph dialect</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">3 · Compile</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">kernels from MAX’s Mojo library, for one device</p>
+</div>
+<svg width="40" height="20" viewBox="0 0 40 20" style="flex:none" aria-hidden="true"><polygon points="0,6 24,6 24,0 40,10 24,20 24,14 0,14" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">4 · Run</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">MAX’s runtime launches them</p>
+</div>
+</div>
+<table style="font-size:28px;color:#18212F;width:1664px">
+<tr><th style="width:30%">ResNet-18 through MAX 26.7</th><th style="width:70%">Result</th></tr>
+<tr><td>Mac CPU</td><td><b>18 ms</b> an image · error 8.9e-7 against NumPy · same top-1 class</td></tr>
+<tr style="background:#EEF1F5"><td>Compile time</td><td>66.5 s the first time, 1.0 s from the cache</td></tr>
+<tr><td>Mac GPU (Apple)</td><td>compile failed, even for one relu: Xcode’s Metal compiler is not installed</td></tr>
+<tr style="background:#EEF1F5"><td>Adreno 710</td><td>no target · and no ONNX import in 26.7 either</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 11 · blue: device-independent · orange: tied to a target</p>
+</section>
+<section id="max-walls" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Where MAX stopped in 26.7</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">No SPIR-V target</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Mojo’s compiler linked LLVM’s NVPTX, AMDGPU and Apple backends, not SPIR-V.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">No Android runtime</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">MAX shipped for macOS and Linux hosts, with no Vulkan or OpenCL device.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">Opaque internals</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The 1.2 binary cannot dump Mojo’s MLIR, so a retargeter had to start at LLVM IR.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">Vendor-tuned kernels</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">MAX’s library kernels lean on tensor cores, matrix cores and async copies.</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">So Llama ran on our own C runtime, and every kernel went through the retargeter.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 12</p>
+</section>
+<section id="open-source" data-transition="fade" style="background:#F08A3C;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;letter-spacing:1px">ACT 4 · THE COMPILER OPENED UP</p>
+<div style="display:flex;align-items:center;gap:64px">
+<p style="font-size:132px;font-weight:700;line-height:1;width:620px">18 Aug 2026</p>
+<p style="font-size:38px;line-height:1.4;width:960px">Modular open-sourced the Mojo compiler, a week after Mojo 1.0. The graph compiler, runtime and kernels sit beside it in modular/modular.</p>
+</div>
+<div style="display:flex;gap:20px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FBE3D0;border-radius:14px;padding:24px">
+<h3 style="font-size:28px;font-weight:600">Codegen plugin</h3>
+<p style="font-size:24px;line-height:1.35">emits code for a new device</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FBE3D0;border-radius:14px;padding:24px">
+<h3 style="font-size:28px;font-weight:600">stdlib hooks</h3>
+<p style="font-size:24px;line-height:1.35">thread ids, math, printing</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FBE3D0;border-radius:14px;padding:24px">
+<h3 style="font-size:28px;font-weight:600">MAX hooks</h3>
+<p style="font-size:24px;line-height:1.35">warp size, barriers, shuffles</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FBE3D0;border-radius:14px;padding:24px">
+<h3 style="font-size:28px;font-weight:600">Driver plugin</h3>
+<p style="font-size:24px;line-height:1.35">runs code on the device</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px">Mojo and MAX on Adreno · 13 · Apache 2.0 with LLVM exceptions · there is no Mojo 2.0; the latest release is 1.2</p>
+</section>
+<section id="native-built" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What we added: an adreno710 target</h2>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">C++ · 1,256 LINES</p>
+<h3 style="font-size:32px;font-weight:600">In the compiler</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Target traits, kernel marking, and a backend whose 840-line pass turns each kernel into a Vulkan entry point.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#2563C9">MOJO · 406 LINES</p>
+<h3 style="font-size:32px;font-weight:600">Two plugins</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">stdlib: ids as SPIR-V builtins, math as GLSL.std.450. MAX: 64-lane warps, barrier, shuffles.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:32px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#B4501A">MAX · 33 LINES</p>
+<h3 style="font-size:32px;font-weight:600">One new hook</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">warp_sum_fn: a target can give warp.sum one native reduction, so no pattern matching.</p>
+</div>
+</div>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;line-height:1.5;color:#DDE5F0;background:#172338;border-radius:14px;padding:32px">$ mojo build --emit asm --target-accelerator adreno710 kernel.mojo<br><span style="color:#9DB7E0"># one ready-to-load .spv per kernel, validated by spirv-val</span></p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 14 · code: adityaGoCT/modular, branch adreno-spirv-target · built with Bazel on an M4 Mac</p>
+</section>
+<section id="native-pipeline" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">The native pipeline, inside one compiler</h2>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Mojo</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">kernel source</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">KGEN, POP</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">plugins emit SPIR-V builtins</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">LLVM IR</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">Mojo’s own O3</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Vulkan ABI</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">buffers, indices, entry point</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">SPIR-V</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">LLVM 24, inside mojo</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600;color:#2563C9">What the target gains</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The kernel is compiled for the Adreno from the start: its warp size, builtins, math and barrier are chosen by the target, with full types.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600;color:#B4501A">What disappears</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The AMD stand-in target, text IR parsing, lane-move pattern matching, the barrier binary patch.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 15 · KGEN and POP: Mojo’s internal MLIR dialects</p>
+</section>
+<section id="native-fixes" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What it took to match the retargeter</h2>
+<table style="font-size:25px;color:#18212F;width:1664px">
+<tr><th style="width:38%">Problem</th><th style="width:26%">Effect</th><th style="width:36%">Fix</th></tr>
+<tr><td>Index as a 64-bit byte offset, then divided</td><td>naive SGEMM 2.6× slower</td><td>index from the GEP’s terms, in 32 bits</td></tr>
+<tr style="background:#EEF1F5"><td>Device-scope barrier</td><td>block sum 2× slower</td><td>workgroup-scope barrier</td></tr>
+<tr><td>LLVM 24: strength reduction, misplaced merge</td><td>crash, invalid SPIR-V</td><td>codegen at -O0; IR already optimized</td></tr>
+<tr style="background:#EEF1F5"><td>Pointer phis from Mojo’s optimizer</td><td>compile error</td><td>phis of element indices</td></tr>
+<tr><td>No print hook for debug_assert</td><td>compiler crash</td><td>print hook that drops output</td></tr>
+<tr style="background:#EEF1F5"><td>Integer store of float bits</td><td>invalid SPIR-V</td><td>bitcast to the element type</td></tr>
+<tr><td>No math hooks</td><td>logits off by 2.1e-4</td><td>exp, sqrt, … as GLSL.std.450</td></tr>
+</table>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Six were gaps in our new target; one is two LLVM 24 bugs.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 16</p>
+</section>
+<section id="native-results" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Native target vs retargeter, same driver</h2>
+<table style="font-size:27px;color:#18212F;width:1664px">
+<tr><th style="width:34%">Kernel</th><th style="width:22%;text-align:right">Native target</th><th style="width:22%;text-align:right">mojo2vk</th><th style="width:22%;text-align:right">Check</th></tr>
+<tr><td>Vector add</td><td style="text-align:right">1.6–1.7</td><td style="text-align:right">1.7–2.2</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>vec4 add</td><td style="text-align:right">11.1</td><td style="text-align:right">10.0</td><td style="text-align:right">pass</td></tr>
+<tr><td>Warp sum</td><td style="text-align:right">2.31</td><td style="text-align:right">2.30</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>Block sum</td><td style="text-align:right"><b>6.3</b></td><td style="text-align:right">13.7</td><td style="text-align:right">pass</td></tr>
+<tr><td>Naive SGEMM</td><td style="text-align:right">670</td><td style="text-align:right">670</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>Shared-tile SGEMM</td><td style="text-align:right">230</td><td style="text-align:right">234</td><td style="text-align:right">pass</td></tr>
+<tr><td>fp16-tile SGEMM</td><td style="text-align:right"><b>183</b></td><td style="text-align:right">216</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>Register-tile SGEMM</td><td style="text-align:right">34.4</td><td style="text-align:right">34.9</td><td style="text-align:right">pass</td></tr>
+</table>
+<p style="font-size:28px;color:#4A5568">Faster where barriers dominate: the native barrier orders shared memory only.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 17 · Mesa Turnip · ms, median of 20 runs · SGEMMs 1024³ · vector add varies run to run</p>
+</section>
+<section id="llama-native" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;color:#7FA8F0;letter-spacing:1px">LLAMA 3.2 1B, EVERY KERNEL FROM MOJO’S OWN COMPILER</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">283.6 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token natively, against 285.0 through the retargeter</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">48/48</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">tokens identical to PyTorch</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">6.2e-5</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">largest logit error, the same as before</p>
+</div>
+</div>
+<p style="font-size:34px;line-height:1.45;color:#DDE5F0;border-left:6px solid #7FA8F0;padding:8px 0 8px 32px">Same weights, same 398-line runtime, same Turnip driver. Only the compiler changed.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo and MAX on Adreno · 18 · same session, same phone · 46-token prompt: 11.35 s native, 11.37 s retargeted</p>
+</section>
+<section id="max-runtime" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Act 5 · Is MAX itself portable now?</h2>
+<table style="font-size:27px;color:#18212F;width:1664px">
+<tr><th style="width:44%">MAX layer</th><th style="width:56%">On the Adreno today</th></tr>
+<tr><td>Mojo compiler and stdlib</td><td><b>Yes</b> · the adreno710 target</td></tr>
+<tr style="background:#EEF1F5"><td>max.gpu: ids, barriers, warp ops</td><td><b>Yes</b> · through the plugins</td></tr>
+<tr><td>Kernel library: matmul, softmax, conv…</td><td><b>Partly</b> · 16 of 25 test graphs, next slide</td></tr>
+<tr style="background:#EEF1F5"><td>Graph compiler</td><td><b>Runs</b> · for a virtual Vulkan device</td></tr>
+<tr><td>Runtime: devices, memory, launches</td><td><b>No</b> · no Vulkan backend, no Android build</td></tr>
+<tr style="background:#EEF1F5"><td>Python API, pipelines</td><td><b>No</b> · needs Python on Android, or the C API</td></tr>
+</table>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">On the phone, kernels are still launched by our own C runners, not by MAX.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 19</p>
+</section>
+<section id="coverage" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Compile test: MAX graphs for vulkan:adreno710</h2>
+<div style="display:flex;gap:40px;align-items:flex-start">
+<div style="width:320px;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:32px">
+<p style="font-size:96px;font-weight:700;line-height:1;color:#F08A3C">16/25</p>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.35">graphs give valid SPIR-V for every kernel, checked by spirv-val</p>
+</div>
+<table style="flex:1;font-size:25px;color:#18212F">
+<tr><th style="width:52%">Graphs</th><th style="width:48%">Status</th></tr>
+<tr><td>Elementwise ops, transpose, slice, sum, mean, three matmuls, avg pool</td><td><b>Valid</b> · 16 graphs</td></tr>
+<tr style="background:#EEF1F5"><td>softmax, layer_norm, max_pool2d</td><td>One kernel hits LLVM 24’s merge bug</td></tr>
+<tr><td>cast, concat, gather, argmax, conv2d, ResNet-18</td><td>Not yet: six open issues</td></tr>
+</table>
+</div>
+<p style="font-size:28px;color:#4A5568;line-height:1.4">Fixes along the way: block-size metadata, a syncwarp hook, an Adreno SIMT matmul branch, tensors passed by value and split into buffers, vector accesses split per element, Vulkan atomic scopes.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 20 · MAX 26.8 dev from source, virtual-device mode · compile only: nothing has run yet</p>
+</section>
+<section id="runtime-path" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What porting MAX’s runtime would take</h2>
+<div style="display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
+<p style="font-size:56px;font-weight:700;color:#2563C9;width:60px">1</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:4px">
+<h3 style="font-size:30px;font-weight:600">A Vulkan driver plugin</h3>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">61 C functions: devices, memory, queues, kernel loading. CUDA’s and Metal’s are about 2,500 lines each.</p>
+</div>
+</div>
+<div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
+<p style="font-size:56px;font-weight:700;color:#2563C9;width:60px">2</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:4px">
+<h3 style="font-size:30px;font-weight:600">An Android build of the runtime</h3>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">Cross-compiled for 64-bit ARM Android. The repository has no Android toolchain today.</p>
+</div>
+</div>
+<div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
+<p style="font-size:56px;font-weight:700;color:#2563C9;width:60px">3</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:4px">
+<h3 style="font-size:30px;font-weight:600">Compile on the Mac, run on the phone</h3>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">Ship the compiled model as a .mef file, so the phone never runs the compiler.</p>
+</div>
+</div>
+<div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
+<p style="font-size:56px;font-weight:700;color:#B4501A;width:60px">4</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:4px">
+<h3 style="font-size:30px;font-weight:600">Kernel coverage, then tuning</h3>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">Every op a model uses must compile for SPIR-V, then be tuned per driver.</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 21 · driver interface: SDK/include/HAL in modular/modular</p>
+</section>
+<section id="lessons" data-transition="fade" data-section="What we learned and what comes next" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What we learned</h2>
+<div style="display:flex;flex-direction:column;gap:22px">
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:520px">LLVM IR is a workable bridge</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">A retargeter got Llama running on a GPU Mojo never targeted, exactly.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:520px">The losses were lowerings</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">One warp-sum lowering cost 4.9× on Llama; SPIR-V itself cost little.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:520px">Drivers decide</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Two Vulkan drivers disagree on speed, and twice on correctness. Check every output.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:520px">A native target removes fragility</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Same speed, no stand-in target, no text patching. SPIR-V’s limits remain.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:520px">MAX’s runtime is the long pole</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">The plugin design makes a new GPU about 1,700 lines; running MAX models needs much more.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo and MAX on Adreno · 22</p>
+</section>
+<section id="next" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What comes next</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">The native target</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Qualcomm’s stock driver: Vulkan 1.1 and 32-bit index math in the backend. OpenCL C from the same target.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Faster Llama</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">From 283 toward the 156 ms floor: int4 weights, fused kernels, the prompt as matrix products.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #6B7280;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Upstream</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Report LLVM 24’s two SPIR-V bugs. Offer Modular the warp-sum hook and the target.</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">The question is no longer whether Mojo can reach a phone GPU. It is how much of MAX should follow it there.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 23 · code: adityaGoCT/mojo-adreno · native target: adityaGoCT/modular, branch adreno-spirv-target</p>
+</section>
+</div>
+<div id="notes"></div>
+<div id="bar"></div>
+<script>
+const slides = [...document.querySelectorAll("section")];
+const notes = ["Welcome. This talk is the story of one experiment: can Mojo, and Modular\u2019s MAX platform built on it, run on a phone GPU? Mojo officially targets NVIDIA, AMD and Apple GPUs. Our phone, a moto g stylus 5G from 2024, has a Qualcomm Adreno 710, which speaks only Vulkan and OpenCL. We went at it in two ways. First we borrowed the LLVM IR that Mojo emits for an AMD GPU and rewrote it into Vulkan shaders and OpenCL C ourselves. That got eight test kernels and a full Llama 3.2 1B running. Then, partway through, Modular open-sourced the Mojo compiler, so we built it from source and added a real Adreno target to it, and ran the same kernels and the same Llama through that. I will close with the honest answer to the question everyone asks next: does that mean MAX itself now runs on the phone? Every number in this deck was measured on the device; nothing is an estimate.", "Here is the question we started with. Mojo compiles GPU kernels for NVIDIA, AMD and Apple, and MAX, Modular\u2019s inference platform, runs models on those same GPUs. Phones are different: Qualcomm\u2019s Adreno GPUs are reached through Vulkan compute shaders, written in SPIR-V, or through OpenCL. Neither is a Mojo target. Our test device is a mid-range phone, a moto g stylus 5G from 2024, with an Adreno 710. We used three drivers on it: Qualcomm\u2019s own Vulkan 1.1 driver that ships with the phone, Mesa\u2019s open-source Turnip driver, which supports Vulkan 1.4 and which we side-load without root, and Qualcomm\u2019s OpenCL 3.0. The drivers matter a lot later, because they disagree on what is fast and, in two places, on what is correct. We started with Mojo 1.2 and MAX 26.7 exactly as shipped.", "The talk follows five acts. In act one, Mojo had no route to this GPU, so we took the LLVM IR that Mojo emits for an AMD GPU and rewrote it, with about a thousand lines of Python, into Vulkan SPIR-V and OpenCL C. Act two is the real test: Llama 3.2 1B, every decode step on the phone\u2019s GPU, checked token by token against PyTorch. Act three is MAX: what it is, how it compiles a vision model, and why it had no road to the phone. In act four the ground moved: Modular open-sourced the Mojo compiler, so we built it ourselves and gave it a proper Adreno target, and the retargeter went away. Act five answers whether that makes MAX itself portable. Colour coding throughout: orange is tooling we wrote around Mojo, blue is Mojo\u2019s own compiler, extended from the inside.", "Act one. Mojo 1.2 cannot target this GPU, but it can write out the LLVM IR of a GPU kernel. So we compiled each kernel for an AMD GPU, gfx90a, and kept the IR. We picked AMD on purpose: Mojo resolves the warp size per target at compile time, and AMD\u2019s 64-lane warps match the Adreno\u2019s 64-lane subgroups, so code that depends on WARP_SIZE keeps working. That IR goes through LLVM\u2019s optimizer with the target stripped, then through mojo2vk, a 598-line Python retargeter we wrote, and finally through LLVM 22\u2019s SPIR-V backend to produce a Vulkan compute shader. Qualcomm\u2019s OpenCL driver does not accept SPIR-V, so a second retargeter, mojo2cl, writes OpenCL C from the same IR and the driver compiles it on the phone. On the device, a small C program loads the shader, binds buffers, dispatches, and checks every single output element against a reference.", "This table is the whole job of the retargeter. Mojo kernels look like CUDA: they take raw pointers and scalars as arguments and compute addresses freely. A Vulkan compute shader takes no arguments at all. Memory arrives through descriptor-bound storage buffers, and SPIR-V for Vulkan uses logical addressing, which means a shader cannot do arithmetic on pointers. So every pointer argument becomes a storage buffer at a fixed binding, every scalar argument becomes a 64-bit slot in a small parameter buffer, and every address is tracked through its chain of getelementptr instructions as a pair: which buffer, and which element index. At each load or store we rebuild a typed access into that buffer. AMD-specific pieces get translated too: thread and block registers become SPIR-V builtins, AMD\u2019s lane-permute instructions become subgroup shuffles, the barrier becomes OpControlBarrier, and for Qualcomm\u2019s stock driver, which has no 64-bit integers, all index math is narrowed to 32 bits.", "Most of the effort in act one went into bugs that were not in Mojo at all. Three were in LLVM 22\u2019s SPIR-V backend: it emits barrier memory semantics that Vulkan forbids, so we patch the binary; loop strength reduction turns indices into pointer increments that crash its pointer legalizer, so we turn that pass off; and an if-elif chain produced control flow that is not properly structured, so we rewrote that kernel as a single if-else. Three more were in Qualcomm\u2019s stock driver. It lays out two 16-bit shared arrays on top of each other, so we pad them. It does not bring a subgroup back together after a loop where lanes ran different trip counts, so shuffles read inactive lanes and Llama\u2019s attention came out 64 times off until we made loops uniform and moved reductions into shared memory. And it has no 64-bit integers, while Mojo\u2019s Int is 64-bit, so all index math is narrowed. Every one of these either crashed or silently produced wrong numbers, which is why every kernel run checks every output.", "With those fixes, all eight test kernels pass on all three drivers: vector add, vectorized vec4 loads, a warp sum, a block sum through shared memory, and four matrix multiplies. The SGEMM ladder is worth a look. The naive kernel is slowest on Turnip but surprisingly fastest on the stock driver, because Qualcomm\u2019s compiler handles that simple loop well and the shared-memory versions poorly. Register tiling, where each thread computes an eight by eight block of outputs, is the big jump everywhere: 32.5 milliseconds on Turnip, about 66 GFLOP/s for a 1024-cubed multiply, and about twice that time on the stock Vulkan driver and on OpenCL. One lesson from tuning: the two drivers want different memory access shapes, Mesa contiguous chunks and Qualcomm strided ones, so a single kernel is never best on both.", "Kernels that pass tests are one thing; act two asks whether the pipeline holds up for a real model. We took the official Llama 3.2 1B Instruct weights and exported them to fp16, fusing the query, key and value projections into one matrix and the gate and up projections into another, which leaves 2.47 gigabytes in 103 tensors. The stock driver will not bind a buffer larger than 128 megabytes, so the token-embedding table is split into four chunks. Decode is seven Mojo kernels, 219 lines in total; the matrix-vector products carry almost all of the memory traffic and end with a warp sum. Instead of MAX, which cannot run on Android, a 398-line C program drives Vulkan: it uploads the weights once, builds the pipelines, and records 150 dispatches for every token. On the Mac, the same prompt runs through PyTorch in fp32, and we compare every generated token and the logits after the prompt.", "And it works. Asked to explain in two sentences why the sky is blue, the phone generates 48 tokens, and all 48 are the same tokens PyTorch produces, which is a much stronger check than plausible-looking text. The logits after the prompt differ from PyTorch\u2019s by at most 6.2 times ten to the minus five. Decode runs at 283 milliseconds a token, three and a half tokens a second, on both Qualcomm\u2019s stock driver and Mesa Turnip. For scale: every token has to read the full 2.47 gigabytes of weights, and at the bandwidth we measured on this phone that alone takes about 156 milliseconds, so we are at 55 percent of the memory limit. The prompt is processed one token at a time and takes 11.5 seconds; batching it into matrix products is an obvious next step. But the more interesting story is how we got to 283, because the first working version on the stock driver ran at 1,392 milliseconds a token.", "On the stock driver, the first Llama ran five times slower than on Turnip, and the matrix-vector kernel was three and a half times slower than it should be. To find out whether that was the cost of going through LLVM, we wrote the same kernel in GLSL, Vulkan\u2019s standard shading language, and swapped it into the runtime. GLSL with generic shuffles was just as slow, 45.6 milliseconds, so the route was not the problem. The ShuffleXor instruction was fast, but gave wrong sums, because this driver does not reconverge a subgroup after a loop. The subgroupAdd reduction was fast and correct. LLVM 22 can only emit the generic shuffle, and Mojo\u2019s warp.sum on AMD is six butterfly steps of lane moves. So we taught the retargeter to recognize those six steps and replace them with one native subgroup reduction. The kernel dropped to 14.7 milliseconds, and Llama on the stock driver went from 1,392 to 285 milliseconds a token, with every token still matching.", "Act three is MAX itself. MAX is Modular\u2019s inference platform: you describe a model with its Python graph API, the graph becomes IR in MAX\u2019s own MO dialect, MAX\u2019s graph compiler picks kernels from its Mojo kernel library and compiles them for one specific device, and MAX\u2019s runtime launches them. We built ResNet-18 that way on the Mac, with random weights and batch norm folded into the convolutions. On the CPU it runs in 18 milliseconds an image and matches a NumPy reference to within nine parts in ten million. The first compile took 66 seconds; after that MAX\u2019s cache brings it to one second. On the Mac\u2019s own GPU it failed to compile anything, even a single relu. The likely reason is that the Metal compiler that ships with full Xcode is missing here; later, in the open-source code, we found the error path for exactly that case. And for the Adreno there was simply no target, and no ONNX importer, so a model has to be rewritten in MAX\u2019s graph API.", "So where did MAX stop? Four walls. First, there was no code generator for this GPU: the Mojo compiler linked LLVM\u2019s NVIDIA, AMD and Apple backends, and no SPIR-V. Second, MAX\u2019s runtime came as wheels for macOS and Linux hosts, with device backends for CUDA, HIP and Metal, and nothing for Vulkan, OpenCL or Android. Third, the shipped compiler is a closed binary: it would not dump its internal MLIR, so the earliest point we could grab a kernel was the LLVM IR, after Mojo had already committed to an AMD target. Fourth, even if we could reach the phone, MAX\u2019s optimized library kernels are written around NVIDIA tensor cores, AMD matrix cores and asynchronous copies, which have no Vulkan equivalent on this GPU. That is why act two used our own 398-line Vulkan program instead of MAX, and why every kernel went through the retargeter. Then the situation changed.", "Here is where the story turns. On the eighteenth of August 2026, a week after Mojo 1.0, Modular released the source of the Mojo compiler under Apache 2.0 with LLVM exceptions. The same repository, modular/modular, also holds MAX\u2019s graph compiler, its runtime and the kernel library. A clarification, since it came up: there is no Mojo 2.0; the latest release is still 1.2, and the compiler source is on the main branch. More important than the source itself is the design we found in it. Bringing up a new device is meant to go through four extension points: a codegen backend that teaches the compiler to emit code for the device, standard-library hooks for things like thread indices, math and printing, MAX hooks for warp size, barriers and shuffles, and a driver plugin that finds the device and runs work on it. The first three are exactly what a native Adreno target needs.", "So we built the compiler from source and gave it a real target called adreno710. It took three pieces. In the compiler, about 1,250 lines of C++: the target\u2019s identity, which tells the compiler a Vulkan SPIR-V triple is a GPU; a lowering hook that marks kernel entry points; and a backend. Most of the backend is one 840-line LLVM pass that does in-process, with full type information, what our Python retargeter did on text: it turns pointer arguments into storage buffers and scalars into a parameter buffer, and rebuilds every address as a buffer and element index. Second, two Mojo plugins, using the extension points we just saw: the standard-library plugin reads thread and block indices from SPIR-V builtins and maps exp, sqrt and friends to native GLSL instructions; the MAX plugin sets 64-lane warps, the barrier and shuffles. Third, one small addition to MAX: a hook that lets a target implement a whole-warp sum natively. The result is one command, and out comes a SPIR-V binary per kernel.", "Here is the native pipeline. Everything now happens inside one compiler. Mojo source is parsed and elaborated in Mojo\u2019s own MLIR dialects, KGEN and POP. Because the target is adreno710 from the start, our plugins decide at this stage what a thread index, a barrier or a warp sum becomes: they emit LLVM\u2019s SPIR-V intrinsics directly. Mojo\u2019s normal optimization pipeline runs on the LLVM IR, exactly as it does for NVIDIA and AMD. Then our Vulkan ABI pass reshapes the kernel into a Vulkan entry point, and LLVM 24\u2019s SPIR-V backend, now linked into mojo, writes the binary. Compare with act one: there is no AMD stand-in target any more, no parsing of IR text with regular expressions, no recognizing AMD lane-permute sequences to undo them, and no patching of the finished binary, because LLVM 24 also fixed the barrier bug we patched before. What the target cannot remove are the limits of SPIR-V and the drivers themselves.", "A first version that runs is not a version that is fast and exact, and this table is the honest list of what it took. The biggest one was ours: to rebuild an address, the first version computed a 64-bit byte offset and divided it back by four, and since the Adreno emulates 64-bit arithmetic, the naive SGEMM ran 2.6 times slower. Building the element index from the address terms directly, in 32 bits, fixed it. The second: we first used LLVM\u2019s all-memory barrier, which turns out to have device scope; on Adreno that costs twice as much on a shared-memory reduction, so the target now uses a workgroup-scope barrier, like GLSL\u2019s barrier. LLVM 24 still crashes when loop strength reduction rewrites indices, and its machine-level code motion can put an instruction between a structured-control-flow merge and its branch; since the IR is already optimized and the driver compiles the SPIR-V again, codegen simply runs at -O0. The rest were smaller: pointer phis, a missing print hook that surfaced only as a compiler crash, an integer store of float bits, and math functions that were running as polynomials instead of native instructions.", "Here is the scorecard: the same eight kernels, the same Turnip driver, the same runner, compiled once through the retargeter and once through the native target. Every kernel passes the full output check both ways. Speed is the same or better. Vector add, warp sum, naive SGEMM and register-tiled SGEMM are level; small kernels like vector add vary by a few tenths of a millisecond from run to run. The two kernels that lean on barriers are faster natively: block sum by more than two times and the fp16 tiles by 15 percent. That is not magic. The retargeter\u2019s barrier also orders global memory, as CUDA\u2019s __syncthreads does; the native barrier orders shared memory only, like GLSL\u2019s barrier, because LLVM has no intrinsic for the in-between variant. For these kernels that is all they need, but it is a semantic difference worth knowing about.", "And the real test again. We rebuilt all seven Llama kernels with the native target and ran the model with the same weights, the same Vulkan runtime and the same driver, so the only thing that changed is the compiler. Decode runs at 283.6 milliseconds a token, against 285.0 through the retargeter, measured in the same session. All 48 tokens are identical to PyTorch, and the largest logit error is 6.2 times ten to the minus five, exactly what the retargeted build gives. Two things had to be fixed to get here. Attention\u2019s exponential pulled in a debug assertion that needs a print hook, and without one the compiler crashed instead of saying so. And until the math hook mapped exp to the GPU\u2019s native instruction, the logits were three times further from PyTorch. The point of this slide is that the native compiler path is now a complete replacement for the retargeter on Turnip, with no loss of speed or accuracy.", "Act five, and the question everyone asks next: if Mojo now compiles for the Adreno, does MAX run there? Not yet, and it helps to split MAX into layers. The compiler and the standard library: yes, that is the target we just built. MAX\u2019s GPU programming layer, the thread indices, barriers and warp operations that kernels are written with: yes, through the plugins. The runtime, the part that finds a device, allocates its memory and launches kernels, is not ported: it has device backends for CUDA, HIP and Metal and a plugin interface, but nothing for Vulkan, and it is not built for Android at all. The Python API and the model pipelines would additionally need Python on the phone, or MAX\u2019s C API. So today, on the phone, our own small C programs do what the MAX runtime would do. The two layers in the middle, the kernel library and the graph compiler, can be tested without a phone at all. The short answer: the graph compiler runs for a virtual Vulkan device, and after six fixes about two thirds of our test graphs compile to valid SPIR-V. The next slide has the details.", "Here is the compile test. MAX has a virtual-device mode for building models on machines without the GPU, so we added a Vulkan entry to it, pointed it at adreno710, and compiled 24 one-operation graphs plus a full ResNet-18, keeping every SPIR-V module and checking each with spirv-val. At first only two graphs compiled. Six fixes moved that. MAX kernels declare their block size through a metadata tag that had no value for our target. Reductions needed a warp-synchronize hook. Matrix multiply picked tensor-core paths this GPU does not have, so the Adreno target got its own branch to MAX\u2019s plain SIMT kernel; on Adreno 8xx, with cooperative matrices, that branch is where a matrix-unit path would go. The big one: MAX passes tensors to kernels as structs holding device pointers, in memory, and Vulkan cannot load a pointer from memory. Passing them by value instead lets our backend give each tensor\u2019s pointer its own buffer and its shape a slot in the params buffer. Then vector loads had to be split into per-element accesses, and atomics narrowed to the scopes and orderings Vulkan allows. Now 16 of 25 graphs give valid SPIR-V for every kernel, including all three matrix multiplies and the reductions. Three more compile but trip LLVM 24\u2019s structured-control-flow bug, and six still fail, ResNet-18 among them. One caution: this is compile only. Nothing has run, so correctness is untested until there is a runtime on the phone.", "So what would it take to really run MAX on the phone? Four pieces. First, a Vulkan driver plugin. MAX defines a C interface for new devices, 61 functions covering devices, memory, queues, events and loading kernels; the CUDA, HIP and Metal plugins in the repository are about 2,500 lines each, and our 398-line Llama runtime already does a Vulkan subset of the same job. Second, the runtime libraries have to be built for Android; today the build has no Android toolchain at all. Third, the phone should not run the compiler. MAX can save a compiled model, so the realistic flow is to compile on the Mac for adreno710 and ship the result. Fourth, every operation a model uses has to compile for this target and then be tuned, which is open-ended. Items one and two are weeks of engineering; item four is what the compile test measures, and it is where Modular\u2019s own vendor-specific kernels will need generic or Adreno-specific versions.", "Five things to take away. One: Mojo\u2019s LLVM IR turned out to be a workable bridge. With a retargeter we got a real model running on a GPU Mojo never targeted, token for token identical to PyTorch. Two: when it was slow, the cause was almost never SPIR-V as such. It was one specific lowering, the warp sum, which cost a factor of 4.9 on Llama until we fixed it. Three: the drivers decide. Two Vulkan drivers on the same chip disagree about what is fast, and twice about what is correct, so every run checks every output. Four: the native compiler target did not make anything faster than the retargeter at its best, but it made the whole path robust and much simpler, and it lives where the information is. The limits of SPIR-V and the drivers remain. And five: Mojo\u2019s plugin design is real. A new GPU target, with enough fixes to compile two thirds of our MAX test graphs, was about seventeen hundred lines of C++ and Mojo. But running MAX models, rather than Mojo kernels, needs the runtime, and that is the long pole.", "Where next. On the compiler side, the native target covers Mesa Turnip only. Qualcomm\u2019s stock driver needs a second flavour: SPIR-V for Vulkan 1.1, and the 32-bit narrowing of index math moved into the backend, where it belongs. The same target could also emit OpenCL C, replacing our second retargeter. For Llama, decode is at 55 percent of the bandwidth floor; int4 weights would cut the bytes read by three quarters, fusing small kernels would cut dispatches, and processing the prompt as matrix products would turn eleven seconds into far less. Upstream, there are two LLVM SPIR-V bugs worth reporting with small reproducers, and the warp-sum hook and the target itself are natural contributions to Modular once their compiler accepts outside changes, which they have said will be by the end of 2026. The question we started with, can Mojo reach a phone GPU, is answered. The open question is how much of MAX should follow. Thank you."];
+let i = Math.max(0, Math.min(slides.length - 1, (parseInt(location.hash.slice(1)) || 1) - 1));
+function fit() {
+  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const x = (innerWidth - 1920 * s) / 2, y = (innerHeight - 1080 * s) / 2;
+  slides.forEach(el => el.style.transform = `translate(${x}px, ${y}px) scale(${s})`);
+}
+function show(n) {
+  i = Math.max(0, Math.min(slides.length - 1, n));
+  slides.forEach((el, k) => el.classList.toggle("current", k === i));
+  document.getElementById("notes").textContent = notes[i];
+  document.getElementById("bar").textContent = `${i + 1} / ${slides.length} · ← → to move · N for speaker notes`;
+  history.replaceState(null, "", "#" + (i + 1));
+}
+addEventListener("keydown", e => {
+  if (["ArrowRight", "PageDown", " "].includes(e.key)) show(i + 1);
+  else if (["ArrowLeft", "PageUp"].includes(e.key)) show(i - 1);
+  else if (e.key === "Home") show(0);
+  else if (e.key === "End") show(slides.length - 1);
+  else if (e.key === "n" || e.key === "N") {
+    const el = document.getElementById("notes"); el.style.display = el.style.display === "block" ? "none" : "block";
+  }
+});
+addEventListener("click", e => { if (!e.target.closest("#notes")) show(e.clientX > innerWidth / 2 ? i + 1 : i - 1); });
+addEventListener("resize", fit);
+if (location.search.includes("clean")) document.getElementById("bar").style.display = "none";
+fit(); show(i);
+</script>
+</body>
+</html>

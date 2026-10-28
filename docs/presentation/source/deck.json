@@ -1,0 +1,21 @@
+{
+  "v": 4,
+  "createdOnFiles": {"v": 1, "at": "2026-10-27T21:30:00Z"},
+  "lists": "css",
+  "title": "Mojo and MAX on Adreno",
+  "order": ["cover", "question", "journey", "retarget-pipeline", "retarget-rewrites", "driver-quirks", "kernel-ladder", "llama-design", "llama-result", "warp-fix", "max-what", "max-walls", "open-source", "native-built", "native-pipeline", "native-fixes", "native-results", "llama-native", "max-runtime", "coverage", "runtime-path", "lessons", "next"],
+  "sections": {
+    "intro": {"description": "Why put Mojo and MAX on a phone GPU, and the route we took", "start": "cover"},
+    "act1": {"description": "Act 1: retarget Mojo’s LLVM IR to Vulkan SPIR-V and OpenCL C", "start": "retarget-pipeline"},
+    "act2": {"description": "Act 2: Llama 3.2 1B decode on the Adreno, and the one lowering that cost 3.4×", "start": "llama-design"},
+    "act3": {"description": "Act 3: what MAX is, and where it stopped in 26.7", "start": "max-what"},
+    "act4": {"description": "Act 4: Mojo’s compiler goes open source, and we add a native SPIR-V target", "start": "open-source"},
+    "act5": {"description": "Act 5: how much of MAX is portable to the Adreno today", "start": "max-runtime"},
+    "close": {"description": "What we learned and what comes next", "start": "lessons"}
+  },
+  "faces": {
+    "ibm-plex-sans": {"family": "IBM Plex Sans", "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"},
+    "jetbrains-mono": {"family": "JetBrains Mono", "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"}
+  },
+  "designSystems": []
+}

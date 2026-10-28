@@ -1,0 +1,34 @@
+<section id="warp-fix" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">A 4.9× slowdown was one lowering</h2>
+<p style="font-size:28px;color:#4A5568">Stock driver · one 64 MB fp16 GEMV, ms per dispatch · the same kernel in GLSL as the yardstick</p>
+<div style="display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">Mojo route, warp.sum as shuffles</p>
+<div style="width:760px;height:40px;background:#2563C9;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">46.5</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">GLSL, generic shuffles</p>
+<div style="width:745px;height:40px;background:#D9661F;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">45.6</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">GLSL, ShuffleXor</p>
+<div style="width:239px;height:40px;background:#F2C7A8;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">14.6 <span style="color:#B4501A">· wrong sums</span></p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px">GLSL, subgroupAdd</p>
+<div style="width:224px;height:40px;background:#D9661F;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">13.7</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:560px;font-size:26px"><b>Mojo route, warp.sum as one reduction</b></p>
+<div style="width:240px;height:40px;background:#2563C9;border-radius:6px"></div>
+<p style="font-size:26px;font-weight:600">14.7 · correct</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Llama on the stock driver: <b>1,392 → 285 ms a token</b>, still 48 of 48 tokens right.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 10 · blue: Mojo through LLVM · orange: GLSL through glslc</p>
+<aside>On the stock driver, the first Llama ran five times slower than on Turnip, and the matrix-vector kernel was three and a half times slower than it should be. To find out whether that was the cost of going through LLVM, we wrote the same kernel in GLSL, Vulkan’s standard shading language, and swapped it into the runtime. GLSL with generic shuffles was just as slow, 45.6 milliseconds, so the route was not the problem. The ShuffleXor instruction was fast, but gave wrong sums, because this driver does not reconverge a subgroup after a loop. The subgroupAdd reduction was fast and correct. LLVM 22 can only emit the generic shuffle, and Mojo’s warp.sum on AMD is six butterfly steps of lane moves. So we taught the retargeter to recognize those six steps and replace them with one native subgroup reduction. The kernel dropped to 14.7 milliseconds, and Llama on the stock driver went from 1,392 to 285 milliseconds a token, with every token still matching.</aside>
+</section>

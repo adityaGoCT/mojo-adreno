@@ -1,0 +1,17 @@
+<section id="native-results" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Native target vs retargeter, same driver</h2>
+<table style="font-size:27px;color:#18212F;width:1664px">
+<tr><th style="width:34%">Kernel</th><th style="width:22%;text-align:right">Native target</th><th style="width:22%;text-align:right">mojo2vk</th><th style="width:22%;text-align:right">Check</th></tr>
+<tr><td>Vector add</td><td style="text-align:right">1.6–1.7</td><td style="text-align:right">1.7–2.2</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>vec4 add</td><td style="text-align:right">11.1</td><td style="text-align:right">10.0</td><td style="text-align:right">pass</td></tr>
+<tr><td>Warp sum</td><td style="text-align:right">2.31</td><td style="text-align:right">2.30</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>Block sum</td><td style="text-align:right"><b>6.3</b></td><td style="text-align:right">13.7</td><td style="text-align:right">pass</td></tr>
+<tr><td>Naive SGEMM</td><td style="text-align:right">670</td><td style="text-align:right">670</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>Shared-tile SGEMM</td><td style="text-align:right">230</td><td style="text-align:right">234</td><td style="text-align:right">pass</td></tr>
+<tr><td>fp16-tile SGEMM</td><td style="text-align:right"><b>183</b></td><td style="text-align:right">216</td><td style="text-align:right">pass</td></tr>
+<tr style="background:#EEF1F5"><td>Register-tile SGEMM</td><td style="text-align:right">34.4</td><td style="text-align:right">34.9</td><td style="text-align:right">pass</td></tr>
+</table>
+<p style="font-size:28px;color:#4A5568">Faster where barriers dominate: the native barrier orders shared memory only.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 17 · Mesa Turnip · ms, median of 20 runs · SGEMMs 1024³ · vector add varies run to run</p>
+<aside>Here is the scorecard: the same eight kernels, the same Turnip driver, the same runner, compiled once through the retargeter and once through the native target. Every kernel passes the full output check both ways. Speed is the same or better. Vector add, warp sum, naive SGEMM and register-tiled SGEMM are level; small kernels like vector add vary by a few tenths of a millisecond from run to run. The two kernels that lean on barriers are faster natively: block sum by more than two times and the fp16 tiles by 15 percent. That is not magic. The retargeter’s barrier also orders global memory, as CUDA’s __syncthreads does; the native barrier orders shared memory only, like GLSL’s barrier, because LLVM has no intrinsic for the in-between variant. For these kernels that is all they need, but it is a semantic difference worth knowing about.</aside>
+</section>

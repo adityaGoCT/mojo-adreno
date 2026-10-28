@@ -118,7 +118,7 @@ def reference(model, ids, max_new, eos):
 
 
 def build_and_push(model_dir, backend):
-    sh(sys.executable, HERE / "build_kernels.py")
+    sh(sys.executable, HERE / "build_kernels.py", "--flavor", backend)
     sh(CC, "-O2", "-o", BUILD / "llama_vk", HERE / "llama_vk.c", "-ldl")
     remote = f"{DEV}/{model_dir.name}"  # model / model-random: same sizes, so separate directories
     sh("adb", "shell", f"mkdir -p {remote} {DEV}/{backend}")
@@ -136,7 +136,8 @@ def main():
     ap.add_argument("--model", required=True, help="Hugging Face snapshot dir of Llama-3.2-1B(-Instruct), or 'random'")
     ap.add_argument("--prompt", default="Explain in two sentences why the sky is blue.")
     ap.add_argument("--max-new", type=int, default=48)
-    ap.add_argument("--backend", default="stock", choices=["stock", "turnip"])
+    ap.add_argument("--backend", default="stock", choices=["stock", "turnip", "native"],
+                    help="native: kernels from a source-built Mojo's Vulkan SPIR-V target, on Mesa Turnip")
     ap.add_argument("--reexport", action="store_true")
     a = ap.parse_args()
     t0 = time.time()
@@ -158,7 +159,7 @@ def main():
     print(f"reference (PyTorch fp32 on the Mac CPU): {len(ref)} tokens in {time.time() - t1:.1f} s")
 
     build_and_push(model_dir, a.backend)
-    env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if a.backend == "turnip" else ""
+    env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if a.backend in ("turnip", "native") else ""
     cmd = (f"cd {DEV} && {env}LLAMA_EOS={','.join(map(str, eos))} LLAMA_LOGITS={DEV}/logits.bin "
            f"./llama_vk {model_dir.name} {a.backend} {a.max_new} {' '.join(map(str, ids))}")
     print(f"phone ({a.backend}):", flush=True)

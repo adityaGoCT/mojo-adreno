@@ -1,0 +1,18 @@
+<section id="coverage" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Compile test: MAX graphs for vulkan:adreno710</h2>
+<div style="display:flex;gap:40px;align-items:flex-start">
+<div style="width:320px;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:32px">
+<p style="font-size:96px;font-weight:700;line-height:1;color:#F08A3C">16/25</p>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.35">graphs give valid SPIR-V for every kernel, checked by spirv-val</p>
+</div>
+<table style="flex:1;font-size:25px;color:#18212F">
+<tr><th style="width:52%">Graphs</th><th style="width:48%">Status</th></tr>
+<tr><td>Elementwise ops, transpose, slice, sum, mean, three matmuls, avg pool</td><td><b>Valid</b> · 16 graphs</td></tr>
+<tr style="background:#EEF1F5"><td>softmax, layer_norm, max_pool2d</td><td>One kernel hits LLVM 24’s merge bug</td></tr>
+<tr><td>cast, concat, gather, argmax, conv2d, ResNet-18</td><td>Not yet: six open issues</td></tr>
+</table>
+</div>
+<p style="font-size:28px;color:#4A5568;line-height:1.4">Fixes along the way: block-size metadata, a syncwarp hook, an Adreno SIMT matmul branch, tensors passed by value and split into buffers, vector accesses split per element, Vulkan atomic scopes.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 20 · MAX 26.8 dev from source, virtual-device mode · compile only: nothing has run yet</p>
+<aside>Here is the compile test. MAX has a virtual-device mode for building models on machines without the GPU, so we added a Vulkan entry to it, pointed it at adreno710, and compiled 24 one-operation graphs plus a full ResNet-18, keeping every SPIR-V module and checking each with spirv-val. At first only two graphs compiled. Six fixes moved that. MAX kernels declare their block size through a metadata tag that had no value for our target. Reductions needed a warp-synchronize hook. Matrix multiply picked tensor-core paths this GPU does not have, so the Adreno target got its own branch to MAX’s plain SIMT kernel; on Adreno 8xx, with cooperative matrices, that branch is where a matrix-unit path would go. The big one: MAX passes tensors to kernels as structs holding device pointers, in memory, and Vulkan cannot load a pointer from memory. Passing them by value instead lets our backend give each tensor’s pointer its own buffer and its shape a slot in the params buffer. Then vector loads had to be split into per-element accesses, and atomics narrowed to the scopes and orderings Vulkan allows. Now 16 of 25 graphs give valid SPIR-V for every kernel, including all three matrix multiplies and the reductions. Three more compile but trip LLVM 24’s structured-control-flow bug, and six still fail, ResNet-18 among them. One caution: this is compile only. Nothing has run, so correctness is untested until there is a runtime on the phone.</aside>
+</section>

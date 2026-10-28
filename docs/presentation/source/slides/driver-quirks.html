@@ -1,0 +1,38 @@
+<section id="driver-quirks" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Bugs in the way, and how we got around them</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">LLVM 22</p>
+<h3 style="font-size:28px;font-weight:600">Barrier semantics Vulkan rejects</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Patched in the SPIR-V binary.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">LLVM 22</p>
+<h3 style="font-size:28px;font-weight:600">Loop strength reduction crashes it</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">llc -disable-lsr.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">LLVM 22</p>
+<h3 style="font-size:28px;font-weight:600">if/elif chain, invalid structured CFG</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Kernel rewritten as one if/else.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Stock driver</p>
+<h3 style="font-size:28px;font-weight:600">Two 16-bit shared arrays overlap</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Pad to 4 bytes per element.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Stock driver</p>
+<h3 style="font-size:28px;font-weight:600">No reconvergence after loops</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Uniform loops, shared-memory reductions.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Stock driver</p>
+<h3 style="font-size:28px;font-weight:600">No 64-bit integers</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Index math narrowed to 32 bits.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Each one stopped a kernel cold or gave wrong answers. None is Mojo’s fault.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 6</p>
+<aside>Most of the effort in act one went into bugs that were not in Mojo at all. Three were in LLVM 22’s SPIR-V backend: it emits barrier memory semantics that Vulkan forbids, so we patch the binary; loop strength reduction turns indices into pointer increments that crash its pointer legalizer, so we turn that pass off; and an if-elif chain produced control flow that is not properly structured, so we rewrote that kernel as a single if-else. Three more were in Qualcomm’s stock driver. It lays out two 16-bit shared arrays on top of each other, so we pad them. It does not bring a subgroup back together after a loop where lanes ran different trip counts, so shuffles read inactive lanes and Llama’s attention came out 64 times off until we made loops uniform and moved reductions into shared memory. And it has no 64-bit integers, while Mojo’s Int is 64-bit, so all index math is narrowed. Every one of these either crashed or silently produced wrong numbers, which is why every kernel run checks every output.</aside>
+</section>

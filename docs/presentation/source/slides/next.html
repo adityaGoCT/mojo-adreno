@@ -1,0 +1,20 @@
+<section id="next" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What comes next</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">The native target</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Qualcomm’s stock driver: Vulkan 1.1 and 32-bit index math in the backend. OpenCL C from the same target.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Faster Llama</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">From 283 toward the 156 ms floor: int4 weights, fused kernels, the prompt as matrix products.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #6B7280;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Upstream</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Report LLVM 24’s two SPIR-V bugs. Offer Modular the warp-sum hook and the target.</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">The question is no longer whether Mojo can reach a phone GPU. It is how much of MAX should follow it there.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 23 · code: adityaGoCT/mojo-adreno · native target: adityaGoCT/modular, branch adreno-spirv-target</p>
+<aside>Where next. On the compiler side, the native target covers Mesa Turnip only. Qualcomm’s stock driver needs a second flavour: SPIR-V for Vulkan 1.1, and the 32-bit narrowing of index math moved into the backend, where it belongs. The same target could also emit OpenCL C, replacing our second retargeter. For Llama, decode is at 55 percent of the bandwidth floor; int4 weights would cut the bytes read by three quarters, fusing small kernels would cut dispatches, and processing the prompt as matrix products would turn eleven seconds into far less. Upstream, there are two LLVM SPIR-V bugs worth reporting with small reproducers, and the warp-sum hook and the target itself are natural contributions to Modular once their compiler accepts outside changes, which they have said will be by the end of 2026. The question we started with, can Mojo reach a phone GPU, is answered. The open question is how much of MAX should follow. Thank you.</aside>
+</section>

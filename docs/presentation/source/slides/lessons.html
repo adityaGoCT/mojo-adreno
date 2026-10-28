@@ -1,0 +1,27 @@
+<section id="lessons" data-transition="fade" data-section="What we learned and what comes next" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What we learned</h2>
+<div style="display:flex;flex-direction:column;gap:22px">
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:520px">LLVM IR is a workable bridge</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">A retargeter got Llama running on a GPU Mojo never targeted, exactly.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:520px">The losses were lowerings</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">One warp-sum lowering cost 4.9× on Llama; SPIR-V itself cost little.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:520px">Drivers decide</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Two Vulkan drivers disagree on speed, and twice on correctness. Check every output.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:520px">A native target removes fragility</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Same speed, no stand-in target, no text patching. SPIR-V’s limits remain.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:520px">MAX’s runtime is the long pole</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">The plugin design makes a new GPU about 1,700 lines; running MAX models needs much more.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo and MAX on Adreno · 22</p>
+<aside>Five things to take away. One: Mojo’s LLVM IR turned out to be a workable bridge. With a retargeter we got a real model running on a GPU Mojo never targeted, token for token identical to PyTorch. Two: when it was slow, the cause was almost never SPIR-V as such. It was one specific lowering, the warp sum, which cost a factor of 4.9 on Llama until we fixed it. Three: the drivers decide. Two Vulkan drivers on the same chip disagree about what is fast, and twice about what is correct, so every run checks every output. Four: the native compiler target did not make anything faster than the retargeter at its best, but it made the whole path robust and much simpler, and it lives where the information is. The limits of SPIR-V and the drivers remain. And five: Mojo’s plugin design is real. A new GPU target, with enough fixes to compile two thirds of our MAX test graphs, was about seventeen hundred lines of C++ and Mojo. But running MAX models, rather than Mojo kernels, needs the runtime, and that is the long pole.</aside>
+</section>

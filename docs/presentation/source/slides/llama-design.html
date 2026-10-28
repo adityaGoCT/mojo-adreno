@@ -1,0 +1,36 @@
+<section id="llama-design" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Act 2 · Llama 3.2 1B on the phone’s GPU</h2>
+<div style="display:flex;align-items:center;gap:16px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Export</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">fp16, fused q/k/v and gate/up: 2.47 GB, 103 tensors</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">7 Mojo kernels</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">embed, rmsnorm, gemv, gemv_add, rope_kv, attention, silu_mul</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">llama_vk.c</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">398 lines of C: buffers, pipelines, 150 dispatches a token</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:40px;height:20px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Check</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">tokens and logits against PyTorch fp32</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#EEF1F5;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Small kernels</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">All of decode is 219 lines of Mojo. The GEMVs read nearly every weight byte, and end in warp.sum.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#EEF1F5;border-radius:14px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Driver limits shape the export</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The stock driver binds at most 128 MB, so the 525 MB embedding table is split into 4 chunks.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 8 · meta-llama/Llama-3.2-1B-Instruct, official weights</p>
+<aside>Kernels that pass tests are one thing; act two asks whether the pipeline holds up for a real model. We took the official Llama 3.2 1B Instruct weights and exported them to fp16, fusing the query, key and value projections into one matrix and the gate and up projections into another, which leaves 2.47 gigabytes in 103 tensors. The stock driver will not bind a buffer larger than 128 megabytes, so the token-embedding table is split into four chunks. Decode is seven Mojo kernels, 219 lines in total; the matrix-vector products carry almost all of the memory traffic and end with a warp sum. Instead of MAX, which cannot run on Android, a 398-line C program drives Vulkan: it uploads the weights once, builds the pipelines, and records 150 dispatches for every token. On the Mac, the same prompt runs through PyTorch in fp32, and we compare every generated token and the logits after the prompt.</aside>
+</section>

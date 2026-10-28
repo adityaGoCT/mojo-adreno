@@ -1,0 +1,24 @@
+<section id="max-walls" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Where MAX stopped in 26.7</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">No SPIR-V target</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Mojo’s compiler linked LLVM’s NVPTX, AMDGPU and Apple backends, not SPIR-V.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">No Android runtime</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">MAX shipped for macOS and Linux hosts, with no Vulkan or OpenCL device.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">Opaque internals</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The 1.2 binary cannot dump Mojo’s MLIR, so a retargeter had to start at LLVM IR.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">Vendor-tuned kernels</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">MAX’s library kernels lean on tensor cores, matrix cores and async copies.</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">So Llama ran on our own C runtime, and every kernel went through the retargeter.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 12</p>
+<aside>So where did MAX stop? Four walls. First, there was no code generator for this GPU: the Mojo compiler linked LLVM’s NVIDIA, AMD and Apple backends, and no SPIR-V. Second, MAX’s runtime came as wheels for macOS and Linux hosts, with device backends for CUDA, HIP and Metal, and nothing for Vulkan, OpenCL or Android. Third, the shipped compiler is a closed binary: it would not dump its internal MLIR, so the earliest point we could grab a kernel was the LLVM IR, after Mojo had already committed to an AMD target. Fourth, even if we could reach the phone, MAX’s optimized library kernels are written around NVIDIA tensor cores, AMD matrix cores and asynchronous copies, which have no Vulkan equivalent on this GPU. That is why act two used our own 398-line Vulkan program instead of MAX, and why every kernel went through the retargeter. Then the situation changed.</aside>
+</section>
