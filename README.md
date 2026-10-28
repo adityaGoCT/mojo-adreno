@@ -28,8 +28,9 @@ compiles the same kernels and Llama straight to Vulkan SPIR-V, with no retargete
 
 Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (23 slides,
 PDF), the whole experiment from the retargeter to the native target and a compile-only test of MAX
-graphs. Also as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html) (download and
-open it; ←/→ to move, N for notes) with [speaker notes](docs/presentation/mojo-and-max-on-adreno-speaker-notes.md).
+graphs. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (slides with speaker
+notes, in the browser), or as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html)
+(download and open it; ←/→ to move, N for notes) with [speaker notes](docs/presentation/mojo-and-max-on-adreno-speaker-notes.md).
 
 [![Mojo and MAX on Adreno, title slide](docs/presentation/cover.png)](docs/presentation/mojo-and-max-on-adreno.pdf)
 
