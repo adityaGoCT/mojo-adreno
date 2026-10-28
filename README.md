@@ -338,7 +338,16 @@ bytes) into bindings at the allocation and offset each pointer points into, and 
 All 25 graphs of the compile test run this way and match NumPy, or the same graph on MAX's CPU
 device: the elementwise ops, cast, transpose, slice, concat, gather, the reductions, argmax,
 softmax, layer_norm, three matmuls, conv2d, both pools, and ResNet-18 (max error 5.7e-5 against
-the CPU, 14 s: the remote link costs one round trip per launch).
+the CPU, 8.3 s per image once the weights are on the phone).
+
+The link does not wait: the plugin names buffers and modules itself and streams every request,
+and waits only to read data back or at a synchronization point. The server submits each launch,
+copy and fill at once, in a small command buffer of its own that starts with a barrier on the
+ones before (one submission holding a ResNet's worth of slow kernels outlasts the GPU driver's
+timeout and loses the device), and waits only when the host needs memory. That took ResNet-18
+from 14-21 s to 8.3 s per image, which is now all GPU time: 24 kernels, most of it MAX's naive
+conv2d, which gives each thread one output pixel across all output channels (a 7x7x512 layer
+runs on 256 threads).
 
 ```bash
 remote/start_server.sh        # builds both sides, starts vk_server on the phone; leave it running
@@ -351,8 +360,9 @@ MODULAR_DRIVER_PLUGINS="cpu@$PWD/bazel-bin/Target/CPUPlugin.so;vulkan@$HOME/runi
 ```
 
 `python3 remote/test_plugin.py` drives the plugin alone through the HAL C API (no MAX build).
-Queues are synchronous and every operation is a round trip, so this is for correctness, not
-speed; running MAX on the phone itself would need an Android build of its runtime.
+`VK_REMOTE_PROFILE=1` prints the plugin's requests and waits, `VK_SERVER_PROFILE=1` (to
+`start_server.sh`) the server's batches, and `=2` times each launch on its own. Running MAX on the
+phone itself would need an Android build of its runtime.
 
 ## What did not work (and why)
 

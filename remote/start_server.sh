@@ -20,4 +20,4 @@ adb shell pkill -x vk_server || true   # -x: the server, not this shell, whose c
 adb shell mkdir -p $DEV
 adb push build/remote/vk_server $DEV/ > /dev/null
 adb forward tcp:$PORT tcp:$PORT
-exec adb shell "cd $DEV && LD_LIBRARY_PATH=/data/local/tmp/turnip exec ./vk_server $PORT"
+exec adb shell "cd $DEV && VK_SERVER_PROFILE=${VK_SERVER_PROFILE:-} LD_LIBRARY_PATH=/data/local/tmp/turnip exec ./vk_server $PORT"

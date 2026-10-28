@@ -10,7 +10,9 @@
 // pointer (a device address this plugin handed out) becomes a storage-buffer binding at the
 // allocation and offset it points into, a scalar a 64-bit slot of the params buffer.
 //
-// Queues are synchronous: the server runs each request to completion, in order.
+// Requests stream to the server in order without waiting, and it batches the GPU work; the plugin
+// waits only for data it reads back and at synchronization points (queue or event synchronize, a
+// host function), which also report errors from the requests before them.
 #include "HAL/M_driver_api.h"
 #include "protocol.h"
 
@@ -22,6 +24,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +41,26 @@ namespace {
 std::mutex lock;  // one request at a time on the one connection
 int sock = -1;
 std::string lastError;
+
+// VK_REMOTE_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
+// received, printed at exit.
+struct Profile {
+  struct Entry { uint64_t count = 0, sent = 0, received = 0; double seconds = 0; };
+  Entry ops[16];
+  bool on = getenv("VK_REMOTE_PROFILE") != nullptr;
+  ~Profile() {
+    if (!on)
+      return;
+    static const char *names[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load",
+                                  "launch", "sync"};
+    fprintf(stderr, "vulkan_remote profile:\n");
+    for (int op = 1; op <= OP_SYNC; ++op)
+      if (ops[op].count)
+        fprintf(stderr, "  %-7s %6llu requests %9.3f s  sent %8.2f MB  received %8.2f MB\n", names[op],
+                static_cast<unsigned long long>(ops[op].count), ops[op].seconds, ops[op].sent / 1e6,
+                ops[op].received / 1e6);
+  }
+} profile;
 
 bool connectServer() {
   if (sock >= 0)
@@ -86,17 +109,27 @@ bool recvAll(void *data, size_t n) {
   return true;
 }
 
-// Sends one request (its payload in up to two pieces) and returns whether it succeeded; the
-// reply's payload goes to `out`, or its message to `lastError`.
+// Sends one request (its payload in up to two pieces). INFO, READ and SYNC wait for the answer:
+// its payload goes to `out`, or its message (the first error since the last answer) to
+// `lastError`. Other requests return once sent.
 bool call(uint32_t op, const void *a, size_t na, const void *b = nullptr, size_t nb = 0,
           std::string *out = nullptr) {
   std::lock_guard<std::mutex> guard(lock);
   if (!connectServer())
     return false;
+  auto start = std::chrono::steady_clock::now();
+  if (getenv("VK_REMOTE_DEBUG") && op != OP_LAUNCH) {  // every request but launches (logged in full)
+    static const char *names[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync"};
+    fprintf(stderr, "vulkan_remote: %s", op <= OP_SYNC ? names[op] : "?");
+    for (size_t i = 0; i < std::min<size_t>(na / 8, 5); ++i)
+      fprintf(stderr, " %llx", static_cast<unsigned long long>(static_cast<const uint64_t *>(a)[i]));
+    fprintf(stderr, " (+%zu bytes)\n", nb);
+  }
   uint32_t header[2] = {op, static_cast<uint32_t>(na + nb)};
-  uint32_t reply[2];
+  uint32_t reply[2] = {0, 0};
+  bool answered = op == OP_INFO || op == OP_READ || op == OP_SYNC;
   if (!sendAll(header, sizeof header) || (na && !sendAll(a, na)) || (nb && !sendAll(b, nb)) ||
-      !recvAll(reply, sizeof reply)) {
+      (answered && !recvAll(reply, sizeof reply))) {
     close(sock);
     sock = -1;
     lastError = "lost the connection to vk_server";
@@ -113,6 +146,13 @@ bool call(uint32_t op, const void *a, size_t na, const void *b = nullptr, size_t
     lastError = "vk_server: " + payload;
     fprintf(stderr, "vulkan_remote: %s\n", lastError.c_str());
     return false;
+  }
+  if (profile.on && op < 16) {
+    Profile::Entry &e = profile.ops[op];
+    e.count++;
+    e.sent += na + nb;
+    e.received += reply[1];
+    e.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   }
   if (out)
     *out = std::move(payload);
@@ -303,6 +343,7 @@ int driverSentinel, deviceSentinel, contextSentinel, queueSentinel, eventSentine
 std::map<uint64_t, Memory *> byAddress;  // device memory by address
 uint64_t nextAddress = 1ull << 40;
 Memory *nullBuffer;  // bound for a null pointer argument
+uint64_t nextBuffer = 1, nextModule = 1;  // the server's names, chosen here
 
 Memory *memoryAt(uint64_t address, uint64_t &offset) {
   auto it = byAddress.upper_bound(address);
@@ -318,11 +359,11 @@ Memory *memoryAt(uint64_t address, uint64_t &offset) {
 M_driver_status_t allocate(uint64_t size, M_driver_memory_t *memory) {
   if (!memory || !size)
     return M_DRIVER_STATUS_INVALID_ARG;
-  std::string out;
-  if (!call(OP_ALLOC, &size, 8, nullptr, 0, &out))
+  uint64_t request[2] = {nextBuffer, size};
+  if (!call(OP_ALLOC, request, 16))
     return failed();
   auto *m = new Memory;
-  memcpy(&m->buffer, out.data(), 8);
+  m->buffer = nextBuffer++;
   m->size = size;
   m->address = nextAddress;
   nextAddress += (size + 0xffff) & ~0xffffull;  // 64 KiB apart: never adjacent
@@ -902,8 +943,11 @@ M_driver_status_t M_driver_queue_wait_for_events(M_driver_queue_t, M_driver_even
   return M_DRIVER_STATUS_SUCCESS;
 }
 
+// Waits for everything sent so far; reports the first error among it.
+static M_driver_status_t synchronize() { return call(OP_SYNC, nullptr, 0) ? M_DRIVER_STATUS_SUCCESS : failed(); }
+
 M_DRIVER_API_EXPORT
-M_driver_status_t M_driver_queue_synchronize(M_driver_queue_t) { return M_DRIVER_STATUS_SUCCESS; }
+M_driver_status_t M_driver_queue_synchronize(M_driver_queue_t) { return synchronize(); }
 
 M_DRIVER_API_EXPORT
 M_driver_status_t M_driver_queue_is_stream(M_driver_queue_t, bool *is_stream) {
@@ -919,7 +963,9 @@ M_driver_status_t M_driver_queue_launch_host_func(M_driver_queue_t queue, void (
     return M_DRIVER_STATUS_BAD_QUEUE;
   if (!fn)
     return M_DRIVER_STATUS_INVALID_ARG;
-  fn(user_data);  // the queue is synchronous: everything before has finished
+  if (M_driver_status_t status = synchronize())  // the function runs after everything before it
+    return status;
+  fn(user_data);
   return M_DRIVER_STATUS_SUCCESS;
 }
 
@@ -928,7 +974,7 @@ M_driver_status_t M_driver_queue_wait_value64(M_driver_queue_t, uint64_t, uint64
   return M_DRIVER_STATUS_INCOMPATIBLE;
 }
 
-// --- events: the queue is synchronous, so every event has happened ----------------------------
+// --- events: one in-order queue, so an event has happened once everything before it has ----------
 
 M_DRIVER_API_EXPORT
 M_driver_status_t M_driver_event_create(M_driver_context_t, M_driver_event_flags_t flags, M_driver_event_t *event) {
@@ -942,14 +988,14 @@ M_DRIVER_API_EXPORT
 M_driver_status_t M_driver_event_destroy(M_driver_context_t, M_driver_event_t) { return M_DRIVER_STATUS_SUCCESS; }
 
 M_DRIVER_API_EXPORT
-M_driver_status_t M_driver_event_synchronize(M_driver_context_t, M_driver_event_t) {
-  return M_DRIVER_STATUS_SUCCESS;
-}
+M_driver_status_t M_driver_event_synchronize(M_driver_context_t, M_driver_event_t) { return synchronize(); }
 
 M_DRIVER_API_EXPORT
 M_driver_status_t M_driver_is_event_ready(M_driver_context_t, M_driver_event_t, bool *ready) {
   if (!ready)
     return M_DRIVER_STATUS_INVALID_ARG;
+  if (M_driver_status_t status = synchronize())
+    return status;
   *ready = true;
   return M_DRIVER_STATUS_SUCCESS;
 }
@@ -985,10 +1031,10 @@ M_driver_status_t M_driver_function_load(M_driver_context_t, M_driver_runtime_bu
   if (!describe(b->spirv, f->description))
     return M_DRIVER_STATUS_BAD_FUNCTION;
   if (!b->module) {
-    std::string out;
-    if (!call(OP_LOAD, b->spirv.data(), b->spirv.size(), nullptr, 0, &out))
+    uint64_t id = nextModule;
+    if (!call(OP_LOAD, &id, 8, b->spirv.data(), b->spirv.size()))
       return failed();
-    memcpy(&b->module, out.data(), 8);
+    b->module = nextModule++;
   }
   f->module = b->module;
   *function = reinterpret_cast<M_driver_function_t>(f.release());
