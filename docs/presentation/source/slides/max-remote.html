@@ -1,0 +1,35 @@
+<section id="max-remote" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">MAX runs ResNet-18 on the phone</h2>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">MAX on the Mac</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">graph compiler, host code, HAL device layer</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Driver plugin</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">MAX’s C interface; launches laid out from each kernel’s description</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Phone over adb</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">a small Vulkan executor on the Adreno 710</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:28px 32px">
+<p style="font-size:80px;font-weight:700;line-height:1;color:#7FA8F0">25/25</p>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.35">MAX graphs run on the phone through MAX’s own runtime and match</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:28px 32px">
+<p style="font-size:80px;font-weight:700;line-height:1;color:#7FA8F0">5.7e-5</p>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.35">ResNet-18’s largest difference from MAX on the CPU</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:28px 32px">
+<p style="font-size:80px;font-weight:700;line-height:1;color:#F08A3C">14 s</p>
+<p style="font-size:26px;color:#DDE5F0;line-height:1.35">per image: one network round trip per kernel launch</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 22 · remote/ in mojo-adreno, about 1,500 lines · MAX built with --//:hal_device_context=true</p>
+<aside>A test script can run single kernels, but whole models need MAX’s own host code to pick kernels and fill in their arguments. So we made the phone a device of MAX on the Mac. MAX has a plugin interface for new devices, about sixty C functions for memory, copies, kernels and launches. Our plugin implements it and forwards each call over adb to a small Vulkan program on the phone. Allocations get device addresses on the Mac side, and at each launch the plugin reads the kernel’s launch description to turn MAX’s arguments into Vulkan buffers and parameters. On MAX’s side it took about sixty lines: Vulkan as a known vendor, a hook for plain grid and block launches, and building MAX’s Mojo package for its plugin-based device layer. The result: all 25 graphs run on the phone through MAX’s own runtime, from additions and gathers to convolutions and the full ResNet-18, which matches MAX on the Mac’s CPU to six decimal places. It takes 14 seconds per image, because every operation is a network round trip; this is a correctness milestone, not a speed one. Running MAX on the phone itself would need an Android build of its runtime.</aside>
+</section>

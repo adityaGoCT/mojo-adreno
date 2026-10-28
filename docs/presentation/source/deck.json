@@ -3,7 +3,7 @@
   "createdOnFiles": {"v": 1, "at": "2026-10-27T21:30:00Z"},
   "lists": "css",
   "title": "Mojo and MAX on Adreno",
-  "order": ["cover", "question", "journey", "retarget-pipeline", "retarget-rewrites", "driver-quirks", "kernel-ladder", "llama-design", "llama-result", "warp-fix", "max-what", "max-walls", "open-source", "native-built", "native-pipeline", "native-fixes", "native-results", "llama-native", "max-runtime", "coverage", "max-on-phone", "runtime-path", "lessons", "next"],
+  "order": ["cover", "question", "journey", "retarget-pipeline", "retarget-rewrites", "driver-quirks", "kernel-ladder", "llama-design", "llama-result", "warp-fix", "max-what", "max-walls", "open-source", "native-built", "native-pipeline", "native-fixes", "native-results", "llama-native", "max-runtime", "coverage", "max-on-phone", "max-remote", "runtime-path", "lessons", "next"],
   "sections": {
     "intro": {"description": "Why put Mojo and MAX on a phone GPU, and the route we took", "start": "cover"},
     "act1": {"description": "Act 1: retarget Mojo’s LLVM IR to Vulkan SPIR-V and OpenCL C", "start": "retarget-pipeline"},
