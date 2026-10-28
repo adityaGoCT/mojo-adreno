@@ -283,9 +283,12 @@ Same eight kernels, same Turnip driver and runner; ms, median of 20 runs, SGEMMs
 The two barrier-heavy kernels are faster because the native `barrier()` orders shared memory only
 (as GLSL's `barrier()` does); the retargeter's also orders global memory. Llama 3.2 1B through the
 native target: 48 of 48 tokens identical to PyTorch, logits within 6.2e-5, 283.6 ms/token (mojo2vk:
-285.0 ms/token in the same session). These were measured before the target began running LLVM's
-StructurizeCFG before codegen (see below); the kernels still pass `spirv-val`, and a rerun on the
-phone is pending.
+285.0 ms/token in the same session). Rerun after the target began running LLVM's StructurizeCFG
+before codegen (see below), on 2026-10-28: all eight kernels PASS, and the native target is as fast
+as or faster than mojo2vk on each (vec4 add 4.67 vs 5.65 ms, block sum 4.65 vs 6.81, fp16 tiles 183
+vs 216, register tiles 32.3 vs 32.9); Llama 48 of 48 tokens, 281.0 ms/token (mojo2vk 278.7 in the
+same session). Both builds' logits were within 1.4e-4 of PyTorch in that session, against 6.2e-5
+before; since the unchanged mojo2vk path moved the same way, the cause is shared and not yet known.
 
 MAX graphs, compile only (MAX's virtual-device mode for `vulkan:adreno710`; nothing runs, since MAX
 has no Vulkan or Android runtime): all 25 test graphs give SPIR-V that passes `spirv-val` for every
