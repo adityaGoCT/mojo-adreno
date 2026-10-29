@@ -12,6 +12,9 @@
 //   LLAMA_PREFILL=<dir>       batched prefill with the prefill840 kernels in <dir> (build_kernels.py):
 //                             all prompt tokens at once, the matmuls on KHR cooperative matrices
 //                             (Adreno 8xx, Vulkan 1.3), then decode as above
+//   QCOM_COOPMAT=0            with LLAMA_PREFILL on a driver with VK_QCOM_cooperative_matrix_conversion:
+//                             keep the KHR-only kernels (otherwise <prefill dir>/qcom/<kernel>.spv, from
+//                             qcom/*.comp, replaces each kernel it has; runner/qcom_coopmat.h)
 //   LLAMA_PROFILE=1           with LLAMA_PREFILL: first each prefill dispatch alone, time per kernel
 #define VK_NO_PROTOTYPES
 #include <dlfcn.h>
@@ -23,6 +26,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
+
+#include "../runner/qcom_coopmat.h"
 
 // Llama 3.2 1B; must match llama/kernels and the manifest header
 enum { D = 2048, L = 16, H = 32, KVH = 8, HD = 64, F = 8192, V = 128256, MAXPOS = 512, CHUNKS = 4 };
@@ -140,13 +145,17 @@ enum { K_EMBED, K_RMSNORM, K_GEMV, K_GEMV_ADD, K_ROPE_KV, K_ATTENTION, K_SILU_MU
        K_P_RMSNORM = NKERNELS, K_P_GEMM, K_P_ADD, K_P_ROPE_KV, K_P_ATTENTION, K_P_SILU_MUL, K_P_GEMM_Q4,
        K_P_ATTENTION_SCALAR, NALL };
 static int attention_fused = 1;  // p_attention, unless the driver cannot create it
+static int use_qcom;             // prefill kernels from <dir>/qcom/ where present
 
 static void load_kernels(const char* dir, int first, int last) {
   for (int k = first; k < last; ++k) {
     kernel_t* kn = &kernels[k];
     char path[512];
+    snprintf(path, sizeof path, "%s/qcom/%s.spv", dir, kn->name);
+    FILE* f = use_qcom && k >= NKERNELS ? fopen(path, "rb") : NULL;
+    if (f) printf("prefill: %s from qcom/ (VK_QCOM_cooperative_matrix_conversion)\n", kn->name);
     snprintf(path, sizeof path, "%s/%s.spv", dir, kn->name);
-    FILE* f = fopen(path, "rb");
+    if (!f) f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(2); }
     fseek(f, 0, SEEK_END);
     size_t n = (size_t)ftell(f);
@@ -322,6 +331,17 @@ int main(int argc, char** argv) {
   for (int i = 0; i < (prefill ? 7 : 6); ++i)
     for (uint32_t j = 0; j < nx; ++j)
       if (!strcmp(want[i], xp[j].extensionName)) { exts[ne++] = want[i]; break; }
+  int has_qcom = 0;
+  for (uint32_t j = 0; j < nx; ++j) has_qcom |= !strcmp(xp[j].extensionName, QCOM_CONVERSION_NAME);
+  QcomConversionFeatures qcf = {QCOM_CONVERSION_STYPE};
+  if (has_qcom) {
+    VkPhysicalDeviceFeatures2 q2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &qcf};
+    vkGetPhysicalDeviceFeatures2(pd, &q2);
+  }
+  use_qcom = prefill && has_qcom && qcf.cooperativeMatrixConversion && qcom_wanted();
+  if (use_qcom) cm.pNext = &qcf, exts[ne++] = QCOM_CONVERSION_NAME;  // enabled through the feature chain
+  if (prefill) printf("VK_QCOM_cooperative_matrix_conversion: %s%s\n", has_qcom ? "yes" : "no",
+                      use_qcom ? ", prefill uses qcom/ kernels" : "");
   float prio = 1.0f;
   VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, qfam, 1, &prio};
   VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &en};

@@ -15,6 +15,9 @@
 //   BONSAI_PREFILL=<dir>        batched prefill with the kernels of bonsai/kernels/prefill.mojo in <dir>
 //                               (build_kernels.py): the whole prompt at once, the packed projections
 //                               on KHR cooperative matrices (Adreno 8xx), then decode as above
+//   QCOM_COOPMAT=0              with BONSAI_PREFILL on a driver with VK_QCOM_cooperative_matrix_conversion:
+//                               keep the KHR-only kernels (otherwise <prefill dir>/qcom/<kernel>.spv,
+//                               qcom/*.comp, replaces each kernel it has; runner/qcom_coopmat.h)
 //   BONSAI_PROFILE=1            first token (with BONSAI_PREFILL: the prefill) one dispatch per
 //                               submit, time per kernel
 #define VK_NO_PROTOTYPES
@@ -29,6 +32,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
+
+#include "../runner/qcom_coopmat.h"
 
 // Bonsai 2 2B text model; must match kernels.mojo and prepare.py
 enum { D = 2048, F = 6144, V = 248320, LAYERS = 24, NW = 605, NB = 69, NCAND = V / 512 };
@@ -213,13 +218,18 @@ enum { K_HADAMARD, K_PACKED_LINEAR, K_PACKED_REDUCE, K_PACKED_HEAD, K_EMBEDDING,
        K_P_ATTENTION_VALUES, K_P_RESIDUAL, K_P_SWIGLU, K_P_CONV, K_P_DELTA_SCAN, K_P_GEMM_T2, K_P_SCALE,
        K_P_SCORES_MMA, NALL };
 
+static int use_qcom;  // prefill kernels from <dir>/qcom/ where present
+
 // The kernels shuffle across 64 lanes (Hadamard stages, reductions): require 64-lane subgroups.
 static void load_kernels(const char* dir, int first, int last, int subgroup_control, int full_subgroups) {
   for (int k = first; k < last; ++k) {
     kernel_t* kn = &kernels[k];
     char path[512];
+    snprintf(path, sizeof path, "%s/qcom/%s.spv", dir, kn->name);
+    FILE* f = use_qcom && k >= NKERNELS ? fopen(path, "rb") : NULL;
+    if (f) printf("prefill: %s from qcom/ (VK_QCOM_cooperative_matrix_conversion)\n", kn->name);
     snprintf(path, sizeof path, "%s/%s.spv", dir, kn->name);
-    FILE* f = fopen(path, "rb");
+    if (!f) f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(2); }
     fseek(f, 0, SEEK_END);
     size_t n = (size_t)ftell(f);
@@ -553,15 +563,26 @@ int main(int argc, char** argv) {
   vkEnumerateDeviceExtensionProperties(pd, NULL, &nx, NULL);
   VkExtensionProperties* xp = calloc(nx ? nx : 1, sizeof *xp);
   vkEnumerateDeviceExtensionProperties(pd, NULL, &nx, xp);
-  int has_cm = 0;
+  int has_cm = 0, has_qcom = 0;
   for (uint32_t i = 0; i < nx; ++i) has_cm |= !strcmp(xp[i].extensionName, cm_ext);
+  for (uint32_t i = 0; i < nx; ++i) has_qcom |= !strcmp(xp[i].extensionName, QCOM_CONVERSION_NAME);
   free(xp);
+  QcomConversionFeatures qcf = {QCOM_CONVERSION_STYPE};
+  if (has_qcom) {
+    VkPhysicalDeviceFeatures2 q2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &qcf};
+    vkGetPhysicalDeviceFeatures2(pd, &q2);
+  }
+  use_qcom = prefill && has_qcom && qcf.cooperativeMatrixConversion && qcom_wanted();
+  printf("VK_QCOM_cooperative_matrix_conversion: %s%s\n", has_qcom ? "yes" : "no",
+         use_qcom ? ", prefill uses qcom/ kernels" : "");
   if (prefill && (!has_cm || !cm.cooperativeMatrix || !v12.vulkanMemoryModel)) {
     fprintf(stderr, "prefill: no cooperative matrices\n");
     return 2;
   }
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR encm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
   encm.cooperativeMatrix = VK_TRUE;
+  QcomConversionFeatures enqcf = {QCOM_CONVERSION_STYPE, NULL, VK_TRUE};
+  if (use_qcom) encm.pNext = &enqcf;
   VkPhysicalDeviceVulkan13Features en13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, prefill ? &encm : NULL};
   en13.subgroupSizeControl = v13.subgroupSizeControl;
   en13.computeFullSubgroups = v13.computeFullSubgroups;
@@ -581,8 +602,9 @@ int main(int argc, char** argv) {
   VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &en};
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = prefill ? 1 : 0;
-  dci.ppEnabledExtensionNames = &cm_ext;
+  const char* exts[2] = {cm_ext, QCOM_CONVERSION_NAME};
+  dci.enabledExtensionCount = prefill ? (use_qcom ? 2 : 1) : 0;
+  dci.ppEnabledExtensionNames = exts;
   CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
   VkQueue q;
   vkGetDeviceQueue(dev, qfam, 0, &q);

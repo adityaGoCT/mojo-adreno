@@ -22,6 +22,8 @@
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 
+#include "../runner/qcom_coopmat.h"
+
 // Qwen3-8B; must match qwen3k.mojo and export.py
 enum { D = 4096, L = 36, F = 12288, QKV = 6144, V = 151669, HEAD0 = 74 * 1024 };
 enum { EOS = 151645, EOS2 = 151643 };
@@ -41,7 +43,7 @@ enum { EOS = 151645, EOS2 = 151643 };
   X(vkCreateDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets)                     \
   X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) X(vkEndCommandBuffer)    \
   X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdDispatch) X(vkCmdPipelineBarrier)            \
-  X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkGetPhysicalDeviceFeatures2)
+  X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkGetPhysicalDeviceFeatures2) X(vkEnumerateDeviceExtensionProperties)
 #define DECL(f) static PFN_##f f;
 VK_FUNCS(DECL)
 
@@ -307,6 +309,16 @@ int main(int argc, char** argv) {
   VkPhysicalDeviceVulkan11Features v11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12};
   VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v11};
   vkGetPhysicalDeviceFeatures2(pd, &f2);
+  // Decode is matrix-vector work, so no cooperative matrices: only report the QCOM extension, for
+  // the prompt kernels a batched prefill would add (qcom/p_gemm_t2.comp reads this weight layout).
+  uint32_t nx = 0;
+  vkEnumerateDeviceExtensionProperties(pd, NULL, &nx, NULL);
+  VkExtensionProperties* xp = calloc(nx ? nx : 1, sizeof *xp);
+  vkEnumerateDeviceExtensionProperties(pd, NULL, &nx, xp);
+  int has_qcom = 0;
+  for (uint32_t i = 0; i < nx; ++i) has_qcom |= !strcmp(xp[i].extensionName, QCOM_CONVERSION_NAME);
+  free(xp);
+  printf("VK_QCOM_cooperative_matrix_conversion: %s (decode does not use matrix units)\n", has_qcom ? "yes" : "no");
   VkPhysicalDeviceVulkan13Features en13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   en13.subgroupSizeControl = v13.subgroupSizeControl;
   en13.computeFullSubgroups = v13.computeFullSubgroups;

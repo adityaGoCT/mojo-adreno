@@ -1,0 +1,52 @@
+// p_gemm_t2 with VK_QCOM_cooperative_matrix_conversion (Vulkan 1.4.342): a drop-in replacement for
+// bonsai/kernels/prefill.mojo's p_gemm_t2 (same bindings, params and grid), for drivers that have it.
+// Y = X W^T, W ternary as kernels.packed_linear reads it (word (k / 16) * n + col: the 2-bit codes of
+// k .. k + 15 for column col; weight (code - 1) * scale, an fp16 scale per 128 k of a column).
+// GLSL until Mojo's SPIR-V target can emit the QCOM instructions (LLVM's backend has none yet).
+// Each subgroup of the 256-thread workgroup owns a 64 x 64 tile of Y, no shared memory: lane i builds
+// row i of the A tile from X and column i of the B tile from one word of codes, in registers; the
+// tiles multiply in fp16 (the 840's fastest product, fp16 sums only) for one group of 128 k, then lane
+// i pulls row i of that fp16 sum out, scales it by the group's column scales and adds it into its
+// fp32 row of Y: fp16 products, fp32 accumulation across groups (as the decode kernels do).
+#version 460
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_QCOM_cooperative_matrix_conversion : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer W { uint w[]; };
+layout(std430, binding = 2) readonly buffer S { float16_t s[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(std430, binding = 4) readonly buffer P { uint p[]; };  // 64-bit slots: n, k
+
+void main() {
+  uint n = p[0], k = p[2];
+  uint sg = gl_LocalInvocationID.x / 64, lane = gl_LocalInvocationID.x % 64;
+  uint row = gl_WorkGroupID.y * 128 + (sg / 2) * 64 + lane;  // this lane's row of A and of Y
+  uint col0 = gl_WorkGroupID.x * 128 + (sg % 2) * 64;
+  float acc[64];
+  for (int c = 0; c < 64; ++c) acc[c] = 0.0;
+  for (uint g = 0; g < k / 128; ++g) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> part =
+        coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(float16_t(0.0));
+    for (uint kk = 0; kk < 128; kk += 16) {
+      uint k0 = g * 128 + kk;
+      float16_t av[16];
+      for (int j = 0; j < 16; ++j) av[j] = float16_t(x[row * k + k0 + j]);
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a;
+      vectorToCoopmatQCOM(av, a);
+      uint word = w[(k0 / 16) * n + col0 + lane];
+      float16_t bv[16];
+      for (int j = 0; j < 16; ++j) bv[j] = float16_t(float((word >> (2 * j)) & 3u) - 1.0);
+      coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b;
+      vectorToCoopmatQCOM(bv, b);
+      part = coopMatMulAdd(a, b, part);
+    }
+    float16_t pv[64];
+    coopmatToVectorQCOM(part, pv);
+    for (int c = 0; c < 64; ++c) acc[c] += float(pv[c]) * float(s[g * n + col0 + c]);
+  }
+  for (int c = 0; c < 64; ++c) y[row * n + col0 + c] = acc[c];
+}

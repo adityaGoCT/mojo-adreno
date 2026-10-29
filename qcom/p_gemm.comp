@@ -1,0 +1,43 @@
+// llama/kernels/prefill/p_gemm with VK_QCOM_cooperative_matrix_conversion (Vulkan 1.4.342): a drop-in
+// replacement (same bindings, params and grid) for drivers that have it. Y = X W^T with W n x k fp16
+// (rows of W, as gemv reads them), X rows x k fp32, Y rows x n fp32. As qcom/p_gemm_t2.comp: per
+// subgroup a 64 x 64 tile of Y, lane i building row i of A from X and column i of B from row i of W's
+// slice in registers; fp16 products for 128 k at a time, folded into fp32 rows of Y.
+#version 460
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_QCOM_cooperative_matrix_conversion : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer P { uint p[]; };  // 64-bit slots: n, k
+
+void main() {
+  uint n = p[0], k = p[2];
+  uint sg = gl_LocalInvocationID.x / 64, lane = gl_LocalInvocationID.x % 64;
+  uint row = gl_WorkGroupID.y * 128 + (sg / 2) * 64 + lane;
+  uint col0 = gl_WorkGroupID.x * 128 + (sg % 2) * 64;
+  float acc[64];
+  for (int c = 0; c < 64; ++c) acc[c] = 0.0;
+  for (uint k1 = 0; k1 < k; k1 += 128) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> part =
+        coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(float16_t(0.0));
+    for (uint k0 = k1; k0 < k1 + 128 && k0 < k; k0 += 16) {
+      float16_t av[16], bv[16];
+      for (int j = 0; j < 16; ++j) av[j] = float16_t(x[row * k + k0 + j]);
+      for (int j = 0; j < 16; ++j) bv[j] = w[(col0 + lane) * k + k0 + j];
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a;
+      coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b;
+      vectorToCoopmatQCOM(av, a);
+      vectorToCoopmatQCOM(bv, b);
+      part = coopMatMulAdd(a, b, part);
+    }
+    float16_t pv[64];
+    coopmatToVectorQCOM(part, pv);
+    for (int c = 0; c < 64; ++c) acc[c] += float(pv[c]);
+  }
+  for (int c = 0; c < 64; ++c) y[row * n + col0 + c] = acc[c];
+}

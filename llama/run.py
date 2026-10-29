@@ -212,6 +212,10 @@ def build_and_push(model_dir, backend, prefill=False):
     if prefill:
         sh("adb", "shell", f"mkdir -p {DEV}/prefill840")
         sh("adb", "push", *sorted((BUILD / "prefill840").glob("*.spv")), f"{DEV}/prefill840/")
+        qspv = sorted((BUILD / "prefill840/qcom").glob("*.spv"))  # VK_QCOM variants (qcom/*.comp)
+        if qspv:
+            sh("adb", "shell", f"mkdir -p {DEV}/prefill840/qcom")
+            sh("adb", "push", *qspv, f"{DEV}/prefill840/qcom/")
 
 
 def main():

@@ -61,6 +61,10 @@ def main():
     sh(*adb, "push", *spv, f"{DIR}/k/")
     if a.prefill:
         sh(*adb, "push", *pspv, f"{DIR}/kp/")
+        qspv = sorted((BUILD / "prefill/qcom").glob("*.spv"))  # VK_QCOM variants (qcom/*.comp)
+        if qspv:
+            sh(*adb, "shell", f"mkdir -p {DIR}/kp/qcom")
+            sh(*adb, "push", *qspv, f"{DIR}/kp/qcom/")
     if a.push:  # the weights depend on the context capacity only through the rope table
         gz = BUILD / "weights.bin.gz"
         if not gz.exists() or gz.stat().st_mtime < (a.model / "weights.bin").stat().st_mtime:

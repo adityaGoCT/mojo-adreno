@@ -40,7 +40,7 @@ Since Mojo's compiler went open source (August 2026), there is a second route: a
 compiles the same kernels and Llama straight to Vulkan SPIR-V, with no retargeter. See
 [Native SPIR-V target](#native-spir-v-target).
 
-Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (28 slides,
+Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (29 slides,
 PDF), the whole experiment from the retargeter to the native target and a compile-only test of MAX
 graphs. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (slides with speaker
 notes, in the browser), or as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html)
@@ -512,6 +512,8 @@ runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone
                    vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
 qwen3/             Ternary Qwen3-8B on the Adreno 840: qwen3k.mojo, qwen3_vk.c, export.py, run.py
+qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLSL; runners load them
+                   when a driver has the extension; see its README)
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
                    as SPIR-V; bonsai_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
