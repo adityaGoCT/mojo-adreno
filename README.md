@@ -429,6 +429,28 @@ MAX reuses kernels it compiled before without emitting them again, so the direct
 a run that compiled them (after a change to the kernel, for one). All three pass: 183 GFLOP/s in fp32
 and 210 in fp16 at 256x256x256 (the naive kernel: 71 and 26).
 
+**Staging in shared memory.** `matmul_coopmat_smem_{f16,f32}` give a workgroup of 2 x 2 subgroups a
+128 x 128 block of C and copy each K step's slices of A and B to shared memory once, so the four
+subgroups share them instead of each reading its own from the buffers. At 2048x2048x2048:
+
+| | 64 x 64 tile per subgroup | staged 128 x 128 block |
+|---|---|---|
+| fp16 | 2.01-2.12 TFLOP/s | **3.45-3.70 TFLOP/s** |
+| fp32 | 1.31-1.34 TFLOP/s | **2.48-2.49 TFLOP/s** |
+
+fp16 in shared memory needed three workarounds for the 840's driver (512.842.19), each found with a
+small kernel on the phone:
+- single fp16 elements of a shared array behave as if 4 bytes apart in a 2-byte-per-element
+  allocation: of a 2048-element array, only the first 1024 elements are usable (a round trip through
+  it was wrong for the rest), so fp16 tiles are copied as cooperative matrices, not element by element;
+- a cooperative-matrix load or store of fp16 in shared memory starts at byte 4 e for element e, while
+  packing the matrix 2 bytes per element: `f16_smem_offset` halves the offset
+  (`-D COOPMAT_F16_SMEM_QUIRK=0` turns that off for a driver that addresses fp16 correctly);
+- fp32 works as written (copied 4 elements per thread, 15% faster than copying as matrices).
+
+The batched prefill of [Llama](llama/README.md) is built on the fp32 kernel: a 431-token prompt in
+1.29 s on the S26 Ultra instead of 17.3 s one token at a time.
+
 ## What did not work (and why)
 
 | attempt | outcome |
