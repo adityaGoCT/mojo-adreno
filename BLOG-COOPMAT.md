@@ -10,11 +10,11 @@
 |---|---|---|
 | Llama 3.2 1B decode | 285 ms/token | **41 ms/token** (24 tokens/s) |
 | 431-token prompt, one token at a time | — | 17.7 s |
-| 431-token prompt, batched on cooperative matrices | — | **0.68 s** (26x) |
+| 431-token prompt, batched on cooperative matrices | — | **0.63 s** (28x) |
 | matmul on cooperative matrices, 2048³ | no matrix units | **3.7 TFLOP/s** fp16, **2.5 TFLOP/s** fp32 |
-| tokens identical to PyTorch | 48 of 48 | 48 of 48 (logits within 8.7e-5) |
+| tokens identical to PyTorch | 48 of 48 | 48 of 48 (logits within 6.0e-5) |
 
-*(The prefill numbers are from [the update](#update-faster-weight-staging-and-a-second-driver-build): 1.29 s with the first prefill matmul, 0.68 s with coalesced weight staging.)*
+*(The prefill numbers are from [the update](#update-faster-weight-staging-and-a-second-driver-build): 1.29 s with the first prefill matmul, 0.68 s with coalesced weight staging, 0.63 s with fused attention.)*
 
 All of it is Mojo code, from the Llama kernels to the matmul that reaches 3.7 TFLOP/s. The compiler work is on the branch [`adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target) of my fork of modular/modular. The kernels, runners and the Llama runtime are in [this repo](README.md).
 
@@ -165,7 +165,7 @@ Prompt processing is different. Part 3 ran the prompt through the decode path on
 | kernel | work | launch |
 |---|---|---|
 | [`p_gemm`](llama/kernels/prefill/p_gemm.mojo) | Y = X Wᵀ for all rows: fp32 cooperative matrices, 2×2 subgroups per 128×128 block. W's fp16 slice is converted to fp32 and transposed while it is staged in shared memory, so the math is fp32 throughout. | n/128 × rows/128 |
-| [`p_attention`](llama/kernels/prefill/p_attention.mojo) | causal attention: token t attends to positions 0..t | heads × rows |
+| [`p_attention`](llama/kernels/prefill/p_attention.mojo) | causal attention: token t attends to positions 0..t (since fused on cooperative matrices; see the update) | heads × rows |
 | [`p_rope_kv`](llama/kernels/prefill/p_rope_kv.mojo) | RoPE for every row; k and v into the KV cache at the row's position | 5 × rows |
 | [`p_rmsnorm`](llama/kernels/prefill/p_rmsnorm.mojo), [`p_silu_mul`](llama/kernels/prefill/p_silu_mul.mojo), [`p_add`](llama/kernels/prefill/p_add.mojo) | per row; `p_add` adds the residual | rows (× columns/256) |
 
@@ -209,9 +209,14 @@ End to end, on the Android 17 phone (below), with the same prompt:
 |---|---|---|---|
 | one token at a time | 17.7 s | 48 of 48 | 5.3e-5 |
 | batched prefill, first `p_gemm` | 1.29 s (on the Android 16 phone) | 48 of 48 | 8.7e-5 |
-| batched prefill, coalesced `p_gemm` | **0.68 s** (26x) | 48 of 48 | 8.7e-5 |
+| batched prefill, coalesced `p_gemm` | 0.68 s (26x) | 48 of 48 | 8.7e-5 |
+| batched prefill, and fused attention | **0.63 s** (28x) | 48 of 48 | 6.0e-5 |
 
-`p_gemm` now takes 556 ms for the 64 projections, 1.8 TFLOP/s averaged over all four shapes; attention (100 ms) is the next target.
+`p_gemm` now takes 556–586 ms for the 64 projections, 1.7–1.8 TFLOP/s averaged over all four shapes.
+
+**Fused attention.** The first `p_attention` ran one 64-thread workgroup per head and prompt token: each read its own keys from memory and did the dot products on the ALUs, 100 ms in all. The fused version gives one subgroup a block of 64 tokens of one head. For each block of 64 keys up to the diagonal it computes S = QKᵀ with 8 fp32 cooperative-matrix products, reading K column-major straight from the KV cache, and stores S to shared memory, where each thread owns one query row.
+
+A first pass finds each row's softmax max and sum. A second pass recomputes S, turns it into probabilities and accumulates O += PV on the matrix units. Recomputing QKᵀ costs 1.5× its flops, but O stays a cooperative matrix that never needs rescaling row by row, which an opaque matrix cannot do. At 512 rows it takes 2.72 ms a layer against 5.81 (max error 1.0e-6 against NumPy), 46 ms for the 16 layers, and the prompt went from 0.68 s to 0.63 s.
 
 Getting the weights there took a detour. The lab's bridge slowed to 0.16 MB/s, four hours for 2.47 GB, and the lab wipes phones between sessions. The phone has its own internet connection, though, and `curl`. So it downloaded `model.safetensors` from a public mirror with the same SHA-256 as Meta's file, at tens of MB/s. A 57-line converter ([`llama/st2bin.c`](llama/st2bin.c)) then followed a recipe written on the Mac from the same file's header ([`llama/st2bin_recipe.py`](llama/st2bin_recipe.py)). The resulting `weights.bin` is byte-identical to the Mac's export.
 
@@ -270,7 +275,7 @@ ANDROID_SERIAL=localhost:33687 python3 llama/run.py --model <snapshot dir> --pro
 
 ## What's next
 
-- **A faster prefill matmul.** The fix is coalesced weight staging; the target is the 2.5 TFLOP/s the standalone fp32 kernel reaches. A fused attention kernel is next after that.
+- **A faster prefill matmul.** Coalesced staging brought it to 1.8 TFLOP/s on average, against the 2.5 TFLOP/s the standalone fp32 kernel reaches; the small q/k/v and o projections need more parallelism than 64–96 workgroups.
 - **The Snapdragon 8 Elite Gen 6.** The Extreme variant reportedly has dedicated matrix cores (Adreno 850). Its driver may offer fp16 → fp32 products, other shapes and the Qualcomm conversion extension, and the same probe will say.
 - **MAX's matmul with staging,** so MAX graphs get the 3.5 TFLOP/s kernel and not only the 64×64 one.
 - **Integer products** (the 840 offers int8 × int8 → int32): the path to quantized weights, where decode would gain from reading a quarter of the bytes.

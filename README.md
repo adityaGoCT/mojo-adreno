@@ -22,7 +22,7 @@ series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner)
 
 Part 4: **[A Native GPU Target, and Llama Prefill on the Matrix Units](BLOG-COOPMAT.md)**: Mojo's own
 Vulkan SPIR-V target, KHR cooperative matrices from Mojo, and Llama 3.2 1B on a Snapdragon 8 Elite Gen 5
-(Adreno 840): a 431-token prompt in 0.68 s on the matrix units instead of 17.7 s, decode at 43 ms/token.
+(Adreno 840): a 431-token prompt in 0.63 s on the matrix units instead of 17.7 s, decode at 42 ms/token.
 
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
@@ -453,7 +453,7 @@ small kernel on the phone:
 - fp32 works as written (copied 4 elements per thread, 15% faster than copying as matrices).
 
 The batched prefill of [Llama](llama/README.md) is built on the fp32 kernel: a 431-token prompt in
-0.68 s on the S26 Ultra instead of 17.7 s one token at a time (26x).
+0.63 s on the S26 Ultra instead of 17.7 s one token at a time (28x).
 
 **Another driver build.** An S26 Ultra updated to Android 17 reports the same driver version
 (512.842.19) but carries a different `vulkan.adreno.so` (4,410,944 bytes against 4,409,520, 186
