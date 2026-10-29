@@ -98,12 +98,15 @@ converted while they are staged in shared memory, so the math stays fp32). A lon
 
 | prompt, 431 tokens | time | tokens identical to PyTorch | max logit difference |
 |---|---|---|---|
-| one token at a time | 17.3 s | 48 of 48 | 5.3e-5 |
-| batched prefill (`--prefill`) | **1.29 s** (13.5x) | 48 of 48 | 8.7e-5 |
+| one token at a time | 17.7 s | 48 of 48 | 5.3e-5 |
+| batched prefill (`--prefill`) | **0.68 s** (26x) | 48 of 48 | 8.7e-5 |
 
-Decode afterwards is unchanged (41.3 ms/token). Per kernel (`LLAMA_PROFILE=1`, each dispatch on
-its own submit): `p_gemm` 1221 ms for the 64 projections, about 0.8 TFLOP/s averaged over its four
-shapes; attention 97 ms; the rest 50 ms.
+Measured on the Android 17 S26 Ultra (the first version of `p_gemm`, below, took 1.29 s against
+17.3 s on the Android 16 one). Decode afterwards is unchanged (43 ms/token). Per kernel
+(`LLAMA_PROFILE=1`, each dispatch on its own submit): `p_gemm` 556 ms for the 64 projections, about
+1.8 TFLOP/s averaged over its four shapes (1221 ms, 0.8 TFLOP/s, with the first version); attention
+100 ms; the rest 66 ms. On the 840's driver a matmul whose accumulator starts as a matrix loaded
+from memory fails to compile (VK_ERROR_UNKNOWN), so the residual is a separate `p_add`.
 
 `p_gemm` now stages W with consecutive threads on consecutive addresses (each thread used to read
 its own row of W) and reads B = W^T column-major from shared memory. Alone on the phone, 512 rows,
@@ -114,10 +117,15 @@ against NumPy:
 | gate/up, 16384 x 2048 | 1.77 TFLOP/s | 2.09 TFLOP/s |
 | down, 2048 x 8192 | 1.10 TFLOP/s | 1.91 TFLOP/s |
 
-The 1.29 s above is with the earlier kernel. The rerun with this one is still to do: the lab's
-bridge slowed to 0.16 MB/s, four hours for the weights. On the 840's driver a matmul whose accumulator starts as a
-matrix loaded from memory fails to compile (VK_ERROR_UNKNOWN), so the residual is a separate
-`p_add`.
+A K step of 32 would read longer runs of W, but fills the 840's 32 KB of shared memory exactly,
+which gave wrong results; the K step is 16.
+
+The lab's bridge can be slow (it dropped to 0.16 MB/s, four hours for the weights), and the lab
+wipes the phone between sessions. The phone can fetch the weights itself instead:
+`st2bin_recipe.py` writes, from the local `model.safetensors`, which bf16 byte ranges become which
+fp16 tensors of `weights.bin`; the phone downloads the same file with `curl` (a public mirror with
+the same SHA-256) and `st2bin.c` converts it in seconds. The result is byte-identical to the Mac's
+export (SHA-256), so `run.py` skips the push.
 
 ### A/B against GLSL: what the route through LLVM IR cost
 
