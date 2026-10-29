@@ -29,10 +29,13 @@ from test_max_kernels import CC, description, leaves, SCALAR_FORMATS  # noqa: E4
 BUILD = ROOT / "build/coopmat"
 DEV = "/data/local/tmp/coopmat"
 M, N = 64, int(os.environ.get("COOPMAT_N", 64))  # the tile of C each subgroup computes
-KERNELS = {  # name: (dtype, B transposed)
-    "matmul_coopmat_f32": (np.float32, False),
-    "matmul_coopmat_f16": (np.float16, False),
-    "matmul_coopmat_bt_f16": (np.float16, True),
+WM, WN = int(os.environ.get("COOPMAT_WM", 2)), int(os.environ.get("COOPMAT_WN", 2))  # subgroups, staged
+KERNELS = {  # name: (dtype, B transposed, block rows, block columns, threads)
+    "matmul_coopmat_f32": (np.float32, False, M, N, 64),
+    "matmul_coopmat_f16": (np.float16, False, M, N, 64),
+    "matmul_coopmat_bt_f16": (np.float16, True, M, N, 64),
+    "matmul_coopmat_smem_f32": (np.float32, False, 64 * WM, 64 * WN, 64 * WM * WN),
+    "matmul_coopmat_smem_f16": (np.float16, False, 64 * WM, 64 * WN, 64 * WM * WN),
 }
 MAX_N = 64  # COOPMAT_N in MAX's max/kernels/src/linalg/matmul/gpu/adreno/coopmat_matmul.mojo
 MAX_KERNELS = {  # graph: (matmul_kernel_adreno_coopmat_{c}_{a}_{b}_{transpose_b}, dtype, B transposed, m, n, k)
@@ -167,15 +170,18 @@ def main():
             failed += not check(f"MAX {case} ({m}x{n}x{k})", dtype, bt, a, b,
                                 None if results is None else results[0], timing)
         sys.exit(1 if failed else 0)
-    spvs = {k: next(BUILD.glob(f"*_{k}_*.spv")) for k in KERNELS}
+    only = os.environ.get("COOPMAT_ONLY")  # a substring of the kernel names to run
+    kernels = {k: v for k, v in KERNELS.items() if not only or only in k}
+    spvs = {k: next(BUILD.glob(f"*_{k}_*.spv")) for k in kernels}
     for n in sizes:
-        assert n % M == 0 and n % N == 0, f"n = {n}: a multiple of {M} and {N}"
-        for name, (dtype, bt) in KERNELS.items():
+        for name, (dtype, bt, bm, bn, threads) in kernels.items():
+            assert n % bm == 0 and n % bn == 0, f"n = {n}: a multiple of {bm} and {bn}"
             a = rng.uniform(-1, 1, (n, n)).astype(dtype)
             b = rng.uniform(-1, 1, (n, n)).astype(dtype)
             c = np.full((n, n), np.nan, dtype=dtype)
-            results, timing = launch(f"{name}_{n}", spvs[name], [a, b, c, n], (n // N, n // M, 1))
-            failed += not check(f"{name} N={N} n={n}", dtype, bt, a, b,
+            results, timing = launch(f"{name}_{n}", spvs[name], [a, b, c, n], (n // bn, n // bm, 1),
+                                     block=(threads, 1, 1))
+            failed += not check(f"{name} {bm}x{bn} n={n}", dtype, bt, a, b,
                                 None if results is None else results[2], timing)
     sys.exit(1 if failed else 0)
 
