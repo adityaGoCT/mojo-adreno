@@ -13,6 +13,7 @@
 | 431-token prompt, batched on cooperative matrices | — | **0.63 s** (28x) |
 | matmul on cooperative matrices, 2048³ | no matrix units | **3.7 TFLOP/s** fp16, **2.5 TFLOP/s** fp32 |
 | tokens identical to PyTorch | 48 of 48 | 48 of 48 (logits within 6.0e-5) |
+| decode with 4-bit weights | — | **13.4 ms/token** (75 tokens/s) |
 
 *(The prefill numbers are from [the update](#update-faster-weight-staging-and-a-second-driver-build): 1.29 s with the first prefill matmul, 0.68 s with coalesced weight staging, 0.63 s with fused attention.)*
 
@@ -226,6 +227,21 @@ A GLSL shader doing the same multiply-add worked. The difference between the two
 
 The lesson from section 3 holds twice over: ask the driver, and the version number is not the driver.
 
+## Update: 4-bit weights
+
+Decode reads every weight once per token, so it gains from smaller weights the way prefill gains from matrix units. `run.py --quant q4` quantizes every projection and the lm_head to int4, symmetric, with one fp16 scale per 64 weights of a row and 8 weights packed into each 32-bit word. The embedding lookup stays fp16. About 0.65 GB is read per token instead of 2.47 GB. [`gemv_q4`](llama/kernels/gemv_q4.mojo) unpacks 8 weights per word for decode, and [`p_gemm_q4`](llama/kernels/prefill/p_gemm_q4.mojo) unpacks them into fp32 while staging W, so prefill still multiplies in fp32 on the matrix units. The PyTorch reference uses the same dequantized weights, and the phone matches it on all 48 tokens.
+
+| S26 Ultra, 431-token prompt | fp16 | int4 |
+|---|---|---|
+| decode | 43.4 ms/token | **13.4–14.9 ms/token** (2.9–3.2×) |
+| prompt, batched | 0.63 s | 0.62 s |
+
+Decode gets 2.9–3.2× from 3.8× fewer bytes; unpacking costs some arithmetic, and attention and the dispatches don't shrink. Prefill doesn't move: it was already limited by arithmetic. The int4 model words its answer differently from the fp16 one from the first token and still answers the question.
+
+The weights were never pushed: the phone downloaded `model.safetensors` and [`st2bin.c`](llama/st2bin.c) quantized it there, byte-identical to the Mac's export.
+
+That phone ran Android 16, and its driver build refused to link the fused attention kernel. One cut-down variant reported running out of registers. `llama_vk` now falls back to the one-workgroup-per-token kernel there (99 ms instead of 46). The same kernel links and runs on the Android 17 build, so it's another case of the version number not being the driver.
+
 ## What did not work
 
 | attempt | outcome |
@@ -239,6 +255,8 @@ The lesson from section 3 holds twice over: ask the driver, and the version numb
 | adb commands with `&&` on the Remote Test Lab | drop the connection; plain commands and `;` work |
 | a zero matrix built at run time (`OpCompositeConstruct`) | rejected by the Android 17 build of the 840's driver; now an `OpConstantComposite` |
 | a K step of 32 in `p_gemm`: 32 KB of shared memory, the reported limit | wrong results on the 840; a K step of 16 (16 KB) |
+| the fused prefill attention on the 840's Android 16 driver | "Failed to link shaders"; `llama_vk` falls back to the scalar kernel |
+| more workgroups for the small projections (smaller blocks, split-K, register prefetch) | all slower than, or within noise of, 128×128 blocks |
 
 ## Reproduce it
 

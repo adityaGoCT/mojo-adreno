@@ -135,6 +135,34 @@ fp16 tensors of `weights.bin`; the phone downloads the same file with `curl` (a 
 the same SHA-256) and `st2bin.c` converts it in seconds. The result is byte-identical to the Mac's
 export (SHA-256), so `run.py` skips the push.
 
+### 4-bit weights
+
+`--quant q4` quantizes every projection and the lm_head to int4: symmetric, one fp16 scale per 64
+weights of a row, 8 weights per 32-bit word (`run.py`'s `quantize4`). The embedding lookup stays
+fp16, so the lm_head gets its own quantized copy. The model is 1.18 GB, of which about 0.65 GB is read
+per token instead of 2.47 GB. `gemv_q4` and `gemv_add_q4` unpack 8 weights per word for decode;
+`p_gemm_q4` unpacks them into fp32 while it stages W for prefill, so the matrix units still multiply
+in fp32. The PyTorch reference uses the same dequantized weights. On the S26 Ultra (Android 16
+driver), the 431-token prompt, the same session:
+
+| | fp16 | int4 |
+|---|---|---|
+| decode | 43.4 ms/token (23 tokens/s) | **13.4-14.9 ms/token (67-75 tokens/s)** |
+| prompt, one token at a time | 17.8 s | 5.5 s |
+| prompt, batched (`--prefill`) | 0.63 s (Android 17 driver) | 0.62 s |
+| tokens identical to PyTorch on the same weights | 48 of 48 | 48 of 48 (logits within 1.1e-4) |
+
+Decode is 2.9-3.2x faster for 3.8x fewer bytes: unpacking costs some compute, and attention, the
+norms and the dispatches do not shrink. Prefill barely changes: it is limited by arithmetic, not by
+the weights' bytes (`p_gemm_q4` alone runs at 1.7-2.1 TFLOP/s, like `p_gemm`). The int4 answer
+differs from the fp16 model's from the first token ("The passage states that..." against "According
+to the passage, ...") and still answers the question. `st2bin_recipe.py --q4` builds the int4
+weights on the phone from the downloaded `model.safetensors`, byte-identical to the export.
+
+On the 840's Android 16 driver build the fused `p_attention` fails to link ("Failed to link
+shaders"; one cut-down variant ran out of registers), so `llama_vk` falls back to
+`p_attention_scalar`, one workgroup per token (99 ms instead of 46 for the 16 layers).
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the
