@@ -30,6 +30,6 @@
 </div>
 </div>
 </div>
-<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 25 · driver interface: SDK/include/HAL in modular/modular</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 26 · driver interface: SDK/include/HAL in modular/modular</p>
 <aside>So what would it take to really run MAX on the phone? Four pieces. First, a Vulkan driver plugin. MAX defines a C interface for new devices, about sixty functions covering devices, memory, queues, events and loading kernels. We have one now, as a remote device: it runs on the Mac and forwards everything to the phone, which is how MAX runs our graphs today; moving it onto the phone is the remaining step. Second, the runtime libraries have to be built for Android; today the build has no Android toolchain at all. Third, the phone should not run the compiler. MAX can save a compiled model, so the realistic flow is to compile on the Mac for adreno710 and ship the result. Fourth, every operation a model uses has to compile for this target, run correctly, and then be tuned. For our 25 test graphs, ResNet-18 included, compiling and running correctly are done; speed and tuning are open-ended. Items one and two are weeks of engineering, and the tuning is where Modular’s own vendor-specific kernels will need Adreno-specific versions.</aside>
 </section>
