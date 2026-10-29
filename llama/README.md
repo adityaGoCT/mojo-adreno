@@ -99,13 +99,13 @@ converted while they are staged in shared memory, so the math stays fp32). A lon
 | prompt, 431 tokens | time | tokens identical to PyTorch | max logit difference |
 |---|---|---|---|
 | one token at a time | 17.7 s | 48 of 48 | 5.3e-5 |
-| batched prefill (`--prefill`) | **0.68 s** (26x) | 48 of 48 | 8.7e-5 |
+| batched prefill (`--prefill`) | **0.63 s** (28x) | 48 of 48 | 6.0e-5 |
 
 Measured on the Android 17 S26 Ultra (the first version of `p_gemm`, below, took 1.29 s against
 17.3 s on the Android 16 one). Decode afterwards is unchanged (43 ms/token). Per kernel
-(`LLAMA_PROFILE=1`, each dispatch on its own submit): `p_gemm` 556 ms for the 64 projections, about
-1.8 TFLOP/s averaged over its four shapes (1221 ms, 0.8 TFLOP/s, with the first version); attention
-100 ms; the rest 66 ms. On the 840's driver a matmul whose accumulator starts as a matrix loaded
+(`LLAMA_PROFILE=1`, each dispatch on its own submit): `p_gemm` 556-586 ms for the 64 projections,
+about 1.7-1.8 TFLOP/s averaged over its four shapes (1221 ms, 0.8 TFLOP/s, with the first version);
+attention 46 ms, fused (100 ms before, below); the rest 50 ms. On the 840's driver a matmul whose accumulator starts as a matrix loaded
 from memory fails to compile (VK_ERROR_UNKNOWN), so the residual is a separate `p_add`.
 
 `p_gemm` now stages W with consecutive threads on consecutive addresses (each thread used to read
@@ -119,6 +119,14 @@ against NumPy:
 
 A K step of 32 would read longer runs of W, but fills the 840's 32 KB of shared memory exactly,
 which gave wrong results; the K step is 16.
+
+`p_attention` is fused: one subgroup takes 64 prompt tokens of one head, and for each block of 64
+keys up to the diagonal computes S = Q K^T on cooperative matrices (8 fp32 products, K read
+column-major from the KV cache) into shared memory, where each thread owns a query row. A first
+pass finds each row's softmax max and sum; a second recomputes S, turns it into probabilities and
+accumulates O += P V on the matrix units, so O never needs the per-row rescaling an opaque matrix
+cannot do. At 512 rows: 2.72 ms a layer against 5.81 for one workgroup per token (max error 1.0e-6
+against NumPy); end to end the prompt went from 0.68 s to 0.63 s.
 
 The lab's bridge can be slow (it dropped to 0.16 MB/s, four hours for the weights), and the lab
 wipes the phone between sessions. The phone can fetch the weights itself instead:

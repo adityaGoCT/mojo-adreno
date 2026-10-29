@@ -381,7 +381,7 @@ int main(int argc, char** argv) {
       pp[npp++] = make_dispatch2(K_P_GEMM, QKV / 128, rb, (arg_t[]){whole(T("l%d.wqkv")), whole(&xnr), whole(&qkvr), g_qkv});
       pp[npp++] = make_dispatch2(K_P_ROPE_KV, 5, tp, (arg_t[]){whole(&qkvr), whole(tensor("rope.cos")), whole(tensor("rope.sin")),
                                                                  whole(&kc[l]), whole(&vc[l])});
-      pp[npp++] = make_dispatch2(K_P_ATTENTION, H, tp, (arg_t[]){whole(&qkvr), whole(&kc[l]), whole(&vc[l]), whole(&attr)});
+      pp[npp++] = make_dispatch2(K_P_ATTENTION, H, tp / 64, (arg_t[]){whole(&qkvr), whole(&kc[l]), whole(&vc[l]), whole(&attr)});
       pp[npp++] = make_dispatch2(K_P_GEMM, D / 128, rb, (arg_t[]){whole(T("l%d.wo")), whole(&attr), whole(&yr), g_o});
       pp[npp++] = make_dispatch2(K_P_ADD, D / 256, tp, (arg_t[]){whole(&xr), whole(&yr)});
       pp[npp++] = make_dispatch2(K_P_RMSNORM, tp, 1, (arg_t[]){whole(&xr), whole(T("l%d.mlp_norm")), whole(&xnr)});
