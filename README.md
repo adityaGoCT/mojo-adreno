@@ -31,6 +31,9 @@ the native target to Vulkan SPIR-V: 80 tokens/s decode, all 16 checked steps mat
 reference's greedy tokens; with batched prefill on cooperative matrices, a 412-token prompt in 0.86 s
 instead of 5.2 s.
 
+**[Ternary Qwen3-8B on the Adreno 840](qwen3/README.md)**: PrismML's Ternary-Bonsai-8B on the same
+ternary kernels plus seven small Mojo kernels: 25 tokens/s, all 16 checked steps matching MLX's greedy tokens.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -508,6 +511,7 @@ src/               vecadd_gpu.mojo (MAX gpu), vecadd4_gpu.mojo (loop), warpsum_g
 runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side),
                    vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
+qwen3/             Ternary Qwen3-8B on the Adreno 840: qwen3k.mojo, qwen3_vk.c, export.py, run.py
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
                    as SPIR-V; bonsai_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
