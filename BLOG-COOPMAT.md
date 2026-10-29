@@ -190,6 +190,25 @@ Where the 1.29 s goes (`LLAMA_PROFILE=1` runs each prefill dispatch on its own s
 
 So the matmuls run at about 0.8 TFLOP/s, a third of the standalone fp32 kernel's 2.5. The difference is in staging W. Each thread converts its own row of the fp16 weights, so neighbouring threads read addresses 4 KB or more apart, while the standalone kernel copies contiguous runs. Coalescing that copy is the obvious next step. After that, a fused attention kernel would replace one that reads the whole KV cache once per query token.
 
+## Update: faster weight staging, and a second driver build
+
+**The prefill matmul, one level down.** Each `p_gemm` thread used to convert its own row of W, so neighbouring threads read addresses 4 KB or more apart. Now consecutive threads read consecutive weights, W's slice keeps its layout in shared memory, and B = Wᵀ is loaded column-major. Alone on the phone (512 rows, checked against NumPy):
+
+| projection | before | now |
+|---|---|---|
+| gate/up, 16384×2048 | 1.77 TFLOP/s | 2.09 TFLOP/s |
+| down, 2048×8192 | 1.10 TFLOP/s | 1.91 TFLOP/s |
+
+The isolated numbers also correct the profile above: the large projections were never at 0.8 TFLOP/s. The average was pulled down by the small ones (q/k/v and o, only 64–96 workgroups) and by per-dispatch overhead in profile mode. A K step of 32 would read even longer runs, but it fills the 840's 32 KB of shared memory exactly, and that gave wrong results. 16 KB works.
+
+The 1.29 s prefill above is with the old kernel. The end-to-end rerun is still to do: the lab's bridge slowed to 0.16 MB/s, four hours for the weights.
+
+**Same version number, different driver.** One S26 Ultra came back from the lab updated to Android 17, and every pipeline with a matrix multiply-add failed to create, even a single one with no loop. Its driver reports the same version, 512.842.19, but it is a different file: 4,410,944 bytes against 4,409,520, and 186 extensions against 180.
+
+A GLSL shader doing the same multiply-add worked. The difference between the two modules was one instruction: our zero accumulator was built at run time with `OpCompositeConstruct`, while glslang writes an `OpConstantComposite`. Editing that into our module made it work. LLVM's SPIR-V backend cannot emit a constant of the matrix type, so the target now rewrites such a construct, when its operands are constants, into an `OpConstantComposite` in the finished binary; the two instructions have the same operands. Every kernel passes again on both builds, MAX's included.
+
+The lesson from section 3 holds twice over: ask the driver, and the version number is not the driver.
+
 ## What did not work
 
 | attempt | outcome |
@@ -201,6 +220,8 @@ So the matmuls run at about 0.8 TFLOP/s, a third of the standalone fp32 kernel's
 | an explicit GEP for every shared-memory pointer | crashes LLVM's SPIR-V backend on reductions; now only for matrix accesses |
 | Y += X Wᵀ with the accumulator loaded from Y | `VK_ERROR_UNKNOWN` at pipeline creation; a separate `p_add` instead |
 | adb commands with `&&` on the Remote Test Lab | drop the connection; plain commands and `;` work |
+| a zero matrix built at run time (`OpCompositeConstruct`) | rejected by the Android 17 build of the 840's driver; now an `OpConstantComposite` |
+| a K step of 32 in `p_gemm`: 32 KB of shared memory, the reported limit | wrong results on the 840; a K step of 16 (16 KB) |
 
 ## Reproduce it
 

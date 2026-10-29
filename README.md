@@ -455,6 +455,15 @@ small kernel on the phone:
 The batched prefill of [Llama](llama/README.md) is built on the fp32 kernel: a 431-token prompt in
 1.29 s on the S26 Ultra instead of 17.3 s one token at a time.
 
+**Another driver build.** An S26 Ultra updated to Android 17 reports the same driver version
+(512.842.19) but carries a different `vulkan.adreno.so` (4,410,944 bytes against 4,409,520, 186
+extensions against 180), and it failed to create every pipeline with a matrix multiply-add. The
+cause: `CoopMatrix.zero()` built its matrix at run time with `OpCompositeConstruct`. glslang writes
+the same zero as an `OpConstantComposite`, and with that one change the module works, so the target
+now writes it that way (see the fork's ADRENO.md). Every kernel here passes on both builds. On that
+build a kernel that uses all 32 KB of shared memory, the reported limit, gives wrong results; 16 KB
+works.
+
 ## What did not work (and why)
 
 | attempt | outcome |
