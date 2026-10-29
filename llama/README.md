@@ -102,9 +102,20 @@ converted while they are staged in shared memory, so the math stays fp32). A lon
 | batched prefill (`--prefill`) | **1.29 s** (13.5x) | 48 of 48 | 8.7e-5 |
 
 Decode afterwards is unchanged (41.3 ms/token). Per kernel (`LLAMA_PROFILE=1`, each dispatch on
-its own submit): `p_gemm` 1221 ms for the 64 projections, about 0.8 TFLOP/s, a third of what the
-staged kernels of `coopmat/` reach, because each thread reads its own row of W while staging;
-attention 97 ms; the rest 50 ms. On the 840's driver a matmul whose accumulator starts as a
+its own submit): `p_gemm` 1221 ms for the 64 projections, about 0.8 TFLOP/s averaged over its four
+shapes; attention 97 ms; the rest 50 ms.
+
+`p_gemm` now stages W with consecutive threads on consecutive addresses (each thread used to read
+its own row of W) and reads B = W^T column-major from shared memory. Alone on the phone, 512 rows,
+against NumPy:
+
+| projection | before | now |
+|---|---|---|
+| gate/up, 16384 x 2048 | 1.77 TFLOP/s | 2.09 TFLOP/s |
+| down, 2048 x 8192 | 1.10 TFLOP/s | 1.91 TFLOP/s |
+
+The 1.29 s above is with the earlier kernel. The rerun with this one is still to do: the lab's
+bridge slowed to 0.16 MB/s, four hours for the weights. On the 840's driver a matmul whose accumulator starts as a
 matrix loaded from memory fails to compile (VK_ERROR_UNKNOWN), so the residual is a separate
 `p_add`.
 
