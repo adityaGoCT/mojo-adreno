@@ -11,6 +11,7 @@
 //                              bytes) or a file name in <dir> with the initial contents
 //   out BINDING FILE           after the run, write the buffer to <dir>/FILE
 //   reps N                     timed dispatches (default 1)
+//   subgroup N                 require subgroup size N (cooperative matrices on the Adreno 840 need 64)
 // Loads libvulkan.so with dlopen, so LD_LIBRARY_PATH can select Mesa Turnip.
 #define VK_NO_PROTOTYPES
 #include <dlfcn.h>
@@ -101,6 +102,7 @@ int main(int argc, char** argv) {
 
   uint32_t groups[3] = {1, 1, 1}, block[3] = {0, 0, 0};
   int nbuf = 0, nout = 0, nrep = 1;
+  uint32_t subgroup = 0;
   struct { uint32_t binding; size_t bytes; char init[256]; } bufs[MAX_BINDINGS];
   struct { uint32_t binding; char file[256]; } outs[MAX_BINDINGS];
   snprintf(path, sizeof path, "%s/launch.txt", dir);
@@ -112,6 +114,7 @@ int main(int argc, char** argv) {
     if (sscanf(line, "groups %u %u %u", &groups[0], &groups[1], &groups[2]) == 3) continue;
     if (sscanf(line, "block %u %u %u", &block[0], &block[1], &block[2]) == 3) continue;
     if (sscanf(line, "reps %d", &nrep) == 1) continue;
+    if (sscanf(line, "subgroup %u", &subgroup) == 1) continue;
     if (nbuf < MAX_BINDINGS &&
         sscanf(line, "buffer %u %llu %255s", &bufs[nbuf].binding, &bytes, bufs[nbuf].init) == 3) {
       bufs[nbuf++].bytes = (size_t)bytes;
@@ -154,15 +157,33 @@ int main(int argc, char** argv) {
   uint32_t qfam = 0;
   for (uint32_t i = 0; i < nq; ++i) if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { qfam = i; break; }
 
-  // Enable what LLVM-generated SPIR-V may declare (Int8, Int16, Int64, 8- and 16-bit storage).
-  VkPhysicalDeviceVulkan12Features v12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  // Enable what LLVM-generated SPIR-V may declare (Int8, Int16, Int64, 8- and 16-bit storage), and
+  // for cooperative matrices the extension, the Vulkan memory model and subgroup size control.
+  uint32_t next = 0;
+  CHECK(vkEnumerateDeviceExtensionProperties(pd, NULL, &next, NULL));
+  VkExtensionProperties* exts = calloc(next ? next : 1, sizeof *exts);
+  CHECK(vkEnumerateDeviceExtensionProperties(pd, NULL, &next, exts));
+  int coopmat = 0;
+  for (uint32_t i = 0; i < next; ++i) coopmat |= !strcmp(exts[i].extensionName, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+  free(exts);
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+  VkPhysicalDeviceVulkan13Features v13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, coopmat ? &cm : NULL};
+  int v13ok = props.apiVersion >= VK_API_VERSION_1_3;
+  VkPhysicalDeviceVulkan12Features v12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, v13ok ? &v13 : NULL};
   VkPhysicalDeviceVulkan11Features v11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12};
   VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v11};
   vkGetPhysicalDeviceFeatures2(pd, &f2);
-  VkPhysicalDeviceVulkan12Features en12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR encm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+  encm.cooperativeMatrix = cm.cooperativeMatrix;
+  VkPhysicalDeviceVulkan13Features en13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, coopmat ? &encm : NULL};
+  en13.subgroupSizeControl = v13.subgroupSizeControl;
+  en13.computeFullSubgroups = v13.computeFullSubgroups;
+  VkPhysicalDeviceVulkan12Features en12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, v13ok ? &en13 : NULL};
   en12.shaderInt8 = v12.shaderInt8;
   en12.shaderFloat16 = v12.shaderFloat16;
   en12.storageBuffer8BitAccess = v12.storageBuffer8BitAccess;
+  en12.vulkanMemoryModel = v12.vulkanMemoryModel;
+  en12.vulkanMemoryModelDeviceScope = v12.vulkanMemoryModelDeviceScope;
   VkPhysicalDeviceVulkan11Features en11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &en12};
   en11.storageBuffer16BitAccess = v11.storageBuffer16BitAccess;
   VkPhysicalDeviceFeatures2 en = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &en11};
@@ -173,6 +194,13 @@ int main(int argc, char** argv) {
   VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &en};
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &qci;
+  const char* cm_ext = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+  if (coopmat && cm.cooperativeMatrix) {
+    dci.enabledExtensionCount = 1;
+    dci.ppEnabledExtensionNames = &cm_ext;
+  }
+  printf("cooperative matrices: %s, Vulkan memory model: %s\n", coopmat && cm.cooperativeMatrix ? "on" : "off",
+         v12.vulkanMemoryModel ? "on" : "off");
   CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
   VkQueue q;
   vkGetDeviceQueue(dev, qfam, 0, &q);
@@ -236,6 +264,13 @@ int main(int argc, char** argv) {
   cpi.stage.module = sm;
   cpi.stage.pName = "main";
   if (block[0]) cpi.stage.pSpecializationInfo = &spec_info;
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rss = {
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, NULL, subgroup};
+  if (subgroup) {
+    if (!en13.subgroupSizeControl) { fprintf(stderr, "subgroup %u: no subgroup size control\n", subgroup); return 2; }
+    cpi.stage.pNext = &rss;
+    if (en13.computeFullSubgroups) cpi.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+  }
   cpi.layout = pl;
   VkPipeline pipe;
   CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, NULL, &pipe));
