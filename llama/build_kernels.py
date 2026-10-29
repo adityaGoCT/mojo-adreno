@@ -21,11 +21,14 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 MOJO = ROOT / ".venv-mojo/bin/mojo"
-KERNELS = {"embed": 256, "rmsnorm": 256, "gemv": 64, "gemv_add": 64, "rope_kv": 256, "attention": 64, "silu_mul": 256}
+KERNELS = {"embed": 256, "rmsnorm": 256, "gemv": 64, "gemv_add": 64, "rope_kv": 256, "attention": 64, "silu_mul": 256,
+           "gemv_q4": 64, "gemv_add_q4": 64}
 FLAVORS = {"stock": ["--vulkan", "1.1", "--i32", "--pad-shared"], "turnip": ["--vulkan", "1.3"]}
 MOJO_SRC = pathlib.Path(os.environ.get("MOJO_SRC", ROOT.parent / "modular"))  # modular/modular with the SPIR-V target
 PREFILL = {  # name: (source in kernels/prefill, workgroup size, defines)
     "p_rmsnorm": ("p_rmsnorm", 256, {}), "p_gemm": ("p_gemm", 256, {}), "p_add": ("p_add", 256, {}),
+    "p_gemm_q4": ("p_gemm_q4", 256, {}),
+    "p_attention_scalar": ("p_attention_scalar", 64, {}),
     "p_rope_kv": ("p_rope_kv", 256, {}), "p_attention": ("p_attention", 64, {}), "p_silu_mul": ("p_silu_mul", 256, {}),
 }
 

@@ -49,6 +49,42 @@ def sh(*cmd, check=True):
     return r
 
 
+G4 = 64  # int4 weights: one fp16 scale per 64 consecutive weights of a row
+
+
+def quantize4(w16):
+    """Symmetric int4 per group of G4 along each row of an fp16 matrix: (packed uint32 rows, 8 weights a
+    word, low nibble first; fp16 scales; the dequantized float32 matrix). fp32 math, as st2bin.c does it."""
+    rows, cols = w16.shape
+    w = w16.float().numpy().reshape(rows, cols // G4, G4)
+    s16 = (np.abs(w).max(-1) / np.float32(7)).astype(np.float16)
+    sf = s16.astype(np.float32)[..., None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q = np.where(sf > 0, np.rint(w / sf), np.float32(0))
+    q = np.clip(q, -8, 7).astype(np.int32)
+    nibbles = (q.reshape(rows, cols // 8, 8) & 0xF).astype(np.uint32)
+    packed = np.zeros((rows, cols // 8), np.uint32)
+    for j in range(8):
+        packed |= nibbles[..., j] << np.uint32(4 * j)
+    return packed, s16, (q.astype(np.float32) * sf).reshape(rows, cols)
+
+
+Q4_WEIGHTS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+              "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+
+
+@torch.no_grad()
+def quantize_model4(model):
+    """Gives the reference model the int4 weights the phone uses: every projection and the lm_head
+    dequantized (the embedding lookup stays fp16, so the lm_head is untied from it)."""
+    for layer in model.model.layers:
+        for name in Q4_WEIGHTS:
+            lin = layer.get_submodule(name)
+            lin.weight.data = torch.from_numpy(quantize4(lin.weight.data.half())[2])
+    emb = model.model.embed_tokens.weight.data
+    model.lm_head.weight = torch.nn.Parameter(torch.from_numpy(quantize4(emb.half())[2]), requires_grad=False)
+
+
 def load_model(src):
     if src == "random":
         torch.manual_seed(0)
@@ -102,6 +138,50 @@ def export(model, out):
     print(f"export: {len(tensors)} tensors, {off / 1e9:.2f} GB -> {out}")
 
 
+def export_q4(model, fp16_dir, out):
+    """weights.bin + manifest.txt with int4 projections and lm_head (<name>.q packed words, <name>.s fp16
+    scales); the embedding chunks, norms and RoPE tables as in the fp16 export (from fp16_dir)."""
+    c = model.config
+    sd = model.state_dict()
+    f16 = lambda t: t.detach().to(torch.float16).contiguous()  # noqa: E731
+    fp16 = {l.split()[0]: (int(l.split()[1]), int(l.split()[2]))
+            for l in (fp16_dir / "manifest.txt").read_text().splitlines()[1:] if l.strip()}
+    blob = (fp16_dir / "weights.bin").read_bytes()
+    copy = lambda name: np.frombuffer(blob, np.uint8, fp16[name][1], fp16[name][0])  # noqa: E731
+    tensors = []
+
+    def q4(name, w16):
+        packed, scales, _ = quantize4(w16)
+        tensors.extend([(name + ".q", packed), (name + ".s", scales)])
+
+    for i in range(CHUNKS):
+        tensors.append((f"embed.{i}", copy(f"embed.{i}")))
+    for l in range(c.num_hidden_layers):
+        p = f"model.layers.{l}."
+        tensors.append((f"l{l}.attn_norm", copy(f"l{l}.attn_norm")))
+        q4(f"l{l}.wqkv", torch.cat([f16(sd[p + f"self_attn.{n}_proj.weight"]) for n in "qkv"]))
+        q4(f"l{l}.wo", f16(sd[p + "self_attn.o_proj.weight"]))
+        tensors.append((f"l{l}.mlp_norm", copy(f"l{l}.mlp_norm")))
+        q4(f"l{l}.wgu", torch.cat([f16(sd[p + "mlp.gate_proj.weight"]), f16(sd[p + "mlp.up_proj.weight"])]))
+        q4(f"l{l}.wdown", f16(sd[p + "mlp.down_proj.weight"]))
+    tensors.append(("final_norm", copy("final_norm")))
+    for i, chunk in enumerate(f16(sd["model.embed_tokens.weight"]).chunk(CHUNKS)):
+        q4(f"lm.{i}", chunk)
+    tensors += [("rope.cos", copy("rope.cos")), ("rope.sin", copy("rope.sin"))]
+    out.mkdir(parents=True, exist_ok=True)
+    off, lines = 0, [f"llama 2048 16 32 8 64 8192 128256 {MAXPOS} {CHUNKS}"]
+    with open(out / "weights.bin", "wb") as f:
+        for name, a in tensors:
+            a = np.ascontiguousarray(a)
+            f.write(b"\0" * (-off % 256))
+            off += -off % 256
+            f.write(a.tobytes())
+            lines.append(f"{name} {off} {a.nbytes}")
+            off += a.nbytes
+    (out / "manifest.txt").write_text("\n".join(lines) + "\n")
+    print(f"export: {len(tensors)} tensors, {off / 1e9:.2f} GB -> {out}")
+
+
 @torch.no_grad()
 def reference(model, ids, max_new, eos):
     """Greedy decode, fp32 math; returns (new token ids, logits after the prompt)."""
@@ -145,6 +225,8 @@ def main():
     ap.add_argument("--backend", default="stock", choices=["stock", "turnip", "native"],
                     help="native: kernels from a source-built Mojo's Vulkan SPIR-V target, on Mesa Turnip")
     ap.add_argument("--reexport", action="store_true")
+    ap.add_argument("--quant", choices=["fp16", "q4"], default="fp16",
+                    help="q4: int4 projections and lm_head (groups of 64, fp16 scales); embedding fp16")
     a = ap.parse_args()
     if a.prompt_file:
         a.prompt = pathlib.Path(a.prompt_file).read_text().strip()
@@ -160,6 +242,13 @@ def main():
     model_dir = BUILD / ("model-random" if a.model == "random" else "model")
     if a.reexport or not (model_dir / "manifest.txt").exists():
         export(model, model_dir)
+    fp16_ref = None
+    if a.quant == "q4":
+        fp16_dir, model_dir = model_dir, BUILD / (model_dir.name + "-q4")
+        if a.reexport or not (model_dir / "manifest.txt").exists():
+            export_q4(model, fp16_dir, model_dir)
+        fp16_ref = None if a.model == "random" else reference(model, ids, a.max_new, eos)[0]
+        quantize_model4(model)
     print(f"prompt: {len(ids)} tokens; model loaded and exported in {time.time() - t0:.0f} s")
 
     t1 = time.time()
@@ -193,6 +282,10 @@ def main():
     print(f"tokens: phone {len(got)}, PyTorch {len(ref)}, identical for the first {match}")
     if tok:
         print("PyTorch:", tok.decode(ref, skip_special_tokens=True))
+    if a.quant == "q4" and fp16_ref:
+        same = next((i for i, (x, y) in enumerate(zip(got, fp16_ref)) if x != y), min(len(got), len(fp16_ref)))
+        print(f"against the fp16 model: identical for the first {same} of {len(fp16_ref)} tokens")
+        print("fp16 PyTorch:", tok.decode(fp16_ref, skip_special_tokens=True))
 
 
 if __name__ == "__main__":

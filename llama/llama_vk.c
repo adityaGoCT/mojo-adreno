@@ -83,11 +83,16 @@ typedef struct { char name[32]; buf_t b; } tensor_t;
 static tensor_t tensors[256];
 static int ntensors;
 
-static buf_t* tensor(const char* name) {
+static buf_t* find_tensor(const char* name) {
   for (int i = 0; i < ntensors; ++i)
     if (!strcmp(tensors[i].name, name)) return &tensors[i].b;
-  fprintf(stderr, "missing tensor %s\n", name);
-  exit(2);
+  return NULL;
+}
+
+static buf_t* tensor(const char* name) {
+  buf_t* b = find_tensor(name);
+  if (!b) { fprintf(stderr, "missing tensor %s\n", name); exit(2); }
+  return b;
 }
 
 static void load_weights(const char* dir) {
@@ -127,11 +132,14 @@ static void load_weights(const char* dir) {
 // ---- kernels: binding counts follow the Mojo signatures (pointer args, then a params buffer)
 typedef struct { const char* name; int nbind; VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe; } kernel_t;
 static kernel_t kernels[] = {{"embed", 3}, {"rmsnorm", 3}, {"gemv", 4}, {"gemv_add", 4},
-                             {"rope_kv", 6}, {"attention", 5}, {"silu_mul", 2},
+                             {"rope_kv", 6}, {"attention", 5}, {"silu_mul", 2}, {"gemv_q4", 5}, {"gemv_add_q4", 5},
                              {"p_rmsnorm", 3}, {"p_gemm", 4}, {"p_add", 2},
-                             {"p_rope_kv", 5}, {"p_attention", 4}, {"p_silu_mul", 2}};
-enum { K_EMBED, K_RMSNORM, K_GEMV, K_GEMV_ADD, K_ROPE_KV, K_ATTENTION, K_SILU_MUL, NKERNELS,
-       K_P_RMSNORM = NKERNELS, K_P_GEMM, K_P_ADD, K_P_ROPE_KV, K_P_ATTENTION, K_P_SILU_MUL, NALL };
+                             {"p_rope_kv", 5}, {"p_attention", 4}, {"p_silu_mul", 2}, {"p_gemm_q4", 5},
+                             {"p_attention_scalar", 4}};
+enum { K_EMBED, K_RMSNORM, K_GEMV, K_GEMV_ADD, K_ROPE_KV, K_ATTENTION, K_SILU_MUL, K_GEMV_Q4, K_GEMV_ADD_Q4, NKERNELS,
+       K_P_RMSNORM = NKERNELS, K_P_GEMM, K_P_ADD, K_P_ROPE_KV, K_P_ATTENTION, K_P_SILU_MUL, K_P_GEMM_Q4,
+       K_P_ATTENTION_SCALAR, NALL };
+static int attention_fused = 1;  // p_attention, unless the driver cannot create it
 
 static void load_kernels(const char* dir, int first, int last) {
   for (int k = first; k < last; ++k) {
@@ -160,7 +168,15 @@ static void load_kernels(const char* dir, int first, int last) {
     cpi.stage = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
                                                   VK_SHADER_STAGE_COMPUTE_BIT, sm, "main", NULL};
     cpi.layout = kn->pl;
-    CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, NULL, &kn->pipe));
+    VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, NULL, &kn->pipe);
+    if (r != VK_SUCCESS && k == K_P_ATTENTION) {
+      // The fused attention fails to link on the 840's Android 16 driver: fall back to the scalar one.
+      printf("prefill: fused attention not available on this driver (%d), using p_attention_scalar\n", (int)r);
+      attention_fused = 0;
+      kn->pipe = VK_NULL_HANDLE;
+    } else {
+      CHECK(r);
+    }
     free(code);
   }
 }
@@ -190,6 +206,28 @@ static dispatch_t make_dispatch2(int k, uint32_t groups, uint32_t gy, const arg_
 }
 
 static dispatch_t make_dispatch(int k, uint32_t groups, const arg_t* args) { return make_dispatch2(k, groups, 1, args); }
+
+// int4 weights: the manifest has <name>.q (8 weights a 32-bit word) and <name>.s (an fp16 scale per 64)
+// for every projection and for the lm_head chunks lm.<c>, instead of fp16 <name>.
+static int q4;
+
+// A projection y = W x (add: y += W x), with W the tensor `name` in fp16 or int4.
+static dispatch_t proj(int add, uint32_t rows, const char* name, arg_t in, arg_t out, arg_t cols) {
+  if (!q4) return make_dispatch(add ? K_GEMV_ADD : K_GEMV, rows, (arg_t[]){whole(tensor(name)), in, out, cols});
+  char q[40], s[40];
+  snprintf(q, sizeof q, "%s.q", name);
+  snprintf(s, sizeof s, "%s.s", name);
+  return make_dispatch(add ? K_GEMV_ADD_Q4 : K_GEMV_Q4, rows, (arg_t[]){whole(tensor(q)), whole(tensor(s)), in, out, cols});
+}
+
+// The prefill's Y = X W^T for all rows, with W the tensor `name` in fp16 or int4 (n_k: its n and k).
+static dispatch_t pproj(uint32_t gx, uint32_t gy, const char* name, arg_t in, arg_t out, arg_t n_k) {
+  if (!q4) return make_dispatch2(K_P_GEMM, gx, gy, (arg_t[]){whole(tensor(name)), in, out, n_k});
+  char q[40], s[40];
+  snprintf(q, sizeof q, "%s.q", name);
+  snprintf(s, sizeof s, "%s.s", name);
+  return make_dispatch2(K_P_GEMM_Q4, gx, gy, (arg_t[]){whole(tensor(q)), whole(tensor(s)), in, out, n_k});
+}
 
 // Records dispatches with a barrier after each, the last one to the host.
 static void record(VkCommandBuffer cmd, const dispatch_t* ds, int n) {
@@ -296,6 +334,8 @@ int main(int argc, char** argv) {
   vkGetDeviceQueue(dev, qfam, 0, &q);
 
   load_weights(argv[1]);
+  q4 = find_tensor("l0.wqkv.q") != NULL;
+  if (q4) printf("weights: int4 projections and lm_head\n");
   load_kernels(argv[2], 0, NKERNELS);
   if (prefill) load_kernels(prefill, NKERNELS, NALL);
 
@@ -326,21 +366,25 @@ int main(int argc, char** argv) {
   for (int l = 0; l < L; ++l) {
 #define T(fmt) (snprintf(nm, sizeof nm, fmt, l), tensor(nm))
     body[nb++] = make_dispatch(K_RMSNORM, 1, (arg_t[]){whole(&x), whole(T("l%d.attn_norm")), whole(&xn)});
-    body[nb++] = make_dispatch(K_GEMV, QKV, (arg_t[]){whole(T("l%d.wqkv")), whole(&xn), whole(&qkv), p_d});
+    snprintf(nm, sizeof nm, "l%d.wqkv", l);
+    body[nb++] = proj(0, QKV, nm, whole(&xn), whole(&qkv), p_d);
     body[nb++] = make_dispatch(K_ROPE_KV, 5, (arg_t[]){whole(&qkv), whole(tensor("rope.cos")), whole(tensor("rope.sin")),
                                                         whole(&kc[l]), whole(&vc[l]), p_pos});
     body[nb++] = make_dispatch(K_ATTENTION, H, (arg_t[]){whole(&qkv), whole(&kc[l]), whole(&vc[l]), whole(&att), p_pos});
-    body[nb++] = make_dispatch(K_GEMV_ADD, D, (arg_t[]){whole(T("l%d.wo")), whole(&att), whole(&x), p_d});
+    snprintf(nm, sizeof nm, "l%d.wo", l);
+    body[nb++] = proj(1, D, nm, whole(&att), whole(&x), p_d);
     body[nb++] = make_dispatch(K_RMSNORM, 1, (arg_t[]){whole(&x), whole(T("l%d.mlp_norm")), whole(&xn)});
-    body[nb++] = make_dispatch(K_GEMV, 2 * F, (arg_t[]){whole(T("l%d.wgu")), whole(&xn), whole(&gu), p_d});
+    snprintf(nm, sizeof nm, "l%d.wgu", l);
+    body[nb++] = proj(0, 2 * F, nm, whole(&xn), whole(&gu), p_d);
     body[nb++] = make_dispatch(K_SILU_MUL, F / 256, (arg_t[]){whole(&gu), whole(&act)});
-    body[nb++] = make_dispatch(K_GEMV_ADD, D, (arg_t[]){whole(T("l%d.wdown")), whole(&act), whole(&x), p_f});
+    snprintf(nm, sizeof nm, "l%d.wdown", l);
+    body[nb++] = proj(1, D, nm, whole(&act), whole(&x), p_f);
   }
   body[nb++] = make_dispatch(K_RMSNORM, 1, (arg_t[]){whole(&x), whole(tensor("final_norm")), whole(&xn)});
   for (int c = 0; c < CHUNKS; ++c) {  // lm_head = the (tied) embedding table, one chunk at a time
-    snprintf(nm, sizeof nm, "embed.%d", c);
+    snprintf(nm, sizeof nm, q4 ? "lm.%d" : "embed.%d", c);  // int4: its own quantized copy
     arg_t out = {&logits, (VkDeviceSize)c * CHUNK_ROWS * 4, (VkDeviceSize)CHUNK_ROWS * 4};
-    body[nb++] = make_dispatch(K_GEMV, CHUNK_ROWS, (arg_t[]){whole(tensor(nm)), whole(&xn), out, p_d});
+    body[nb++] = proj(0, CHUNK_ROWS, nm, whole(&xn), out, p_d);
   }
 
   // ---- one command buffer per embedding chunk: embed(row of chunk c), then the body
@@ -378,16 +422,21 @@ int main(int argc, char** argv) {
     uint32_t rb = tp / 128;
     for (int l = 0; l < L; ++l) {
       pp[npp++] = make_dispatch2(K_P_RMSNORM, tp, 1, (arg_t[]){whole(&xr), whole(T("l%d.attn_norm")), whole(&xnr)});
-      pp[npp++] = make_dispatch2(K_P_GEMM, QKV / 128, rb, (arg_t[]){whole(T("l%d.wqkv")), whole(&xnr), whole(&qkvr), g_qkv});
+      snprintf(nm, sizeof nm, "l%d.wqkv", l);
+      pp[npp++] = pproj(QKV / 128, rb, nm, whole(&xnr), whole(&qkvr), g_qkv);
       pp[npp++] = make_dispatch2(K_P_ROPE_KV, 5, tp, (arg_t[]){whole(&qkvr), whole(tensor("rope.cos")), whole(tensor("rope.sin")),
                                                                  whole(&kc[l]), whole(&vc[l])});
-      pp[npp++] = make_dispatch2(K_P_ATTENTION, H, tp / 64, (arg_t[]){whole(&qkvr), whole(&kc[l]), whole(&vc[l]), whole(&attr)});
-      pp[npp++] = make_dispatch2(K_P_GEMM, D / 128, rb, (arg_t[]){whole(T("l%d.wo")), whole(&attr), whole(&yr), g_o});
+      pp[npp++] = make_dispatch2(attention_fused ? K_P_ATTENTION : K_P_ATTENTION_SCALAR, H, attention_fused ? tp / 64 : tp,
+                                 (arg_t[]){whole(&qkvr), whole(&kc[l]), whole(&vc[l]), whole(&attr)});
+      snprintf(nm, sizeof nm, "l%d.wo", l);
+      pp[npp++] = pproj(D / 128, rb, nm, whole(&attr), whole(&yr), g_o);
       pp[npp++] = make_dispatch2(K_P_ADD, D / 256, tp, (arg_t[]){whole(&xr), whole(&yr)});
       pp[npp++] = make_dispatch2(K_P_RMSNORM, tp, 1, (arg_t[]){whole(&xr), whole(T("l%d.mlp_norm")), whole(&xnr)});
-      pp[npp++] = make_dispatch2(K_P_GEMM, 2 * F / 128, rb, (arg_t[]){whole(T("l%d.wgu")), whole(&xnr), whole(&gur), g_gu});
+      snprintf(nm, sizeof nm, "l%d.wgu", l);
+      pp[npp++] = pproj(2 * F / 128, rb, nm, whole(&xnr), whole(&gur), g_gu);
       pp[npp++] = make_dispatch2(K_P_SILU_MUL, F / 256, tp, (arg_t[]){whole(&gur), whole(&actr)});
-      pp[npp++] = make_dispatch2(K_P_GEMM, D / 128, rb, (arg_t[]){whole(T("l%d.wdown")), whole(&actr), whole(&yr), g_down});
+      snprintf(nm, sizeof nm, "l%d.wdown", l);
+      pp[npp++] = pproj(D / 128, rb, nm, whole(&actr), whole(&yr), g_down);
       pp[npp++] = make_dispatch2(K_P_ADD, D / 256, tp, (arg_t[]){whole(&xr), whole(&yr)});
     }
     VkCommandBuffer two[2];
