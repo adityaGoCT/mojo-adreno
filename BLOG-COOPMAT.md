@@ -9,10 +9,12 @@
 | | Adreno 710 (moto g stylus 5G) | Adreno 840 (Galaxy S26 Ultra) |
 |---|---|---|
 | Llama 3.2 1B decode | 285 ms/token | **41 ms/token** (24 tokens/s) |
-| 431-token prompt, one token at a time | — | 17.3 s |
-| 431-token prompt, batched on cooperative matrices | — | **1.29 s** (13.5x) |
+| 431-token prompt, one token at a time | — | 17.7 s |
+| 431-token prompt, batched on cooperative matrices | — | **0.68 s** (26x) |
 | matmul on cooperative matrices, 2048³ | no matrix units | **3.7 TFLOP/s** fp16, **2.5 TFLOP/s** fp32 |
 | tokens identical to PyTorch | 48 of 48 | 48 of 48 (logits within 8.7e-5) |
+
+*(The prefill numbers are from [the update](#update-faster-weight-staging-and-a-second-driver-build): 1.29 s with the first prefill matmul, 0.68 s with coalesced weight staging.)*
 
 All of it is Mojo code, from the Llama kernels to the matmul that reaches 3.7 TFLOP/s. The compiler work is on the branch [`adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target) of my fork of modular/modular. The kernels, runners and the Llama runtime are in [this repo](README.md).
 
@@ -171,7 +173,7 @@ The runtime embeds the prompt on the CPU, since the weights are in host-visible 
 
 `p_add` exists because of a fourth driver behaviour. A matmul whose accumulator starts as a matrix loaded from Y, which would give Y += X Wᵀ in one kernel, fails at pipeline creation with `VK_ERROR_UNKNOWN`. Creating each pipeline on its own with [`runner/vk_launch.c`](runner/vk_launch.c) pinned it to that one kernel.
 
-The result, with the same 431-token prompt, run, weights and phone:
+The result, with the same 431-token prompt, run, weights and phone (the first version of `p_gemm`; [the update](#update-faster-weight-staging-and-a-second-driver-build) halves it again):
 
 | prompt (431 tokens) | time | tokens identical to PyTorch | max logit difference |
 |---|---|---|---|
@@ -201,7 +203,17 @@ So the matmuls run at about 0.8 TFLOP/s, a third of the standalone fp32 kernel's
 
 The isolated numbers also correct the profile above: the large projections were never at 0.8 TFLOP/s. The average was pulled down by the small ones (q/k/v and o, only 64–96 workgroups) and by per-dispatch overhead in profile mode. A K step of 32 would read even longer runs, but it fills the 840's 32 KB of shared memory exactly, and that gave wrong results. 16 KB works.
 
-The 1.29 s prefill above is with the old kernel. The end-to-end rerun is still to do: the lab's bridge slowed to 0.16 MB/s, four hours for the weights.
+End to end, on the Android 17 phone (below), with the same prompt:
+
+| prompt (431 tokens) | time | tokens identical to PyTorch | max logit difference |
+|---|---|---|---|
+| one token at a time | 17.7 s | 48 of 48 | 5.3e-5 |
+| batched prefill, first `p_gemm` | 1.29 s (on the Android 16 phone) | 48 of 48 | 8.7e-5 |
+| batched prefill, coalesced `p_gemm` | **0.68 s** (26x) | 48 of 48 | 8.7e-5 |
+
+`p_gemm` now takes 556 ms for the 64 projections, 1.8 TFLOP/s averaged over all four shapes; attention (100 ms) is the next target.
+
+Getting the weights there took a detour. The lab's bridge slowed to 0.16 MB/s, four hours for 2.47 GB, and the lab wipes phones between sessions. The phone has its own internet connection, though, and `curl`. So it downloaded `model.safetensors` from a public mirror with the same SHA-256 as Meta's file, at tens of MB/s. A 57-line converter ([`llama/st2bin.c`](llama/st2bin.c)) then followed a recipe written on the Mac from the same file's header ([`llama/st2bin_recipe.py`](llama/st2bin_recipe.py)). The resulting `weights.bin` is byte-identical to the Mac's export.
 
 **Same version number, different driver.** One S26 Ultra came back from the lab updated to Android 17, and every pipeline with a matrix multiply-add failed to create, even a single one with no loop. Its driver reports the same version, 512.842.19, but it is a different file: 4,410,944 bytes against 4,409,520, and 186 extensions against 180.
 
