@@ -117,8 +117,8 @@ def reference(model, ids, max_new, eos):
     return toks, first
 
 
-def build_and_push(model_dir, backend):
-    sh(sys.executable, HERE / "build_kernels.py", "--flavor", backend)
+def build_and_push(model_dir, backend, prefill=False):
+    sh(sys.executable, HERE / "build_kernels.py", "--flavor", backend, *(["prefill840"] if prefill else []))
     sh(CC, "-O2", "-o", BUILD / "llama_vk", HERE / "llama_vk.c", "-ldl")
     remote = f"{DEV}/{model_dir.name}"  # model / model-random: same sizes, so separate directories
     sh("adb", "shell", f"mkdir -p {remote} {DEV}/{backend}")
@@ -129,17 +129,25 @@ def build_and_push(model_dir, backend):
             sh("adb", "push", model_dir / f, f"{remote}/")
     sh("adb", "push", *sorted((BUILD / backend).glob("*.spv")), f"{DEV}/{backend}/")
     sh("adb", "push", BUILD / "llama_vk", f"{DEV}/")
+    if prefill:
+        sh("adb", "shell", f"mkdir -p {DEV}/prefill840")
+        sh("adb", "push", *sorted((BUILD / "prefill840").glob("*.spv")), f"{DEV}/prefill840/")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="Hugging Face snapshot dir of Llama-3.2-1B(-Instruct), or 'random'")
     ap.add_argument("--prompt", default="Explain in two sentences why the sky is blue.")
+    ap.add_argument("--prompt-file", help="read the prompt from this file instead")
+    ap.add_argument("--prefill", action="store_true",
+                    help="batched prefill on KHR cooperative matrices (prefill840 kernels; an Adreno 8xx)")
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--backend", default="stock", choices=["stock", "turnip", "native"],
                     help="native: kernels from a source-built Mojo's Vulkan SPIR-V target, on Mesa Turnip")
     ap.add_argument("--reexport", action="store_true")
     a = ap.parse_args()
+    if a.prompt_file:
+        a.prompt = pathlib.Path(a.prompt_file).read_text().strip()
     t0 = time.time()
     model = load_model(a.model)
     tok = None if a.model == "random" else AutoTokenizer.from_pretrained(a.model)
@@ -158,9 +166,11 @@ def main():
     ref, ref_logits = reference(model, ids, a.max_new, eos)
     print(f"reference (PyTorch fp32 on the Mac CPU): {len(ref)} tokens in {time.time() - t1:.1f} s")
 
-    build_and_push(model_dir, a.backend)
+    build_and_push(model_dir, a.backend, a.prefill)
     env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if a.backend in ("turnip", "native") else ""
-    cmd = (f"cd {DEV} && {env}LLAMA_EOS={','.join(map(str, eos))} LLAMA_LOGITS={DEV}/logits.bin "
+    if a.prefill:
+        env += f"LLAMA_PREFILL={DEV}/prefill840 " + ("LLAMA_PROFILE=1 " if os.environ.get("LLAMA_PROFILE") else "")
+    cmd = (f"cd {DEV}; {env}LLAMA_EOS={','.join(map(str, eos))} LLAMA_LOGITS={DEV}/logits.bin "
            f"./llama_vk {model_dir.name} {a.backend} {a.max_new} {' '.join(map(str, ids))}")
     print(f"phone ({a.backend}):", flush=True)
     proc = subprocess.Popen(["adb", "shell", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

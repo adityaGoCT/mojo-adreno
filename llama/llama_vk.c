@@ -9,6 +9,10 @@
 // generated greedily (argmax on the CPU). Output: one line per generated token, "tok <id> <ms>".
 //   LLAMA_EOS=128001,128009   stop tokens          LLAMA_LOGITS=<file>   logits after the prompt (fp32)
 //   LLAMA_DEBUG=1             first token one dispatch per submit, reporting each kernel and x[0..1]
+//   LLAMA_PREFILL=<dir>       batched prefill with the prefill840 kernels in <dir> (build_kernels.py):
+//                             all prompt tokens at once, the matmuls on KHR cooperative matrices
+//                             (Adreno 8xx, Vulkan 1.3), then decode as above
+//   LLAMA_PROFILE=1           with LLAMA_PREFILL: first each prefill dispatch alone, time per kernel
 #define VK_NO_PROTOTYPES
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -123,11 +127,14 @@ static void load_weights(const char* dir) {
 // ---- kernels: binding counts follow the Mojo signatures (pointer args, then a params buffer)
 typedef struct { const char* name; int nbind; VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe; } kernel_t;
 static kernel_t kernels[] = {{"embed", 3}, {"rmsnorm", 3}, {"gemv", 4}, {"gemv_add", 4},
-                             {"rope_kv", 6}, {"attention", 5}, {"silu_mul", 2}};
-enum { K_EMBED, K_RMSNORM, K_GEMV, K_GEMV_ADD, K_ROPE_KV, K_ATTENTION, K_SILU_MUL, NKERNELS };
+                             {"rope_kv", 6}, {"attention", 5}, {"silu_mul", 2},
+                             {"p_rmsnorm", 3}, {"p_gemm", 4}, {"p_add", 2},
+                             {"p_rope_kv", 5}, {"p_attention", 4}, {"p_silu_mul", 2}};
+enum { K_EMBED, K_RMSNORM, K_GEMV, K_GEMV_ADD, K_ROPE_KV, K_ATTENTION, K_SILU_MUL, NKERNELS,
+       K_P_RMSNORM = NKERNELS, K_P_GEMM, K_P_ADD, K_P_ROPE_KV, K_P_ATTENTION, K_P_SILU_MUL, NALL };
 
-static void load_kernels(const char* dir) {
-  for (int k = 0; k < NKERNELS; ++k) {
+static void load_kernels(const char* dir, int first, int last) {
+  for (int k = first; k < last; ++k) {
     kernel_t* kn = &kernels[k];
     char path[512];
     snprintf(path, sizeof path, "%s/%s.spv", dir, kn->name);
@@ -160,15 +167,15 @@ static void load_kernels(const char* dir) {
 
 // ---- dispatches: a buffer slice per binding
 typedef struct { const buf_t* b; VkDeviceSize off, size; } arg_t;
-typedef struct { int k; VkDescriptorSet set; uint32_t groups; } dispatch_t;
+typedef struct { int k; VkDescriptorSet set; uint32_t groups, gy; } dispatch_t;
 static dispatch_t plan[CHUNKS][256];
 static int nplan;
 static VkDescriptorPool pool;
 
 static arg_t whole(const buf_t* b) { return (arg_t){b, 0, b->size}; }
 
-static dispatch_t make_dispatch(int k, uint32_t groups, const arg_t* args) {
-  dispatch_t d = {k, VK_NULL_HANDLE, groups};
+static dispatch_t make_dispatch2(int k, uint32_t groups, uint32_t gy, const arg_t* args) {
+  dispatch_t d = {k, VK_NULL_HANDLE, groups, gy};
   VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, pool, 1, &kernels[k].dsl};
   CHECK(vkAllocateDescriptorSets(dev, &dai, &d.set));
   VkDescriptorBufferInfo bi[8];
@@ -182,12 +189,43 @@ static dispatch_t make_dispatch(int k, uint32_t groups, const arg_t* args) {
   return d;
 }
 
+static dispatch_t make_dispatch(int k, uint32_t groups, const arg_t* args) { return make_dispatch2(k, groups, 1, args); }
+
+// Records dispatches with a barrier after each, the last one to the host.
+static void record(VkCommandBuffer cmd, const dispatch_t* ds, int n) {
+  VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+  VkMemoryBarrier host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
+  VkCommandBufferBeginInfo bbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  CHECK(vkBeginCommandBuffer(cmd, &bbi));
+  for (int i = 0; i < n; ++i) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, kernels[ds[i].k].pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, kernels[ds[i].k].pl, 0, 1, &ds[i].set, 0, NULL);
+    vkCmdDispatch(cmd, ds[i].groups, ds[i].gy, 1);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         i == n - 1 ? VK_PIPELINE_STAGE_HOST_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         1, i == n - 1 ? &host : &mb, 0, NULL, 0, NULL);
+  }
+  CHECK(vkEndCommandBuffer(cmd));
+}
+
+static void submit_wait(VkQueue q, VkCommandBuffer cmd) {
+  VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &cmd;
+  CHECK(vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE));
+  CHECK(vkQueueWaitIdle(q));
+}
+
 int main(int argc, char** argv) {
   if (argc < 5) { fprintf(stderr, "usage: %s model_dir kernel_dir max_new token_ids...\n", argv[0]); return 2; }
   int max_new = atoi(argv[3]), nprompt = argc - 4;
   if (nprompt + max_new > MAXPOS) { fprintf(stderr, "prompt + new tokens > %d\n", MAXPOS); return 2; }
   int eos[8], neos = 0;
   for (char* s = getenv("LLAMA_EOS"); s && *s && neos < 8; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") eos[neos++] = atoi(s);
+  const char* prefill = getenv("LLAMA_PREFILL");
+  int tp = (nprompt + 127) / 128 * 128;  // prefill rows: the prompt padded to the matmul block
+  if (prefill && tp > MAXPOS) { fprintf(stderr, "prefill: %d padded prompt rows > %d\n", tp, MAXPOS); return 2; }
 
   // ---- Vulkan device: fp16 math and storage, 8-bit storage (resource names), int64 where available
   void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
@@ -196,7 +234,7 @@ int main(int argc, char** argv) {
   vkCreateInstance = (PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance");
   VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "llama_vk", 1, NULL, 0, VK_API_VERSION_1_1};
   const char* api = getenv("VK_RUN_API");
-  if (api && !strcmp(api, "1.3")) app.apiVersion = VK_API_VERSION_1_3;
+  if ((api && !strcmp(api, "1.3")) || prefill) app.apiVersion = VK_API_VERSION_1_3;
   VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   ici.pApplicationInfo = &app;
   VkInstance inst;
@@ -223,7 +261,12 @@ int main(int argc, char** argv) {
   VkPhysicalDevice8BitStorageFeatures s8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES, &s16};
   VkPhysicalDeviceShaderFloat16Int8Features f16i8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES, &s8};
   VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f16i8};
+  // prefill: cooperative matrices, which need the Vulkan memory model
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+  VkPhysicalDeviceVulkanMemoryModelFeatures vmm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES, &cm};
+  if (prefill) s16.pNext = &vmm;
   vkGetPhysicalDeviceFeatures2(pd, &f2);
+  if (prefill && (!cm.cooperativeMatrix || !vmm.vulkanMemoryModel)) { fprintf(stderr, "prefill: no cooperative matrices\n"); return 2; }
   if (!f16i8.shaderFloat16 || !s16.storageBuffer16BitAccess) { fprintf(stderr, "need shaderFloat16 + storageBuffer16BitAccess\n"); return 2; }
   VkPhysicalDeviceFeatures2 en = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f16i8};
   en.features.shaderInt64 = f2.features.shaderInt64;
@@ -231,13 +274,14 @@ int main(int argc, char** argv) {
   s16.uniformAndStorageBuffer16BitAccess = s16.storagePushConstant16 = s16.storageInputOutput16 = VK_FALSE;
   s8.uniformAndStorageBuffer8BitAccess = s8.storagePushConstant8 = VK_FALSE;
   const char* want[] = {"VK_KHR_16bit_storage", "VK_KHR_8bit_storage", "VK_KHR_shader_float16_int8",
-                        "VK_KHR_storage_buffer_storage_class", "VK_KHR_spirv_1_4", "VK_KHR_shader_float_controls"};
+                        "VK_KHR_storage_buffer_storage_class", "VK_KHR_spirv_1_4", "VK_KHR_shader_float_controls",
+                        "VK_KHR_cooperative_matrix"};
   uint32_t nx = 0, ne = 0;
   vkEnumerateDeviceExtensionProperties(pd, NULL, &nx, NULL);
   VkExtensionProperties* xp = calloc(nx, sizeof *xp);
   vkEnumerateDeviceExtensionProperties(pd, NULL, &nx, xp);
   const char* exts[8];
-  for (int i = 0; i < 6; ++i)
+  for (int i = 0; i < (prefill ? 7 : 6); ++i)
     for (uint32_t j = 0; j < nx; ++j)
       if (!strcmp(want[i], xp[j].extensionName)) { exts[ne++] = want[i]; break; }
   float prio = 1.0f;
@@ -252,7 +296,8 @@ int main(int argc, char** argv) {
   vkGetDeviceQueue(dev, qfam, 0, &q);
 
   load_weights(argv[1]);
-  load_kernels(argv[2]);
+  load_kernels(argv[2], 0, NKERNELS);
+  if (prefill) load_kernels(prefill, NKERNELS, NALL);
 
   // ---- activations, KV cache, scalar parameters (int64 slots: row, pos, 2048, 8192)
   buf_t x = make_buffer(D * 4), xn = make_buffer(D * 4), qkv = make_buffer(QKV * 4), att = make_buffer(D * 4);
@@ -270,8 +315,8 @@ int main(int argc, char** argv) {
   *(int64_t*)((char*)par.map + 3 * slot) = F;
   arg_t p_row = {&par, 0, 64}, p_pos = {&par, slot, 64}, p_d = {&par, 2 * slot, 64}, p_f = {&par, 3 * slot, 64};
 
-  VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048};
-  VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 512, 1, &ps};
+  VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096};
+  VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 1024, 1, &ps};
   CHECK(vkCreateDescriptorPool(dev, &dpi, NULL, &pool));
 
   // ---- the per-token plan (the same for every embedding chunk except the first dispatch)
@@ -305,28 +350,66 @@ int main(int argc, char** argv) {
   VkCommandBuffer cmd[CHUNKS];
   VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, cpool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, CHUNKS};
   CHECK(vkAllocateCommandBuffers(dev, &cai, cmd));
-  VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT,
-                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
   VkMemoryBarrier host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
   for (int c = 0; c < CHUNKS; ++c) {
     snprintf(nm, sizeof nm, "embed.%d", c);
     plan[c][0] = make_dispatch(K_EMBED, D / 256, (arg_t[]){whole(tensor(nm)), whole(&x), p_row});
     memcpy(&plan[c][1], body, nb * sizeof *body);
-    VkCommandBufferBeginInfo bbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    CHECK(vkBeginCommandBuffer(cmd[c], &bbi));
-    for (int i = 0; i <= nb; ++i) {
-      dispatch_t* d = &plan[c][i];
-      vkCmdBindPipeline(cmd[c], VK_PIPELINE_BIND_POINT_COMPUTE, kernels[d->k].pipe);
-      vkCmdBindDescriptorSets(cmd[c], VK_PIPELINE_BIND_POINT_COMPUTE, kernels[d->k].pl, 0, 1, &d->set, 0, NULL);
-      vkCmdDispatch(cmd[c], d->groups, 1, 1);
-      vkCmdPipelineBarrier(cmd[c], VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                           i == nb ? VK_PIPELINE_STAGE_HOST_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                           1, i == nb ? &host : &mb, 0, NULL, 0, NULL);
-    }
-    CHECK(vkEndCommandBuffer(cmd[c]));
+    record(cmd[c], plan[c], nb + 1);
   }
   nplan = nb + 1;
   printf("plan: %d dispatches per token\n", nplan);
+
+  // ---- batched prefill: per layer the decode body's steps for all tp rows at once, then the final
+  // norm and lm_head (the decode body's last 1 + CHUNKS dispatches) on the last prompt token
+  buf_t xr = {0};
+  VkCommandBuffer pcmd = VK_NULL_HANDLE, tcmd = VK_NULL_HANDLE;
+  if (prefill) {
+    xr = make_buffer((VkDeviceSize)tp * D * 4);
+    buf_t xnr = make_buffer((VkDeviceSize)tp * D * 4), qkvr = make_buffer((VkDeviceSize)tp * QKV * 4);
+    buf_t attr = make_buffer((VkDeviceSize)tp * D * 4), gur = make_buffer((VkDeviceSize)tp * 2 * F * 4);
+    buf_t actr = make_buffer((VkDeviceSize)tp * F * 4), yr = make_buffer((VkDeviceSize)tp * D * 4);
+    buf_t pg = make_buffer(4 * slot);  // p_gemm's (n, k): qkv, o, gate/up, down
+    int64_t nk[4][2] = {{QKV, D}, {D, D}, {2 * F, D}, {D, F}};
+    for (int i = 0; i < 4; ++i) memcpy((char*)pg.map + i * slot, nk[i], 16);
+    arg_t g_qkv = {&pg, 0, 16}, g_o = {&pg, slot, 16}, g_gu = {&pg, 2 * slot, 16}, g_down = {&pg, 3 * slot, 16};
+    static dispatch_t pp[L * 11];
+    int npp = 0;
+    uint32_t rb = tp / 128;
+    for (int l = 0; l < L; ++l) {
+      pp[npp++] = make_dispatch2(K_P_RMSNORM, tp, 1, (arg_t[]){whole(&xr), whole(T("l%d.attn_norm")), whole(&xnr)});
+      pp[npp++] = make_dispatch2(K_P_GEMM, QKV / 128, rb, (arg_t[]){whole(T("l%d.wqkv")), whole(&xnr), whole(&qkvr), g_qkv});
+      pp[npp++] = make_dispatch2(K_P_ROPE_KV, 5, tp, (arg_t[]){whole(&qkvr), whole(tensor("rope.cos")), whole(tensor("rope.sin")),
+                                                                 whole(&kc[l]), whole(&vc[l])});
+      pp[npp++] = make_dispatch2(K_P_ATTENTION, H, tp, (arg_t[]){whole(&qkvr), whole(&kc[l]), whole(&vc[l]), whole(&attr)});
+      pp[npp++] = make_dispatch2(K_P_GEMM, D / 128, rb, (arg_t[]){whole(T("l%d.wo")), whole(&attr), whole(&yr), g_o});
+      pp[npp++] = make_dispatch2(K_P_ADD, D / 256, tp, (arg_t[]){whole(&xr), whole(&yr)});
+      pp[npp++] = make_dispatch2(K_P_RMSNORM, tp, 1, (arg_t[]){whole(&xr), whole(T("l%d.mlp_norm")), whole(&xnr)});
+      pp[npp++] = make_dispatch2(K_P_GEMM, 2 * F / 128, rb, (arg_t[]){whole(T("l%d.wgu")), whole(&xnr), whole(&gur), g_gu});
+      pp[npp++] = make_dispatch2(K_P_SILU_MUL, F / 256, tp, (arg_t[]){whole(&gur), whole(&actr)});
+      pp[npp++] = make_dispatch2(K_P_GEMM, D / 128, rb, (arg_t[]){whole(T("l%d.wdown")), whole(&actr), whole(&yr), g_down});
+      pp[npp++] = make_dispatch2(K_P_ADD, D / 256, tp, (arg_t[]){whole(&xr), whole(&yr)});
+    }
+    VkCommandBuffer two[2];
+    VkCommandBufferAllocateInfo ai2 = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, cpool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 2};
+    CHECK(vkAllocateCommandBuffers(dev, &ai2, two));
+    pcmd = two[0];
+    tcmd = two[1];
+    record(pcmd, pp, npp);
+    record(tcmd, body + nb - 1 - CHUNKS, 1 + CHUNKS);
+    printf("prefill: %d dispatches for %d rows (%d prompt tokens)\n", npp, tp, nprompt);
+    if (getenv("LLAMA_PROFILE")) {  // each prefill dispatch on its own submit, time per kernel
+      double per[NALL] = {0};
+      for (int i = 0; i < npp; ++i) {
+        double ts = now_ms();
+        record(two[0], &pp[i], 1);
+        submit_wait(q, two[0]);
+        per[pp[i].k] += now_ms() - ts;
+      }
+      for (int k = NKERNELS; k < NALL; ++k) printf("prefill profile: %-11s %8.1f ms\n", kernels[k].name, per[k]);
+      record(pcmd, pp, npp);
+    }
+  }
 
   if (getenv("LLAMA_DEBUG")) {  // step through the first token: which dispatch faults or produces NaN?
     int t0k = atoi(argv[4]);
@@ -341,7 +424,7 @@ int main(int argc, char** argv) {
       CHECK(vkBeginCommandBuffer(one, &bbi));
       vkCmdBindPipeline(one, VK_PIPELINE_BIND_POINT_COMPUTE, kernels[d->k].pipe);
       vkCmdBindDescriptorSets(one, VK_PIPELINE_BIND_POINT_COMPUTE, kernels[d->k].pl, 0, 1, &d->set, 0, NULL);
-      vkCmdDispatch(one, d->groups, 1, 1);
+      vkCmdDispatch(one, d->groups, d->gy, 1);
       vkCmdPipelineBarrier(one, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, NULL, 0, NULL);
       CHECK(vkEndCommandBuffer(one));
       VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -363,16 +446,29 @@ int main(int argc, char** argv) {
   // ---- prompt, then greedy decode
   int tok = atoi(argv[4]), ngen = 0;
   double t0 = now_ms(), tgen = 0;
-  for (int p = 0; p < nprompt + max_new; ++p) {
-    if (p < nprompt) tok = atoi(argv[4 + p]);
-    *row = tok % CHUNK_ROWS;
-    *pos = p;
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd[tok / CHUNK_ROWS];
+  for (int p = prefill ? nprompt - 1 : 0; p < nprompt + max_new; ++p) {
     double ts = now_ms();
-    CHECK(vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE));
-    CHECK(vkQueueWaitIdle(q));
+    if (prefill && p == nprompt - 1) {  // the whole prompt at once; the embedding rows on the CPU
+      float* xm = (float*)xr.map;
+      memset(xm, 0, (size_t)tp * D * 4);
+      for (int t = 0; t < nprompt; ++t) {
+        int id = atoi(argv[4 + t]);
+        snprintf(nm, sizeof nm, "embed.%d", id / CHUNK_ROWS);
+        const __fp16* e = (const __fp16*)tensor(nm)->map + (size_t)(id % CHUNK_ROWS) * D;
+        for (int i = 0; i < D; ++i) xm[(size_t)t * D + i] = e[i];
+      }
+      double tg = now_ms();
+      submit_wait(q, pcmd);
+      double tl = now_ms();
+      memcpy(x.map, xm + (size_t)(nprompt - 1) * D, D * 4);
+      submit_wait(q, tcmd);
+      printf("prefill: embed %.1f ms, layers %.1f ms, lm_head %.1f ms\n", tg - ts, tl - tg, now_ms() - tl);
+    } else {
+      if (p < nprompt) tok = atoi(argv[4 + p]);
+      *row = tok % CHUNK_ROWS;
+      *pos = p;
+      submit_wait(q, cmd[tok / CHUNK_ROWS]);
+    }
     if (p < nprompt - 1) continue;
     const float* lg = (const float*)logits.map;
     if (p == nprompt - 1) {

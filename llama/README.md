@@ -81,6 +81,33 @@ Decode reads all 2.47 GB of weights per token; at the 15.8 GB/s measured in Part
 | `gemv_add` o/down | 32 | 7.6 ms each | 4.9 ms each | 4.9 ms each |
 | `gemv` q/k/v (3072 x 2048) | 16 | 10.1 ms each | 3.0 ms each | 3.0 ms each |
 
+### Adreno 840 (Galaxy S26 Ultra) and batched prefill on cooperative matrices
+
+The same run on a Galaxy S26 Ultra (Snapdragon 8 Elite Gen 5, Adreno 840, Qualcomm's Vulkan 1.4
+driver) in Samsung's Remote Test Lab, stock kernels: the 46-token prompt in 1.83 s, decode at
+41.1 ms/token (24.4 tokens/s), 48 of 48 tokens identical to PyTorch, logits within 6.1e-5. The
+weights cross the lab's bridge at 2.3 MB/s, 18 minutes for 2.47 GB; it drops a shell command with
+`&&`, so `run.py` sends plain ones.
+
+With `--prefill`, the prompt runs through the layers once, all tokens together, instead of one
+token at a time: `kernels/prefill/` are batched versions of the decode kernels, compiled with
+Mojo's own SPIR-V target for `adreno840`, and `p_gemm` computes each projection as one matrix
+product on KHR cooperative matrices (fp32 x fp32 -> fp32, 64 x 64 x 8; the fp16 weights are
+converted while they are staged in shared memory, so the math stays fp32). A long prompt
+(`prompts/long.txt`, 431 tokens, padded to 512 rows):
+
+| prompt, 431 tokens | time | tokens identical to PyTorch | max logit difference |
+|---|---|---|---|
+| one token at a time | 17.3 s | 48 of 48 | 5.3e-5 |
+| batched prefill (`--prefill`) | **1.29 s** (13.5x) | 48 of 48 | 8.7e-5 |
+
+Decode afterwards is unchanged (41.3 ms/token). Per kernel (`LLAMA_PROFILE=1`, each dispatch on
+its own submit): `p_gemm` 1221 ms for the 64 projections, about 0.8 TFLOP/s, a third of what the
+staged kernels of `coopmat/` reach, because each thread reads its own row of W while staging;
+attention 97 ms; the rest 50 ms. On the 840's driver a matmul whose accumulator starts as a
+matrix loaded from memory fails to compile (VK_ERROR_UNKNOWN), so the residual is a separate
+`p_add`.
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the
@@ -133,6 +160,7 @@ $PY llama/run.py --model random --max-new 8                            # same sh
 $PY llama/run.py --model <snapshot dir> --prompt "..." --max-new 48    # stock driver
 $PY llama/run.py --model <snapshot dir> --backend turnip               # Mesa Turnip
 $PY llama/run.py --model <snapshot dir> --backend native               # Turnip, Mojo's own SPIR-V target
+$PY llama/run.py --model <snapshot dir> --prefill --prompt-file llama/prompts/long.txt  # Adreno 8xx
 ```
 
 `--backend native` compiles the kernels with a source-built Mojo that has the `adreno710` Vulkan
@@ -144,4 +172,4 @@ to `build/llama/` and the phone copy to `/data/local/tmp/llama/<model>`.
 ## Limits
 
 Batch 1, greedy only, 512 positions, fp16 weights (2.47 GB on the phone), the prompt processed
-token by token, the tokenizer on the Mac.
+token by token (batched with `--prefill`, Adreno 8xx only), the tokenizer on the Mac.
