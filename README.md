@@ -25,6 +25,11 @@ Vulkan SPIR-V target, KHR cooperative matrices from Mojo, and Llama 3.2 1B on a 
 (Adreno 840): a 431-token prompt in 0.63 s on the matrix units instead of 17.7 s, decode at 42 ms/token, and
 with 4-bit weights 13-15 ms/token.
 
+**[Bonsai 2 2B (ternary weights) on the Adreno 840](bonsai/README.md)**: the Mojo kernels of
+[mav3ri3k/modular](https://github.com/mav3ri3k/modular)'s Android OpenCL port, unchanged, compiled by
+the native target to Vulkan SPIR-V: 80 tokens/s decode, all 16 checked steps matching the FP32
+reference's greedy tokens.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -502,6 +507,8 @@ src/               vecadd_gpu.mojo (MAX gpu), vecadd4_gpu.mojo (loop), warpsum_g
 runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone side),
                    vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
+bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
+                   as SPIR-V; bonsai_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
 remote/            MAX's remote device: driver plugin (Mac), Vulkan executor (phone), protocol, tests
 coopmat/           KHR cooperative matrices: Mojo kernels for adreno840, check.sh, run_coopmat.py
@@ -530,4 +537,5 @@ or n / (local × outputs) workgroups when the kernel's marker gives `outputs=`.
 ## License
 
 Apache-2.0, see [`LICENSE`](LICENSE). Mojo and MAX are Modular's and are installed from PyPI under
-their own license; nothing from them is redistributed here.
+their own license. One file is redistributed: `bonsai/kernels/kernels.mojo`, from mav3ri3k/modular's
+Android port, Apache-2.0 with LLVM Exceptions, with its header kept.
