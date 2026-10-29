@@ -364,33 +364,70 @@ MODULAR_DRIVER_PLUGINS="cpu@$PWD/bazel-bin/Target/CPUPlugin.so;vulkan@$HOME/runi
 `start_server.sh`) the server's batches, and `=2` times each launch on its own. Running MAX on the
 phone itself would need an Android build of its runtime.
 
-### Cooperative matrices (Adreno 8xx), compile-only
+### Cooperative matrices on an Adreno 840
 
 The fork also has an `adreno840` target whose kernels can use KHR cooperative matrices
-(`SPV_KHR_cooperative_matrix`): 16x16 tiles that a subgroup loads, multiply-adds and stores
-together, which a driver with `VK_KHR_cooperative_matrix` runs on the GPU's matrix hardware. Mojo
-code uses `CoopMatrix` from `max.gpu.compute.arch.mma_spirv`; the compiler turns its operations into
-`OpCooperativeMatrixLoadKHR`, `OpCooperativeMatrixMulAddKHR`, `OpCooperativeMatrixStoreKHR` and
-`OpFConvert`, and MAX's matmul uses them for fp16 shapes that are multiples of 16
+(`SPV_KHR_cooperative_matrix`): tiles that a subgroup loads, multiply-adds and stores together, which
+the driver runs on the GPU's matrix hardware. Mojo code uses `CoopMatrix` from
+`max.gpu.compute.arch.mma_spirv`; the compiler turns its operations into
+`OpCooperativeMatrixLoadKHR`, `OpCooperativeMatrixMulAddKHR` and `OpCooperativeMatrixStoreKHR`, and
+MAX's matmul uses them for all-fp16 and all-fp32 matmuls in multiples of its tile
 (`max/kernels/src/linalg/matmul/gpu/adreno/` in the fork).
 
-`coopmat/matmul_coopmat_gpu.mojo` has two such kernels (fp32 output; B transposed with fp16
-output), and `coopmat/check.sh` compiles them for `adreno840` and validates the SPIR-V:
+They run on a Galaxy S26 Ultra (Snapdragon 8 Elite Gen 5, Adreno 840, Android 16) in Samsung's
+[Remote Test Lab](https://developer.samsung.com/remote-test-lab): its Remote Debug Bridge (`rdb`)
+makes the phone a local `adb` device. A shell command with `&&` or `&` drops that connection, so
+the scripts here send plain commands. The stock driver (512.842.19) offers these shapes
+(`coopmat/vk_coopmat_probe.c`), all for one subgroup of 64:
+
+| A x B -> C | M x N x K |
+|---|---|
+| fp16 x fp16 -> fp16 | 64 x {16, 32, 64} x 16 |
+| fp32 x fp32 -> fp32 | 64 x {16, 32, 64} x 8 |
+| int8 x int8 -> int32 | 64 x {16, 32, 64} x 32 |
+
+There are no 16x16 tiles, no fp16 x fp16 -> fp32 and no `VK_QCOM_cooperative_matrix_conversion`,
+so fp16 products accumulate in fp16. `coopmat/matmul_coopmat_gpu.mojo` has three kernels in those
+shapes (fp32; fp16; fp16 with B transposed, a column-major load), one subgroup per 64 x N tile of C
+(`-D COOPMAT_N`, default 64). `coopmat/check.sh` compiles and validates them,
+`coopmat/run_coopmat.py` runs them with `runner/vk_launch.c` (which enables the extension, the
+Vulkan memory model and a required subgroup size of 64) and checks them against NumPy:
 
 ```bash
-coopmat/check.sh     # needs ../modular built (branch adreno-spirv-target)
+COOPMAT_N=64 coopmat/check.sh                                     # needs ../modular built
+ANDROID_SERIAL=localhost:33687 python3 coopmat/run_coopmat.py 256 1024 2048
 ```
 
-Both kernels pass `spirv-val`: two `OpCooperativeMatrixLoadKHR` (B column-major in the
-transposed one) and an `OpCooperativeMatrixMulAddKHR` in the K loop, then the store, and in the
-second an `OpFConvert` from the fp32 accumulator to fp16. In the fork, MAX's compile test for
-`vulkan:adreno840` compiles all 26 graphs (213 kernels, all valid), and both fp16 matmul graphs
-(`a @ b`, and `a @ b.T` as a transposed-B matmul) take the cooperative-matrix kernel.
+All pass. fp32 results are within 1.6e-4 of float64 at 2048x2048x2048. The fp16 kernel matches,
+bit for bit, a model that rounds every product and running sum to fp16 (the transposed one sums in
+another order, with the same error), so its error, 0.1 rms at 2048, is fp16 accumulation's.
+Throughput, best of 20 dispatches:
 
-None of it runs here: neither driver on the Adreno 710 exposes `VK_KHR_cooperative_matrix`
-(`coopmat/vk_coopmat_probe.c` lists a driver's matrix extensions and, where there are any, the
-shapes it supports). Running it needs an Adreno 8xx phone whose driver exposes the extension with
-fp16 16x16x16 products.
+| n x n x n | fp32, N = 16 | fp32, N = 64 | fp16, N = 16 | fp16, N = 64 | fp16 B^T, N = 64 |
+|---|---|---|---|---|---|
+| 1024 | 456 GFLOP/s | 1151 GFLOP/s | 1189 GFLOP/s | 1525 GFLOP/s | 1452 GFLOP/s |
+| 2048 | 374 GFLOP/s | 1334 GFLOP/s | 649 GFLOP/s | 2095 GFLOP/s | 1003 GFLOP/s |
+
+64-wide tiles reuse each A tile across 64 columns; the 2048 fp16 run reaches 2.1 TFLOP/s. For
+comparison, MAX's naive matmul (no matrix units) on the same phone at 256x256x256: 71 GFLOP/s in
+fp32 and 26 in fp16, against 188 and 200 for these kernels, where one dispatch costs about 0.15 ms
+whatever it computes.
+
+MAX's own kernel uses the same 64x64 tiles. In the fork, MAX's compile test for `vulkan:adreno840`
+compiles all 26 graphs (every kernel valid), and matmuls whose A, B and C are all fp16 or all fp32
+take the cooperative-matrix kernel when M and N are multiples of 64: both 256x256 matmuls and the
+fp16 `a @ b.T` (the GEMV and ResNet-18's classifier, with one row, fall back to the naive kernel
+at run time). `run_coopmat.py --max` runs MAX's kernel as compiled for those three graphs, with
+arguments laid out from its launch description:
+
+```bash
+MOJO_SPIRV_SAVE_DIR=$PWD/build/max840 ../modular/bazelw run //max/examples/vulkan_coverage:coverage -- --arch=adreno840
+ANDROID_SERIAL=localhost:33687 python3 coopmat/run_coopmat.py --max build/max840
+```
+
+MAX reuses kernels it compiled before without emitting them again, so the directory must come from
+a run that compiled them (after a change to the kernel, for one). All three pass: 183 GFLOP/s in fp32
+and 210 in fp16 at 256x256x256 (the naive kernel: 71 and 26).
 
 ## What did not work (and why)
 
@@ -430,7 +467,8 @@ runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
 remote/            MAX's remote device: driver plugin (Mac), Vulkan executor (phone), protocol, tests
-coopmat/           KHR cooperative matrices: Mojo kernels for adreno840, check.sh, driver probe
+coopmat/           KHR cooperative matrices: Mojo kernels for adreno840, check.sh, run_coopmat.py
+                   (runs them on an Adreno 840), driver probe
 docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
