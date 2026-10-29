@@ -266,7 +266,7 @@ ANDROID_SERIAL=localhost:33687 python3 llama/run.py --model <snapshot dir> --pro
 | Matrix test kernels (unstaged and staged), driver probe, phone runner | [`coopmat/`](coopmat), [`runner/vk_launch.c`](runner/vk_launch.c) |
 | Llama 3.2 1B: decode and prefill kernels, Vulkan runtime, driver script | [`llama/kernels/`](llama/kernels), [`llama/kernels/prefill/`](llama/kernels/prefill), [`llama/llama_vk.c`](llama/llama_vk.c), [`llama/run.py`](llama/run.py), [`llama/README.md`](llama/README.md) |
 | Part 3: the retargeters | [`mojo2vk.py`](mojo2vk.py), [`mojo_adreno.py`](mojo_adreno.py), [BLOG.md](BLOG.md) |
-| Slides (26, with speaker notes) | [online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6), [PDF](docs/presentation/mojo-and-max-on-adreno.pdf) |
+| Slides (27, with speaker notes) | [online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6), [PDF](docs/presentation/mojo-and-max-on-adreno.pdf) |
 
 ## What's next
 

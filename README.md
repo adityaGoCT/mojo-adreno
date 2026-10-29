@@ -30,7 +30,7 @@ Since Mojo's compiler went open source (August 2026), there is a second route: a
 compiles the same kernels and Llama straight to Vulkan SPIR-V, with no retargeter. See
 [Native SPIR-V target](#native-spir-v-target).
 
-Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (26 slides,
+Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (27 slides,
 PDF), the whole experiment from the retargeter to the native target and a compile-only test of MAX
 graphs. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (slides with speaker
 notes, in the browser), or as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html)
