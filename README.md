@@ -28,7 +28,8 @@ with 4-bit weights 13-15 ms/token.
 **[Bonsai 2 2B (ternary weights) on the Adreno 840](bonsai/README.md)**: the Mojo kernels of
 [mav3ri3k/modular](https://github.com/mav3ri3k/modular)'s Android OpenCL port, unchanged, compiled by
 the native target to Vulkan SPIR-V: 80 tokens/s decode, all 16 checked steps matching the FP32
-reference's greedy tokens.
+reference's greedy tokens; with batched prefill on cooperative matrices, a 412-token prompt in 0.86 s
+instead of 5.2 s.
 
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in

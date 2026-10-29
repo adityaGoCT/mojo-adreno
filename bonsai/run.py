@@ -2,6 +2,7 @@
 
   python bonsai/run.py --model M --hf H --push            # build, upload, validate against M's reference
   python bonsai/run.py --model M --hf H --prompt 'Reply with only one word: hello.' --tokens 16
+  python bonsai/run.py --model M --hf H --prefill        # the prompt at once, on cooperative matrices
 
 M: the output of the port's prepare.py (weights.bin, manifest.json, reference.f32); H: the checkpoint
 (prism-ml/Ternary-Bonsai-2-2B-mlx-2bit at 1c6cbae2), for its tokenizer and chat template. Run with
@@ -39,27 +40,36 @@ def main():
     ap.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"))
     ap.add_argument("--push", action="store_true", help="upload the weights (gzip) and the reference")
     ap.add_argument("--prompt", help="generate for this prompt instead of validating")
+    ap.add_argument("--prompt-file", type=pathlib.Path, help="the prompt from a file")
+    ap.add_argument("--prefill", action="store_true", help="batched prefill (Adreno 8xx cooperative matrices)")
     ap.add_argument("--tokens", type=int, default=32)
     ap.add_argument("--profile", action="store_true")
     a = ap.parse_args()
+    if a.prompt_file:
+        a.prompt = a.prompt_file.read_text().strip()
     adb = ["adb"] + (["-s", a.serial] if a.serial else [])
     manifest = json.loads((a.model / "manifest.json").read_text())
 
     (BUILD / "bin").mkdir(parents=True, exist_ok=True)
     sh(CC, "-O2", "-o", BUILD / "bin/bonsai_vk", HERE / "bonsai_vk.c", "-ldl", "-lm")
     spv = sorted(BUILD.glob("*.spv"))
-    if len(spv) != 21:
+    pspv = sorted((BUILD / "prefill").glob("*.spv"))
+    if len(spv) != 21 or (a.prefill and len(pspv) != 20):
         sys.exit("run bonsai/build_kernels.py first")
-    sh(*adb, "shell", f"mkdir -p {DIR}/k")
+    sh(*adb, "shell", f"mkdir -p {DIR}/k {DIR}/kp")
     sh(*adb, "push", BUILD / "bin/bonsai_vk", f"{DIR}/")
     sh(*adb, "push", *spv, f"{DIR}/k/")
-    if a.push:
+    if a.prefill:
+        sh(*adb, "push", *pspv, f"{DIR}/kp/")
+    if a.push:  # the weights depend on the context capacity only through the rope table
         gz = BUILD / "weights.bin.gz"
         if not gz.exists() or gz.stat().st_mtime < (a.model / "weights.bin").stat().st_mtime:
             with open(gz, "wb") as f:
                 subprocess.run(["gzip", "-1", "-c", a.model / "weights.bin"], stdout=f, check=True)
-        sh(*adb, "push", gz, a.model / "reference.f32", f"{DIR}/")
+        sh(*adb, "push", gz, f"{DIR}/")
         sh(*adb, "shell", f"cd {DIR}; gunzip -f weights.bin.gz")
+    if a.prompt is None:  # this model's reference, for any weights with enough context
+        sh(*adb, "push", a.model / "reference.f32", f"{DIR}/")
 
     from transformers import AutoTokenizer  # the exporter's environment
     tok = AutoTokenizer.from_pretrained(str(a.hf))
@@ -73,6 +83,8 @@ def main():
                                        add_generation_prompt=True, enable_thinking=False)
         ids, steps = tok.encode(text, add_special_tokens=False), a.tokens
         print(f"prompt: {a.prompt!r}, {len(ids)} tokens")
+    if a.prefill:
+        env += "BONSAI_PREFILL=kp "
     if a.profile:
         env += "BONSAI_PROFILE=1 "
     # plain commands only: the remote-lab bridge drops on '&&' and '&'

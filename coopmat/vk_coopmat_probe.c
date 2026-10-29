@@ -25,7 +25,8 @@ int main(void) {
   int found = 0;
   for (uint32_t i = 0; i < nx; ++i)
     if (strstr(xp[i].extensionName, "cooperative") || strstr(xp[i].extensionName, "integer_dot") ||
-        strstr(xp[i].extensionName, "shader_float16") || strstr(xp[i].extensionName, "subgroup"))
+        strstr(xp[i].extensionName, "shader_float16") || strstr(xp[i].extensionName, "subgroup") ||
+        strstr(xp[i].extensionName, "QCOM") || strstr(xp[i].extensionName, "tensor") || strstr(xp[i].extensionName, "matrix"))
       printf("  %s (spec %u)\n", xp[i].extensionName, xp[i].specVersion), found |= !!strstr(xp[i].extensionName, "cooperative_matrix");
   printf("%u extensions; VK_KHR_cooperative_matrix: %s\n", nx, found ? "yes" : "no");
   if (found) {
