@@ -25,6 +25,8 @@ The code is [this repo](README.md).
 
 *Update, October 28:* Mojo's compiler is open source now, so I also added a native `adreno710` Vulkan target to it, with no retargeter ([branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target); results in [the README](README.md#native-spir-v-target)). A 26-slide presentation with speaker notes covers the whole experiment: [view it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6), or as a [PDF](docs/presentation/mojo-and-max-on-adreno.pdf).
 
+*Update, October 29:* [Part 4](BLOG-COOPMAT.md) covers that target in depth and adds the GPU's matrix units: KHR cooperative matrices from Mojo, run on a Snapdragon 8 Elite Gen 5 (Adreno 840), and Llama 3.2 1B's prompt processed on them, 13.5x faster than one token at a time.
+
 ## Why Mojo has no Adreno target
 
 Mojo picks a GPU with `--target-accelerator`, and `mojo build --print-supported-accelerators` lists three vendors: AMD (`gfx90a` to `gfx1250`), Apple (`apple-m1` to `apple-m5`) and NVIDIA (`sm_52` to `sm_121a`). Ask for anything else and the build fails in the standard library's GPU info table:

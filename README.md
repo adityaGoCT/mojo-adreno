@@ -20,6 +20,10 @@ identical to PyTorch; 3.5 tokens/s on both the stock driver and Mesa Turnip). It
 series whose Parts 1 and 2 (PyTorch → IREE → Adreno, and an fp16 GEMM tuner) live in
 [adityaGoCT/iree-adreno-genai-tuner](https://github.com/adityaGoCT/iree-adreno-genai-tuner).
 
+Part 4: **[A Native GPU Target, and Llama Prefill on the Matrix Units](BLOG-COOPMAT.md)**: Mojo's own
+Vulkan SPIR-V target, KHR cooperative matrices from Mojo, and Llama 3.2 1B on a Snapdragon 8 Elite Gen 5
+(Adreno 840): a 431-token prompt in 1.29 s on the matrix units instead of 17.3 s, decode at 41 ms/token.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -495,7 +499,8 @@ docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
 probes/cl_probe.c  OpenCL platform / IL capability probe
 ref/               hand-written Vulkan IR, reference OpenCL kernel
 scripts/setup.sh   host tools and the Mojo venv
-BLOG.md            the write-up
+BLOG.md            the write-up (Part 3: the retargeters, Llama on the Adreno 710)
+BLOG-COOPMAT.md    Part 4: the native target, cooperative matrices, Llama prefill on the Adreno 840
 ```
 
 Versions used: Mojo 1.2.0, MAX 26.7.0, Homebrew LLVM 22.1.2, SPIRV-Tools v2026.1, Android NDK r30
