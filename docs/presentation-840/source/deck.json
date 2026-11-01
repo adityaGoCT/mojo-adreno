@@ -1,0 +1,53 @@
+{
+  "v": 4,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-29T22:05:00Z"
+  },
+  "lists": "css",
+  "title": "Mojo on the Adreno 840",
+  "order": [
+    "cover",
+    "setup",
+    "target",
+    "coopmat",
+    "quirks",
+    "llama-decode",
+    "llama-prefill",
+    "bonsai",
+    "qwen3",
+    "summary",
+    "qcom",
+    "lessons",
+    "next"
+  ],
+  "sections": {
+    "intro": {
+      "description": "The phone GPU, and the driver everything here runs on",
+      "start": "cover"
+    },
+    "target": {
+      "description": "A native adreno840 target in Mojo’s compiler, its matrix units, and what the stock driver needed",
+      "start": "target"
+    },
+    "models": {
+      "description": "Three language models on the Adreno 840: Llama 3.2 1B, Bonsai 2 2B, ternary Qwen3-8B",
+      "start": "llama-decode"
+    },
+    "ahead": {
+      "description": "What Qualcomm’s conversion extension would add, what we learned, what comes next",
+      "start": "qcom"
+    }
+  },
+  "faces": {
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    },
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    }
+  },
+  "designSystems": []
+}

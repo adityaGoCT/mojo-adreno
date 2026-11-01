@@ -1,0 +1,20 @@
+<section id="coopmat" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">The matrix units, from Mojo</h2>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.5;color:#DDE5F0;background:#172338;border-radius:14px;padding:28px 32px">acc = CoopMatrix[DType.float16, 64, 64, ACCUMULATOR].zero()<br>for k in range(0, K, 16):<br>&nbsp;&nbsp;&nbsp;&nbsp;a_tile = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(a + row * K + k, K)<br>&nbsp;&nbsp;&nbsp;&nbsp;b_tile = CoopMatrix[DType.float16, 16, 64, MATRIX_B].load(b + k * N + col, N)<br>&nbsp;&nbsp;&nbsp;&nbsp;acc = a_tile.multiply_add(b_tile, acc)<br>acc.store(c + row * N + col, N)</p>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#7FA8F0">3.7 TFLOP/s</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">fp16 matmul, 2048³, tiles staged in shared memory</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#7FA8F0">2.5 TFLOP/s</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">fp32, same size: fp32 sums, at two thirds the speed</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#F08A3C">3/3</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">MAX’s matmul graphs pass on the phone, 8× its naive fp16 kernel</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 4 · max.gpu.compute.arch.mma_spirv · coopmat/ in mojo-adreno · Galaxy S26 Ultra</p>
+<aside>The matrix units are reached through cooperative matrices: a tile that a whole subgroup loads, multiplies and stores together, while the driver decides which thread holds which element. In Mojo this is a small type, CoopMatrix, with zero, load, multiply-add, cast and store, and the loop on the slide is a complete matrix multiply. Each operation is a marker call; our ABI pass, which already knows which buffer every pointer reaches, rewrites the markers into SPIR-V cooperative-matrix instructions with the right types. On the S26 Ultra, with tiles staged through shared memory, a 2048-cubed multiply runs at 3.7 teraflops in fp16 and 2.5 in fp32. Remember the driver: the fp16 product also sums in fp16, so for long sums we will use fp32 tiles at two thirds of the speed. MAX’s own matmul kernel now takes this path on adreno840 for fp16 and fp32 shapes in multiples of 64: its three test graphs pass on the phone, the fp16 one eight times faster than MAX’s naive kernel.</aside>
+</section>

@@ -1,0 +1,20 @@
+<section id="llama-decode" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;color:#7FA8F0;letter-spacing:1px">LLAMA 3.2 1B ON THE ADRENO 840: GENERATING TEXT</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">43 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token with fp16 weights, 2.47 GB read for every token</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">13 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token with 4-bit weights, an fp16 scale per 64</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">48/48</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">tokens identical to PyTorch, for both weight formats</p>
+</div>
+</div>
+<p style="font-size:34px;line-height:1.45;color:#DDE5F0;border-left:6px solid #7FA8F0;padding:8px 0 8px 32px">Generating reads every weight once per token, so memory bandwidth sets the pace: 4-bit weights read a quarter of the bytes.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 6 · llama/ · gemv, gemv_q4: one 64-lane subgroup per row · Galaxy S26 Ultra, Android 16</p>
+<aside>The first model is Meta’s Llama 3.2 1B, generating text one token at a time. Seven small Mojo kernels do the work, the matrix-vector products with one 64-lane subgroup per output row, and a C runner records 150 dispatches per token. With fp16 weights, every token reads all 2.47 gigabytes of them, and decode runs at 43 milliseconds a token. Nothing here uses the matrix units: one token is a matrix-vector product, and its speed is set by memory bandwidth. So the lever is bytes. With 4-bit weights, eight to a 32-bit word with one fp16 scale per 64, each token reads about a quarter as much, and decode drops to 13 milliseconds a token. Both formats generate 48 out of 48 tokens identical to PyTorch: the fp16 model against PyTorch in fp32 on the same weights, the 4-bit one against PyTorch with the same dequantized weights.</aside>
+</section>

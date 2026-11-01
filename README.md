@@ -46,6 +46,10 @@ graphs. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (sli
 notes, in the browser), or as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html)
 (download and open it; ←/→ to move, N for notes) with [speaker notes](docs/presentation/mojo-and-max-on-adreno-speaker-notes.md).
 
+The Adreno 840 alone, on Qualcomm's stock driver: **[Mojo on the Adreno 840](docs/presentation-840/mojo-on-the-adreno-840.pdf)**
+(13 slides, PDF): the native adreno840 target, cooperative matrices, the driver's quirks, and Llama 3.2 1B,
+Bonsai 2 2B and ternary Qwen3-8B on the phone. [View it online](https://claude.ai/artifact/BVe8mtq41xJ3tQ7k95k44Y).
+
 [![Mojo and MAX on Adreno, title slide](docs/presentation/cover.png)](docs/presentation/mojo-and-max-on-adreno.pdf)
 
 | backend | path |

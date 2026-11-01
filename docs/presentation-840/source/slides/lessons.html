@@ -1,0 +1,27 @@
+<section id="lessons" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What the Adreno 840 taught us</h2>
+<div style="display:flex;flex-direction:column;gap:22px">
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:560px">The driver is the platform</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Two builds with one version number behaved differently. Check every output.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:560px">Matrix units are for prompts</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Generating is matrix-vector work, set by bandwidth; prompts gain 6 to 28 times.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">fp16-only sums set the ceiling</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Accurate prompts run on fp32 tiles at two thirds the speed.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">Mojo kernels carry over</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">An OpenCL port’s kernels ran unchanged on Vulkan, and served a second model.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">The runtime is the gap</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Each model still needs a hand-written C runner around its kernels.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 12</p>
+<aside>Five things to take away. First, on a phone the driver is the platform. The same chip with a driver reporting the same version number rejected our matrix code on Android 17 and failed to link our attention kernel on Android 16, and some quirks gave wrong numbers silently; every run checks every output. Second, the matrix units are for prompts. Generating one token is matrix-vector work, set by how many bytes the weights take, while a batched prompt is matrix work and runs six to 28 times faster. Third, the driver’s fp16-only sums set the ceiling: for accurate prompts we use fp32 tiles at two thirds of the fp16 speed, which is exactly what Qualcomm’s conversion extension would lift. Fourth, Mojo kernels carry over: a kernel file written for another developer’s OpenCL target ran unchanged through our Vulkan target, and its ternary projections then served a second model, Qwen3-8B. Fifth, the remaining gap is the runtime: each model still has a hand-written C runner around its kernels, where MAX would normally take over.</aside>
+</section>

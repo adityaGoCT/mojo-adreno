@@ -1,0 +1,26 @@
+<section id="setup" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">The GPU, its driver, and the phones</h2>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:24px 28px">
+<h3 style="font-size:30px;font-weight:600">Adreno 840</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">The GPU of the Snapdragon 8 Elite Gen 5 (SM8850), with matrix units for 64-row tiles.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:24px 28px">
+<h3 style="font-size:30px;font-weight:600">The stock driver</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">Qualcomm’s Vulkan 1.4 driver as phones ship it: 512.842.19 and 512.842.25.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:24px 28px">
+<h3 style="font-size:30px;font-weight:600">Two remote labs</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">A Galaxy S26 Ultra (Samsung) and Qualcomm’s SM8850 reference phone, both over adb.</p>
+</div>
+</div>
+<table style="font-size:25px;color:#18212F">
+<tr><th style="width:28%">For compute, the driver has</th><th style="width:72%">On the Adreno 840</th></tr>
+<tr><td>Cooperative matrices</td><td>VK_KHR_cooperative_matrix: tiles 64 rows tall, 16, 32 or 64 wide</td></tr>
+<tr style="background:#EEF1F5"><td>Matrix products</td><td>fp16 into fp16 (K 16), fp32 into fp32 (K 8), int8 into int32 (K 32); not fp16 into fp32</td></tr>
+<tr><td>Subgroups, shared memory</td><td>64 lanes; 32 KB a workgroup</td></tr>
+<tr style="background:#EEF1F5"><td>Not there</td><td>VK_QCOM_cooperative_matrix_conversion, on both driver builds</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 2 · driver 512.842.19: Galaxy S26 Ultra, Android 16 and 17 · 512.842.25: SM8850 reference phone, Android 16</p>
+<aside>Here is the setup. The GPU is the Adreno 840, in Qualcomm’s Snapdragon 8 Elite Gen 5, the SM8850. The driver is Qualcomm’s own Vulkan driver, exactly as phones ship it, version 512.842: build 19 on a Galaxy S26 Ultra, on both Android 16 and Android 17, and build 25 on Qualcomm’s SM8850 reference phone. We had no phone on the desk: the S26 Ultra came from Samsung’s Remote Test Lab, bridged to the Mac’s adb through a browser tab, and the reference phone from Qualcomm’s Device Cloud, over an SSH tunnel. What matters for compute is in the table. The driver exposes the matrix units through the standard cooperative-matrix extension, but only for tiles 64 rows tall. Products come in three kinds: fp16 that also sums in fp16, fp32, and int8 into int32. There is no fp16 product with an fp32 sum, which will shape every prompt kernel later. Subgroups are 64 lanes, and a workgroup gets 32 kilobytes of shared memory. Qualcomm’s conversion extension, which we come back to at the end, is on neither build.</aside>
+</section>

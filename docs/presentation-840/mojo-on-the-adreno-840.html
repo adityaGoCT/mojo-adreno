@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mojo on the Adreno 840</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+html, body { margin: 0; height: 100%; background: #0B1220; }
+#stage { position: fixed; inset: 0; overflow: hidden; }
+section { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; box-sizing: border-box;
+  overflow: hidden; transform-origin: 0 0; }
+section:not(.current) { display: none !important; }
+section * { margin: 0; box-sizing: border-box; }
+section div:not([style*="display"]) { display: flex; flex-direction: column; }
+section h1 { font-size: 96px; font-weight: 600; line-height: 1.1; }
+section h2 { font-size: 64px; font-weight: 600; line-height: 1.15; }
+section h3 { font-size: 44px; font-weight: 600; line-height: 1.2; }
+section p { font-size: 32px; line-height: 1.4; }
+section table { border-collapse: collapse; }
+section th, section td { padding: 0.35em 0.6em; text-align: left; border-bottom: 1px solid #D5DAE1; vertical-align: top; }
+section th { font-weight: 600; border-bottom: 2px solid #18212F; }
+#bar { position: fixed; right: 16px; bottom: 12px; font: 14px system-ui, sans-serif; color: #A9B8CC; }
+#notes { position: fixed; left: 0; right: 0; bottom: 0; max-height: 40%; overflow: auto; display: none;
+  background: rgba(11, 18, 32, 0.95); color: #E8EDF5; font: 18px/1.5 system-ui, sans-serif; padding: 16px 24px; }
+@media print {
+  @page { size: 1920px 1080px; margin: 0; }
+  html, body { background: none; height: auto; }
+  #stage { position: static; }
+  section, section:not(.current) { position: relative; display: flex !important; transform: none !important;
+    page-break-after: always; }
+  #bar, #notes { display: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="stage">
+<section id="cover" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:center;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F08A3C;letter-spacing:2px">MOJO &#160;·&#160; VULKAN &#160;·&#160; ADRENO 840 &#160;·&#160; QUALCOMM’S STOCK DRIVER</p>
+<h1 style="font-size:96px;font-weight:600;line-height:1.08;width:1500px">Mojo on the Adreno 840</h1>
+<p style="font-size:36px;color:#A9B8CC;line-height:1.4;width:1480px">A native Mojo target for the Snapdragon 8 Elite Gen 5’s GPU, its matrix units, and three language models running on Qualcomm’s own Vulkan driver.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Galaxy S26 Ultra (Samsung Remote Test Lab) · Qualcomm SM8850 reference phone (Qualcomm Device Cloud) · October 2026</p>
+</section>
+<section id="setup" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">The GPU, its driver, and the phones</h2>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:24px 28px">
+<h3 style="font-size:30px;font-weight:600">Adreno 840</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">The GPU of the Snapdragon 8 Elite Gen 5 (SM8850), with matrix units for 64-row tiles.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:24px 28px">
+<h3 style="font-size:30px;font-weight:600">The stock driver</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">Qualcomm’s Vulkan 1.4 driver as phones ship it: 512.842.19 and 512.842.25.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:24px 28px">
+<h3 style="font-size:30px;font-weight:600">Two remote labs</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">A Galaxy S26 Ultra (Samsung) and Qualcomm’s SM8850 reference phone, both over adb.</p>
+</div>
+</div>
+<table style="font-size:25px;color:#18212F">
+<tr><th style="width:28%">For compute, the driver has</th><th style="width:72%">On the Adreno 840</th></tr>
+<tr><td>Cooperative matrices</td><td>VK_KHR_cooperative_matrix: tiles 64 rows tall, 16, 32 or 64 wide</td></tr>
+<tr style="background:#EEF1F5"><td>Matrix products</td><td>fp16 into fp16 (K 16), fp32 into fp32 (K 8), int8 into int32 (K 32); not fp16 into fp32</td></tr>
+<tr><td>Subgroups, shared memory</td><td>64 lanes; 32 KB a workgroup</td></tr>
+<tr style="background:#EEF1F5"><td>Not there</td><td>VK_QCOM_cooperative_matrix_conversion, on both driver builds</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 2 · driver 512.842.19: Galaxy S26 Ultra, Android 16 and 17 · 512.842.25: SM8850 reference phone, Android 16</p>
+</section>
+<section id="target" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">A native adreno840 target in Mojo’s compiler</h2>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Mojo</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">a GPU kernel, as for any GPU</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Target plugins</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">64-lane warps, barriers, math, matrices</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Vulkan ABI</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">buffers, params, matrix types</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">SPIR-V 1.6</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">LLVM’s backend, patched for matrices</p>
+</div>
+<svg width="32" height="16" viewBox="0 0 32 16" style="flex:none" aria-hidden="true"><polygon points="0,4.8 19.2,4.8 19.2,0 32,8 19.2,16 19.2,11.2 0,11.2" fill="#9AA5B1"/></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">C on Vulkan</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">one small runner per model</p>
+</div>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600;color:#2563C9">One flag</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4"><span style="color:#2563C9">--target-accelerator adreno840</span> compiles any Mojo GPU kernel to a Vulkan compute shader. Pointer arguments become storage buffers, numbers become slots of a params buffer.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:32px">
+<h3 style="font-size:30px;font-weight:600;color:#B4501A">No MAX runtime on Android</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">So each model is a few hundred lines of C: load the weights, record every dispatch into one command buffer, check the results.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 3 · Mojo built from source · adityaGoCT/modular, branch adreno-spirv-target</p>
+</section>
+<section id="coopmat" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">The matrix units, from Mojo</h2>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.5;color:#DDE5F0;background:#172338;border-radius:14px;padding:28px 32px">acc = CoopMatrix[DType.float16, 64, 64, ACCUMULATOR].zero()<br>for k in range(0, K, 16):<br>&nbsp;&nbsp;&nbsp;&nbsp;a_tile = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(a + row * K + k, K)<br>&nbsp;&nbsp;&nbsp;&nbsp;b_tile = CoopMatrix[DType.float16, 16, 64, MATRIX_B].load(b + k * N + col, N)<br>&nbsp;&nbsp;&nbsp;&nbsp;acc = a_tile.multiply_add(b_tile, acc)<br>acc.store(c + row * N + col, N)</p>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#7FA8F0">3.7 TFLOP/s</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">fp16 matmul, 2048³, tiles staged in shared memory</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#7FA8F0">2.5 TFLOP/s</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">fp32, same size: fp32 sums, at two thirds the speed</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#101B2D;border-radius:16px;padding:24px 32px">
+<p style="font-size:64px;font-weight:700;line-height:1;color:#F08A3C">3/3</p>
+<p style="font-size:24px;color:#DDE5F0;line-height:1.35">MAX’s matmul graphs pass on the phone, 8× its naive fp16 kernel</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 4 · max.gpu.compute.arch.mma_spirv · coopmat/ in mojo-adreno · Galaxy S26 Ultra</p>
+</section>
+<section id="quirks" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What the stock driver needed</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">Both builds</p>
+<h3 style="font-size:28px;font-weight:600">fp16 in shared memory sits 4 bytes apart</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Stage fp16 tiles with matrix loads and stores, offsets halved.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">Both builds</p>
+<h3 style="font-size:28px;font-weight:600">A sum loaded from memory breaks the pipeline</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Start every sum at zero; add the residual in its own kernel.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#2563C9">Both builds</p>
+<h3 style="font-size:28px;font-weight:600">All 32 KB of shared memory: wrong results</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Stay at 16 KB: K steps of 16.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Android 17 build</p>
+<h3 style="font-size:28px;font-weight:600">Same version number, rejects our matrices</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">The compiler now writes zero tiles as constants.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">Android 16 build</p>
+<h3 style="font-size:28px;font-weight:600">Fused attention fails to link</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">The runner falls back to per-row attention.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:16px;padding:28px">
+<p style="font-size:24px;font-weight:600;color:#B4501A">The hardware’s shapes</p>
+<h3 style="font-size:28px;font-weight:600">fp16 products sum only in fp16</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Long sums use fp32 tiles, at two thirds the speed.</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">Each one either failed outright or silently gave wrong numbers, so every run checks every output.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 5 · driver 512.842.19 (Android 16 and 17) and 512.842.25 · fixes in the target and the runners</p>
+</section>
+<section id="llama-decode" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;color:#7FA8F0;letter-spacing:1px">LLAMA 3.2 1B ON THE ADRENO 840: GENERATING TEXT</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">43 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token with fp16 weights, 2.47 GB read for every token</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">13 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">per token with 4-bit weights, an fp16 scale per 64</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">48/48</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">tokens identical to PyTorch, for both weight formats</p>
+</div>
+</div>
+<p style="font-size:34px;line-height:1.45;color:#DDE5F0;border-left:6px solid #7FA8F0;padding:8px 0 8px 32px">Generating reads every weight once per token, so memory bandwidth sets the pace: 4-bit weights read a quarter of the bytes.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 6 · llama/ · gemv, gemv_q4: one 64-lane subgroup per row · Galaxy S26 Ultra, Android 16</p>
+</section>
+<section id="llama-prefill" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:36px">
+<p style="font-size:28px;font-weight:600;color:#7FA8F0;letter-spacing:1px">LLAMA 3.2 1B: THE PROMPT ON THE MATRIX UNITS</p>
+<div style="display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:420px;font-size:28px;color:#A9B8CC;line-height:1.3">431-token prompt, one token at a time</p>
+<div style="flex:1;display:flex;align-items:center;gap:20px"><div style="width:100%;height:48px;background:#4A5A72;border-radius:6px"></div></div>
+<p style="width:150px;font-size:40px;font-weight:700;text-align:right">17.7 s</p>
+</div>
+<div style="display:flex;align-items:center;gap:24px">
+<p style="width:420px;font-size:28px;color:#A9B8CC;line-height:1.3">all tokens at once, on cooperative matrices</p>
+<div style="flex:1;display:flex;align-items:center;gap:20px"><div style="width:3.6%;height:48px;background:#7FA8F0;border-radius:6px"></div></div>
+<p style="width:150px;font-size:40px;font-weight:700;text-align:right;color:#7FA8F0">0.63 s</p>
+</div>
+</div>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">28×</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">faster prompt processing, same phone and driver</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">48/48</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">tokens identical to PyTorch, logits within 6.0e-5</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">46 ms</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">attention for all 16 layers, both products on the matrix units</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.45;color:#DDE5F0;border-left:6px solid #7FA8F0;padding:8px 0 8px 32px">Each projection is one matrix product for all 512 rows: fp32 tiles, the fp16 weights converted as they are staged in shared memory, 1.8 TFLOP/s.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 7 · llama/kernels/prefill · Galaxy S26 Ultra, Android 17 · prompt: llama/prompts/long.txt</p>
+</section>
+<section id="bonsai" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:36px">
+<p style="font-size:28px;font-weight:600;color:#7FA8F0;letter-spacing:1px">BONSAI 2 2B: SOMEONE ELSE’S MOJO KERNELS, UNCHANGED</p>
+<div style="display:flex;align-items:stretch;gap:20px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;border:1px solid #34445E;border-radius:12px;padding:24px 28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#F08A3C">kernels.mojo</p>
+<p style="font-size:25px;color:#A9B8CC;line-height:1.35">from mav3ri3k/modular’s Android port, written for its OpenCL target</p>
+</div>
+<p style="font-size:44px;color:#7FA8F0;align-self:center">→</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;border:1px solid #34445E;border-radius:12px;padding:24px 28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#7FA8F0">adreno840</p>
+<p style="font-size:25px;color:#A9B8CC;line-height:1.35">our target: all 21 kernels to Vulkan SPIR-V, not one line changed</p>
+</div>
+<p style="font-size:44px;color:#7FA8F0;align-self:center">→</p>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;border:1px solid #34445E;border-radius:12px;padding:24px 28px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#F08A3C">bonsai_vk.c</p>
+<p style="font-size:25px;color:#A9B8CC;line-height:1.35">the port’s forward pass in C: 721 dispatches a token, one command buffer</p>
+</div>
+</div>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">80 tok/s</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">decode, 12.4 ms a token; the port reports about 75 through OpenCL on an S26</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">6×</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">faster prompt: 412 tokens in 0.87 s instead of 5.2 s, on the matrix units</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">16/16</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">greedy tokens identical to the FP32 reference, token by token or batched</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.45;color:#DDE5F0;border-left:6px solid #7FA8F0;padding:8px 0 8px 32px">For the prompt, one dispatch runs a decode kernel on every row. New: the ternary projections and attention scores on cooperative matrices, the DeltaNet recurrence as one scan.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 8 · bonsai/ · decode: Galaxy S26 Ultra · prefill: Qualcomm’s SM8850 reference phone</p>
+</section>
+<section id="qwen3" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between;gap:40px">
+<p style="font-size:28px;font-weight:600;color:#7FA8F0;letter-spacing:1px">TERNARY QWEN3-8B ON THE ADRENO 840</p>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">25 tok/s</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">for an 8B model: 40 ms a token, 2.19 GB of weights read each time</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">16/16</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">greedy tokens identical to MLX, every one of 151,669 logits within 0.0082</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;border-top:4px solid #7FA8F0;padding-top:24px">
+<p style="font-size:96px;font-weight:700;line-height:1">7</p>
+<p style="font-size:28px;color:#A9B8CC;line-height:1.35">small new Mojo kernels; the ternary projections are Bonsai’s, unchanged</p>
+</div>
+</div>
+<p style="font-size:34px;line-height:1.45;color:#DDE5F0;border-left:6px solid #7FA8F0;padding:8px 0 8px 32px">“The sky appears blue because sunlight, which contains all colors of the spectrum, is scattered more efficiently by the atmosphere’s molecules…”</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 9 · qwen3/ · prism-ml/Ternary-Bonsai-8B-mlx-2bit · Qualcomm’s SM8850 reference phone</p>
+</section>
+<section id="summary" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Three models on one phone GPU</h2>
+<table style="font-size:25px;color:#18212F">
+<tr><th style="width:24%">Model</th><th style="width:15%">On the GPU</th><th style="width:17%">Generating</th><th style="width:22%">Long prompt</th><th style="width:22%">Checked against</th></tr>
+<tr><td>Llama 3.2 1B, fp16</td><td>2.47 GB</td><td>43 ms a token</td><td>431 tokens: 0.63 s</td><td>PyTorch: 48/48</td></tr>
+<tr style="background:#EEF1F5"><td>Llama 3.2 1B, 4-bit</td><td>1.18 GB</td><td>13 ms a token</td><td>431 tokens: 0.62 s</td><td>PyTorch: 48/48</td></tr>
+<tr><td>Bonsai 2 2B, ternary</td><td>0.48 GB</td><td>12.4 ms a token</td><td>412 tokens: 0.87 s</td><td>MLX FP32: 16/16</td></tr>
+<tr style="background:#EEF1F5"><td>Qwen3-8B, ternary</td><td>2.19 GB</td><td>40 ms a token</td><td>one token at a time</td><td>MLX FP32: 16/16</td></tr>
+</table>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Generating: bandwidth</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">One token is a matrix-vector product: the time is the bytes read. Fewer bits per weight is the lever.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Prompts: matrix units</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">All tokens at once reuse every weight: 6 to 28 times faster than token by token on the same phone.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 10 · Llama: Galaxy S26 Ultra · Bonsai: decode S26 Ultra, prompt reference phone · Qwen3: reference phone</p>
+</section>
+<section id="qcom" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">What VK_QCOM_cooperative_matrix_conversion would add</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-left:6px solid #2563C9;border-radius:12px;padding:22px 28px">
+<h3 style="font-size:28px;font-weight:600">Weights straight into the matrix</h3>
+<p style="font-size:23px;color:#4A5568;line-height:1.35">One 32-bit word is 16 ternary codes, one fp16 K16 column: each lane builds its column in registers. No shared-memory staging, no barrier.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-left:6px solid #2563C9;border-radius:12px;padding:22px 28px">
+<h3 style="font-size:28px;font-weight:600">fp16 speed, fp32 accuracy</h3>
+<p style="font-size:23px;color:#4A5568;line-height:1.35">The 840 sums fp16 products only in fp16. Pull the accumulator out every 128 values and add it into fp32: 3.5 TFLOP/s fp16 instead of 1.8 fp32.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-left:6px solid #B4501A;border-radius:12px;padding:22px 28px">
+<h3 style="font-size:28px;font-weight:600">Attention without the round trip</h3>
+<p style="font-size:23px;color:#4A5568;line-height:1.35">Softmax between Q·Kᵀ and P·V stays in registers, instead of the scores going through shared memory.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-left:6px solid #B4501A;border-radius:12px;padding:22px 28px">
+<h3 style="font-size:28px;font-weight:600">Integer products</h3>
+<p style="font-size:23px;color:#4A5568;line-height:1.35">Ternary weights are exact in int8: int8 products, the group scales applied in registers. Activations in int8 would cost accuracy.</p>
+</div>
+</div>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:30%">Model</th><th style="width:35%">Today, KHR only (measured)</th><th style="width:35%">With conversion (estimate)</th></tr>
+<tr><td>Llama 3.2 1B, 431-token prompt</td><td>0.63 s, products 0.56 s in fp32</td><td><b>about 0.4 s</b>: fp16 products, fp32 sums</td></tr>
+<tr style="background:#EEF1F5"><td>Bonsai 2 2B, 412-token prompt</td><td>0.87 s, products 0.80 s in fp32</td><td><b>about 0.5 s</b>: no staging, fp16 products</td></tr>
+<tr><td>Ternary Qwen3-8B</td><td>40 ms a token, decode only</td><td>decode unchanged; a matrix-unit prefill worth building</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 11 · Vulkan 1.4.342 · not on the drivers we tested (512.842.19, .25) · runners load qcom/*.comp kernels when present</p>
+</section>
+<section id="lessons" data-transition="fade" style="background:#101B2D;color:#EEF2F7;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What the Adreno 840 taught us</h2>
+<div style="display:flex;flex-direction:column;gap:22px">
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:560px">The driver is the platform</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Two builds with one version number behaved differently. Check every output.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#F08A3C;width:560px">Matrix units are for prompts</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Generating is matrix-vector work, set by bandwidth; prompts gain 6 to 28 times.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">fp16-only sums set the ceiling</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Accurate prompts run on fp32 tiles at two thirds the speed.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">Mojo kernels carry over</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">An OpenCL port’s kernels ran unchanged on Vulkan, and served a second model.</p>
+</div>
+<div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
+<p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">The runtime is the gap</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Each model still needs a hand-written C runner around its kernels.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 12</p>
+</section>
+<section id="next" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">What comes next</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">The conversion extension in Mojo</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">Its instructions in LLVM’s SPIR-V backend and our target, so the QCOM kernels become Mojo too.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">Faster prompts</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">fp16 products with fp32 sums wherever a driver allows; a matrix-unit prefill for Qwen3-8B.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:14px;background:#FFFFFF;border-top:6px solid #6B7280;border-radius:12px;padding:32px">
+<h3 style="font-size:32px;font-weight:600">MAX on the phone</h3>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">MAX’s runtime built for Android, so graphs run on the 840 without hand-written runners.</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 32px">One target flag, the stock driver, three models checked token for token: the Adreno 840 runs Mojo today.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo on the Adreno 840 · 13 · code: adityaGoCT/mojo-adreno · target: adityaGoCT/modular, branch adreno-spirv-target</p>
+</section>
+</div>
+<div id="notes"></div>
+<div id="bar"></div>
+<script>
+const slides = [...document.querySelectorAll("section")];
+const notes = ["This talk is about one GPU and one driver: the Adreno 840 in Qualcomm\u2019s Snapdragon 8 Elite Gen 5, driven by Qualcomm\u2019s own stock Vulkan driver, the one every phone with this chip ships. Mojo does not target phone GPUs officially, so we built Mojo\u2019s compiler from source and gave it a native adreno840 target that writes Vulkan SPIR-V. Then we used the GPU\u2019s matrix units through cooperative matrices, and ran three language models end to end on the phone: Llama 3.2 1B, Bonsai 2 2B with ternary weights, and a ternary Qwen3-8B. Every number in this deck was measured on real phones in two remote device labs, and every model run is checked against a reference.", "Here is the setup. The GPU is the Adreno 840, in Qualcomm\u2019s Snapdragon 8 Elite Gen 5, the SM8850. The driver is Qualcomm\u2019s own Vulkan driver, exactly as phones ship it, version 512.842: build 19 on a Galaxy S26 Ultra, on both Android 16 and Android 17, and build 25 on Qualcomm\u2019s SM8850 reference phone. We had no phone on the desk: the S26 Ultra came from Samsung\u2019s Remote Test Lab, bridged to the Mac\u2019s adb through a browser tab, and the reference phone from Qualcomm\u2019s Device Cloud, over an SSH tunnel. What matters for compute is in the table. The driver exposes the matrix units through the standard cooperative-matrix extension, but only for tiles 64 rows tall. Products come in three kinds: fp16 that also sums in fp16, fp32, and int8 into int32. There is no fp16 product with an fp32 sum, which will shape every prompt kernel later. Subgroups are 64 lanes, and a workgroup gets 32 kilobytes of shared memory. Qualcomm\u2019s conversion extension, which we come back to at the end, is on neither build.", "Mojo\u2019s compiler has been open source since August, so we built it from source and added a target. A Mojo GPU kernel is written exactly as for NVIDIA or AMD. With the flag --target-accelerator adreno840, our target plugins decide what a thread index, a barrier, a warp operation or a matrix tile becomes for this GPU, with 64-lane subgroups. Mojo\u2019s own optimizer runs as usual. Then a Vulkan ABI pass reshapes each kernel into a Vulkan entry point: every pointer argument becomes the next storage buffer, every scalar argument a 64-bit slot of one params buffer, and cooperative-matrix operations get their matrix types. LLVM\u2019s SPIR-V backend, which we patched so Vulkan shaders may use matrix instructions, writes SPIR-V 1.6. What does not exist is MAX\u2019s runtime for Android. So each model here has a small C runner: it loads the weights, creates the pipelines, records every dispatch of a token into one command buffer, and checks the output.", "The matrix units are reached through cooperative matrices: a tile that a whole subgroup loads, multiplies and stores together, while the driver decides which thread holds which element. In Mojo this is a small type, CoopMatrix, with zero, load, multiply-add, cast and store, and the loop on the slide is a complete matrix multiply. Each operation is a marker call; our ABI pass, which already knows which buffer every pointer reaches, rewrites the markers into SPIR-V cooperative-matrix instructions with the right types. On the S26 Ultra, with tiles staged through shared memory, a 2048-cubed multiply runs at 3.7 teraflops in fp16 and 2.5 in fp32. Remember the driver: the fp16 product also sums in fp16, so for long sums we will use fp32 tiles at two thirds of the speed. MAX\u2019s own matmul kernel now takes this path on adreno840 for fp16 and fp32 shapes in multiples of 64: its three test graphs pass on the phone, the fp16 one eight times faster than MAX\u2019s naive kernel.", "Most of the work on this GPU went into its driver. Three behaviours showed up on every build. Half-precision values in shared memory behave as if they were four bytes apart, so only half of an fp16 array is usable; we stage fp16 tiles with matrix loads and stores and halve their offsets. A matrix product whose running sum starts as a tile loaded from memory fails pipeline creation, so every sum starts at zero and a residual is added by a separate kernel. And using exactly all 32 kilobytes of shared memory gives wrong results, so the prompt kernels stay at 16. Then the two builds disagree with each other. The phone came back from the lab on Android 17 with a driver reporting the same version number, and it rejected every matrix pipeline until the compiler wrote its zero tiles as constants instead of building them at run time. On Android 16, our fused attention kernel fails to link, so the runner falls back to per-row attention. And one limit is in the hardware shapes themselves: fp16 products sum only in fp16, so long sums run on fp32 tiles. Each of these either failed outright or silently produced wrong numbers, which is why every run checks every output.", "The first model is Meta\u2019s Llama 3.2 1B, generating text one token at a time. Seven small Mojo kernels do the work, the matrix-vector products with one 64-lane subgroup per output row, and a C runner records 150 dispatches per token. With fp16 weights, every token reads all 2.47 gigabytes of them, and decode runs at 43 milliseconds a token. Nothing here uses the matrix units: one token is a matrix-vector product, and its speed is set by memory bandwidth. So the lever is bytes. With 4-bit weights, eight to a 32-bit word with one fp16 scale per 64, each token reads about a quarter as much, and decode drops to 13 milliseconds a token. Both formats generate 48 out of 48 tokens identical to PyTorch: the fp16 model against PyTorch in fp32 on the same weights, the 4-bit one against PyTorch with the same dequantized weights.", "Reading the prompt is where the matrix units pay off. Our runner first pushed the prompt through the decode path, one token at a time, so a 431-token prompt took 17.7 seconds. Processed together, every projection becomes one matrix multiply over all the prompt tokens, and each weight is reused 431 times. We wrote batched kernels for the adreno840 target, and the matrix products run on cooperative matrices in fp32: the fp16 weights are converted while they are staged in shared memory, so the sums keep their accuracy despite the driver\u2019s fp16-only products. The prompt now takes 0.63 seconds, 28 times faster, and all 48 generated tokens are identical to PyTorch, logits within six times ten to the minus five. Most of the time, 556 milliseconds, is the matrix products at about 1.8 teraflops; coalescing the weight copy doubled their speed. Attention is fused too: one subgroup handles 64 prompt tokens of a head, both of its products on the matrix units, 46 milliseconds for all 16 layers. That fused kernel needed the Android 17 build; on Android 16 the runner falls back to per-row attention.", "The second model is a different kind of test. Bonsai 2 2B is PrismML\u2019s ternary model: every weight is minus one, zero or one, stored in two bits, and it mixes 18 gated DeltaNet layers, which keep a recurrent state instead of a growing cache, with 6 attention layers. Another developer had already ported it to this same GPU in their own fork of Modular\u2019s repository, through a new OpenCL target. Their GPU kernels are plain Mojo, so we took their kernel file as it is and compiled it with our Vulkan target: all 21 kernels compiled and validated without changing a line. What we wrote is the runtime, their forward pass in C. It generates 80 tokens a second, 12.4 milliseconds a token, and for 16 steps every greedy token matches the exporter\u2019s FP32 reference, with all 248 thousand logits compared. Their OpenCL build reports about 75 a second on a regular S26, so the kernels lose nothing through Vulkan. For the prompt we reused their kernels again: a thin wrapper runs a decode kernel on every prompt row in one dispatch. New are three kernels: the ternary projections as matrix products on cooperative matrices, the attention scores too, and the DeltaNet recurrence as one scan with its state in registers. A 412-token prompt takes 0.87 seconds instead of 5.2, six times faster, and the checked tokens still match.", "The third model is the largest: PrismML\u2019s Ternary-Bonsai-8B, which is Qwen3-8B with every projection and the output head ternary, 2.19 gigabytes on the GPU. The phone could not reach the internet and the bridge moves about 2.7 megabytes a second, so it was ten minutes of upload before anything ran. Every group of weights turned out to be exactly ternary, so the projections run on the Bonsai port\u2019s packed kernels, unchanged. What Qwen3 needs beyond them is seven small Mojo kernels: RMS norm, the per-head q and k norm with YaRN RoPE and the KV-cache writes in one kernel, attention scores and values, SwiGLU, and the residual add. The RoPE table comes straight from MLX\u2019s own YaRN rope, so positions match the reference exactly. On Qualcomm\u2019s reference phone it generates 25 tokens a second, 40 milliseconds a token, reading the full 2.19 gigabytes each time. For 16 steps every greedy token matches MLX, with all 151,669 logits within 0.008, and asked why the sky is blue it gives the answer on the slide. Its prompt still runs one token at a time, about 38 milliseconds each.", "Here are the three models side by side, every row measured on an Adreno 840 with the stock driver and checked against a reference. Llama 3.2 1B generates at 43 milliseconds a token with fp16 weights and 13 with 4-bit weights, and reads a 431-token prompt in about 0.6 seconds either way. Bonsai 2 2B, with ternary weights, is the fastest at 12.4 milliseconds a token and reads a 412-token prompt in 0.87 seconds. The ternary Qwen3-8B generates at 40 milliseconds a token, four times the parameters of Bonsai in a similar number of bytes per parameter. Two patterns run through the table. Generating is bound by memory bandwidth: one token is a matrix-vector product, and its time is how many bytes the weights take, so fewer bits per weight is what helps. Reading a prompt is bound by arithmetic once the tokens are batched, and there the matrix units make it six to 28 times faster than going token by token.", "One thing would change these numbers on the same hardware: Qualcomm\u2019s cooperative-matrix conversion extension, published with Vulkan 1.4.342 in January. It does not replace the KHR extension; it adds four instructions that move data between a thread\u2019s registers and a matrix, so data no longer has to pass through shared memory. For these generative kernels that means four things. First, the weights: one 32-bit word holds sixteen ternary codes, which is exactly one column of an fp16 matrix tile, so each thread could unpack its column in registers and hand it to the matrix unit directly, with no staging and no barrier. Second, and the biggest: the 840 only sums fp16 products in fp16, which is why our prompt kernels use the slower fp32 tiles. With conversion, we pull the fp16 accumulator out every 128 values and add it into fp32 registers, the same precision scheme the decode kernels use, at fp16 speed: our fp16 matrix multiply ran at 3.5 teraflops against 1.8 for the fp32 products in the prefill. Third, fused attention can keep the softmax in registers between its two products. Fourth, ternary weights are exact integers, so int8 products become possible, if the activations can take int8. In estimates, Llama\u2019s 431-token prompt would go from 0.63 to about 0.4 seconds and Bonsai\u2019s from 0.87 to about 0.5. Decode does not change: it is one token at a time and limited by memory bandwidth, so Qwen3-8B stays at 40 milliseconds a token, but a matrix-unit prefill for it becomes worth building. Neither driver we tested offers it yet; the runners now detect it and load the QCOM kernel variants when it appears.", "Five things to take away. First, on a phone the driver is the platform. The same chip with a driver reporting the same version number rejected our matrix code on Android 17 and failed to link our attention kernel on Android 16, and some quirks gave wrong numbers silently; every run checks every output. Second, the matrix units are for prompts. Generating one token is matrix-vector work, set by how many bytes the weights take, while a batched prompt is matrix work and runs six to 28 times faster. Third, the driver\u2019s fp16-only sums set the ceiling: for accurate prompts we use fp32 tiles at two thirds of the fp16 speed, which is exactly what Qualcomm\u2019s conversion extension would lift. Fourth, Mojo kernels carry over: a kernel file written for another developer\u2019s OpenCL target ran unchanged through our Vulkan target, and its ternary projections then served a second model, Qwen3-8B. Fifth, the remaining gap is the runtime: each model still has a hand-written C runner around its kernels, where MAX would normally take over.", "Three things come next. First, the conversion extension in Mojo itself: today our QCOM kernels are GLSL because LLVM\u2019s SPIR-V backend does not know those instructions; adding them there and to our target would let the same kernels be written in Mojo, and the runners already load them when a driver offers the extension. Second, faster prompts: fp16 products with fp32 sums wherever a driver allows it, and a batched prefill on the matrix units for Qwen3-8B, whose weights are already in the layout our ternary matrix kernel reads. Third, MAX on the phone: its runtime built for Android, so that graphs run on the 840 directly instead of through a hand-written runner per model. To sum up: with one target flag and the driver every Snapdragon 8 Elite Gen 5 phone ships, three language models run on the Adreno 840 and match their references token for token. Thank you."];
+let i = Math.max(0, Math.min(slides.length - 1, (parseInt(location.hash.slice(1)) || 1) - 1));
+function fit() {
+  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const x = (innerWidth - 1920 * s) / 2, y = (innerHeight - 1080 * s) / 2;
+  slides.forEach(el => el.style.transform = `translate(${x}px, ${y}px) scale(${s})`);
+}
+function show(n) {
+  i = Math.max(0, Math.min(slides.length - 1, n));
+  slides.forEach((el, k) => el.classList.toggle("current", k === i));
+  document.getElementById("notes").textContent = notes[i];
+  document.getElementById("bar").textContent = `${i + 1} / ${slides.length} · ← → to move · N for speaker notes`;
+  history.replaceState(null, "", "#" + (i + 1));
+}
+addEventListener("keydown", e => {
+  if (["ArrowRight", "PageDown", " "].includes(e.key)) show(i + 1);
+  else if (["ArrowLeft", "PageUp"].includes(e.key)) show(i - 1);
+  else if (e.key === "Home") show(0);
+  else if (e.key === "End") show(slides.length - 1);
+  else if (e.key === "n" || e.key === "N") {
+    const el = document.getElementById("notes"); el.style.display = el.style.display === "block" ? "none" : "block";
+  }
+});
+addEventListener("click", e => { if (!e.target.closest("#notes")) show(e.clientX > innerWidth / 2 ? i + 1 : i - 1); });
+addEventListener("resize", fit);
+if (location.search.includes("clean")) document.getElementById("bar").style.display = "none";
+fit(); show(i);
+</script>
+</body>
+</html>
