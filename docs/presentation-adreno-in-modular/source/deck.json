@@ -1,0 +1,41 @@
+{
+  "v": 4,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-02T10:00:00Z"
+  },
+  "lists": "css",
+  "title": "Adreno in Modular",
+  "order": [
+    "backend",
+    "kernels",
+    "runtime",
+    "results",
+    "max"
+  ],
+  "sections": {
+    "how": {
+      "description": "How the Adreno backend works, and what its kernels and SPIR-V look like",
+      "start": "backend"
+    },
+    "results": {
+      "description": "Prefill and decode on the Adreno 840 for every model",
+      "start": "results"
+    },
+    "next": {
+      "description": "Bringing MAX itself to the Adreno: advantages and challenges",
+      "start": "max"
+    }
+  },
+  "faces": {
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    },
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    }
+  },
+  "designSystems": []
+}

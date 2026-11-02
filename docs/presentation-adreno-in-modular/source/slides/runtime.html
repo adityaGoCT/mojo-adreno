@@ -1,0 +1,36 @@
+<section id="runtime" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:28px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Mojo kernels, run by a small C program</h2>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Write in Mojo</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">plain GPU kernels, as for any GPU</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Compile</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">one .spv per kernel, checked by spirv-val</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Export weights</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">on the Mac, packed for the kernels, with reference logits</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Run with C</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">on the phone, straight on Vulkan</p>
+</div>
+</div>
+<div style="display:flex;gap:24px;align-items:flex-start">
+<p style="width:700px;font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.35;color:#DDE5F0;background:#172338;border-radius:12px;padding:22px 26px">load_kernels(dir);&#160;&#160;&#160;&#160;// .spv → pipelines<br>record(cmd, plan, n);&#160;// every dispatch, once<br>for (p = 0; p &lt; n_tokens; ++p) {<br>&#160;&#160;*token = tok; *pos = p;&#160;// params buffer<br>&#160;&#160;submit_wait(queue, cmd);<br>&#160;&#160;tok = argmax(logits);&#160;&#160;&#160;// on the CPU<br>}</p>
+<table style="flex:1;font-size:24px;color:#18212F">
+<tr><th style="width:28%">Model</th><th style="width:32%">Mojo kernels</th><th style="width:20%">C runner</th><th style="width:20%">Dispatches a token</th></tr>
+<tr><td>Llama 3.2 1B</td><td>9, and 8 for prefill</td><td>563 lines</td><td>150</td></tr>
+<tr style="background:#EEF1F5"><td>Bonsai 2 2B</td><td>21 (the port’s), 20 for prefill</td><td>747 lines</td><td>721</td></tr>
+<tr><td>Qwen3-8B</td><td>7 new, 3 of Bonsai’s</td><td>414 lines</td><td>615</td></tr>
+</table>
+</div>
+<p style="font-size:28px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 28px">The C side knows only buffers and dispatches: a kernel’s pointers are its bindings in order, its numbers slots of one params buffer.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">llama_vk.c, bonsai_vk.c, qwen3_vk.c · built with the Android NDK · Vulkan loaded from the phone’s libvulkan.so</p>
+<aside>This is how a model actually runs. The kernels are plain Mojo GPU functions, written as for any GPU. The compiler, with the adreno840 target, turns each into its own SPIR-V file, and every file is checked with spirv-val. On the Mac, an exporter writes the weights in exactly the layout the kernels read, packed 4-bit or ternary where the model is, together with reference logits from PyTorch or MLX. MAX’s runtime does not exist on Android, so the part that runs the model is a small C program, built with the Android NDK, that talks to Vulkan directly through the phone’s own libvulkan. At start-up it loads every SPIR-V file into a pipeline, copies the weights into GPU buffers, and records every dispatch of one token into a single command buffer, once. Then, per token, it only writes the token id and the position into the params buffer, submits that command buffer, waits, and takes the argmax on the CPU. The runner needs to know nothing about Mojo: a kernel’s pointer arguments are its buffer bindings in order, and its scalar arguments are slots of one params buffer. The table gives the sizes: Llama 3.2 1B is nine Mojo kernels plus eight for its prefill, with a 563-line runner and 150 dispatches a token; Bonsai 2 2B is the 21 kernels of another developer’s port plus 20 for prefill, 747 lines and 721 dispatches; the ternary Qwen3-8B adds seven kernels to three of Bonsai’s, with a 414-line runner and 615 dispatches a token.</aside>
+</section>

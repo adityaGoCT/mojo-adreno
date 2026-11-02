@@ -1,0 +1,22 @@
+<section id="results" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Prefill and decode on the Adreno 840</h2>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:19%">Model</th><th style="width:10%">On the GPU</th><th style="width:17%">Decode rate</th><th style="width:21%">Prefill rate, batched</th><th style="width:19%">Prefill rate, one token at a time</th><th style="width:14%">Checked</th></tr>
+<tr><td>Llama 3.2 1B, fp16</td><td>2.47 GB</td><td><b>23 tok/s</b> · 43 ms</td><td><b>684 tok/s</b> · 0.63 s, 28×</td><td>24 tok/s · 17.7 s</td><td>PyTorch 48/48</td></tr>
+<tr style="background:#EEF1F5"><td>Llama 3.2 1B, 4-bit</td><td>1.18 GB</td><td><b>75 tok/s</b> · 13 ms</td><td><b>695 tok/s</b> · 0.62 s</td><td>not measured</td><td>PyTorch 48/48</td></tr>
+<tr><td>Bonsai 2 2B, ternary</td><td>0.48 GB</td><td><b>80 tok/s</b> · 12.4 ms</td><td><b>474 tok/s</b> · 0.87 s, 6×</td><td>80 tok/s · 5.2 s</td><td>MLX 16/16</td></tr>
+<tr style="background:#EEF1F5"><td>Qwen3-8B, ternary</td><td>2.19 GB</td><td><b>25 tok/s</b> · 40 ms</td><td>not built yet</td><td>27 tok/s · 38 ms each</td><td>MLX 16/16</td></tr>
+</table>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Decode: memory bandwidth</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">One token is a matrix-vector product: its time is the bytes of weights read. Fewer bits per weight took Llama from 43 to 13 ms.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Prefill: the matrix units</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">All prompt tokens at once reuse every weight: fp32 cooperative-matrix products at about 1.8 TFLOP/s, 6 to 28 times faster.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Prompts: Llama 431 tokens, Bonsai 412, Qwen3 19–23 · Llama and Bonsai decode: Galaxy S26 Ultra · the rest: SM8850 reference phone</p>
+<aside>Here are the results for every model, all on an Adreno 840 with Qualcomm’s stock driver, and all checked against a reference. Decode first. Llama 3.2 1B generates at 43 milliseconds a token with fp16 weights, 23 tokens a second, and at 13 milliseconds with 4-bit weights, about 75 a second. Bonsai 2 2B, with ternary weights, is the fastest at 12.4 milliseconds, 80 tokens a second. The ternary Qwen3-8B, the largest model, generates 25 tokens a second. Then prefill, reading the prompt, as a rate in prompt tokens per second. Token by token, Llama reads 24 tokens a second, 17.7 seconds for a 431-token prompt; batched on the matrix units it reads 684 tokens a second, 0.63 seconds, 28 times faster, and 695 a second with 4-bit weights. Bonsai goes from 80 tokens a second token by token to 474 batched, six times faster, for a 412-token prompt in 0.87 seconds. Qwen3-8B still reads its prompt one token at a time, about 27 tokens a second; its batched prefill is the next step. Note that token by token, prefill runs at the decode rate: it is the same path. Two rules explain the table. Decode is bound by memory bandwidth: one token is a matrix-vector product, so its time is the bytes the weights take. Prefill is bound by arithmetic once the tokens are batched, and there the matrix units pay off. Every row matches its reference token for token: PyTorch for Llama, MLX in FP32 for the ternary models.</aside>
+</section>

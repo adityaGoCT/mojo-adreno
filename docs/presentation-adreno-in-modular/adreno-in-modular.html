@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adreno in Modular</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+html, body { margin: 0; height: 100%; background: #0B1220; }
+#stage { position: fixed; inset: 0; overflow: hidden; }
+section { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; box-sizing: border-box;
+  overflow: hidden; transform-origin: 0 0; }
+section:not(.current) { display: none !important; }
+section * { margin: 0; box-sizing: border-box; }
+section div:not([style*="display"]) { display: flex; flex-direction: column; }
+section h1 { font-size: 96px; font-weight: 600; line-height: 1.1; }
+section h2 { font-size: 64px; font-weight: 600; line-height: 1.15; }
+section h3 { font-size: 44px; font-weight: 600; line-height: 1.2; }
+section p { font-size: 32px; line-height: 1.4; }
+section table { border-collapse: collapse; }
+section th, section td { padding: 0.35em 0.6em; text-align: left; border-bottom: 1px solid #D5DAE1; vertical-align: top; }
+section th { font-weight: 600; border-bottom: 2px solid #18212F; }
+#bar { position: fixed; right: 16px; bottom: 12px; font: 14px system-ui, sans-serif; color: #A9B8CC; }
+#notes { position: fixed; left: 0; right: 0; bottom: 0; max-height: 40%; overflow: auto; display: none;
+  background: rgba(11, 18, 32, 0.95); color: #E8EDF5; font: 18px/1.5 system-ui, sans-serif; padding: 16px 24px; }
+@media print {
+  @page { size: 1920px 1080px; margin: 0; }
+  html, body { background: none; height: auto; }
+  #stage { position: static; }
+  section, section:not(.current) { position: relative; display: flex !important; transform: none !important;
+    page-break-after: always; }
+  #bar, #notes { display: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="stage">
+<section id="backend" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:30px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Adreno as a native backend in Modular’s compiler</h2>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;color:#DDE5F0;background:#172338;border-radius:12px;padding:18px 28px">mojo build --target-accelerator adreno840 kernel.mojo&#160;&#160;→&#160;&#160;one Vulkan compute shader (.spv) per kernel</p>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:20%">Piece</th><th style="width:54%">What it does</th><th style="width:26%">In the fork</th></tr>
+<tr><td>Target</td><td>adreno840: Vulkan SPIR-V, 64-lane subgroups, cooperative matrices for the matrix units</td><td>SPIRVTraits.cpp</td></tr>
+<tr style="background:#EEF1F5"><td>GPU intrinsics</td><td>thread ids, barriers, shuffles, warp reductions and math become SPIR-V builtins</td><td>SPIRVLowering.cpp</td></tr>
+<tr><td>Vulkan kernel ABI</td><td>pointers become storage buffers, numbers a params buffer; structured control flow; matrix types</td><td>VulkanKernelABI.cpp</td></tr>
+<tr style="background:#EEF1F5"><td>SPIR-V writer</td><td>LLVM’s SPIR-V backend inside mojo, patched for matrices in Vulkan shaders</td><td>SPIRVBackend.cpp, 2 LLVM patches</td></tr>
+<tr><td>MAX</td><td>CoopMatrix type; matmul picks a matrix-unit kernel on adreno840; graphs compile for vulkan:adreno840</td><td>mma_spirv.mojo, matmul/gpu/adreno</td></tr>
+</table>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Built on Modular’s open-source Mojo compiler · runs on Qualcomm’s stock Vulkan driver</p>
+</section>
+<section id="kernels" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:20px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">A Mojo kernel, and the SPIR-V it becomes</h2>
+<p style="font-size:26px;font-weight:600;color:#2563C9">Subgroup: a lane shuffle and a warp reduction (64 lanes)</p>
+<div style="display:flex;gap:24px">
+<p style="width:640px;font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.35;color:#18212F;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:12px;padding:20px 24px">ss += shuffle_xor(ss, UInt32(8))<br>var s = warp_sum(x)</p>
+<p style="flex:1;font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.35;color:#DDE5F0;background:#172338;border-radius:12px;padding:20px 24px">%lane = OpLoad %u32 %SubgroupLocalInvocationId<br>%src = OpBitwiseXor %u32 %lane %8<br>%t = OpGroupNonUniformShuffle %f32 %sg %ss %src<br>%s = OpGroupNonUniformFAdd %f32 %sg Reduce %x</p>
+</div>
+<p style="font-size:26px;font-weight:600;color:#B4501A">Cooperative matrix: one 64 × 64 fp32 tile, from A (64 × 8) and B (8 × 64) in shared memory</p>
+<div style="display:flex;gap:24px">
+<p style="width:640px;font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.35;color:#18212F;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:12px;padding:20px 24px">var acc = Acc.zero()<br>var a = A.load(sa, 16)<br>var b = B.load[row_major=False](sb, 16)<br>acc = a.multiply_add(b, acc)<br>acc.store(out, ldy)</p>
+<p style="flex:1;font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.35;color:#DDE5F0;background:#172338;border-radius:12px;padding:20px 24px">%C = OpTypeCooperativeMatrixKHR %f32 %sg 64 64 %Acc<br>%z = OpConstantComposite %C %f32_0<br>%a = OpCooperativeMatrixLoadKHR %A %sa %RowMajor %16<br>%b = OpCooperativeMatrixLoadKHR %B %sb %ColMajor %16<br>%c = OpCooperativeMatrixMulAddKHR %C %a %b %z<br>OpCooperativeMatrixStoreKHR %out %c %RowMajor %ldy</p>
+</div>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">A, B and Acc are <span style="color:#2563C9">CoopMatrix[DType.float32, …]</span> with MATRIX_A, MATRIX_B and ACCUMULATOR. Every pointer argument becomes storage buffer 0, 1, 2…; every number a slot of %params.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">spirv-dis of normalize_qk, gemv and p_gemm_t2 from mojo-adreno’s builds · ids renamed for reading · %sg = subgroup scope</p>
+</section>
+<section id="runtime" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:28px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Mojo kernels, run by a small C program</h2>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Write in Mojo</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">plain GPU kernels, as for any GPU</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #2563C9;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Compile</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">one .spv per kernel, checked by spirv-val</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #6B7280;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Export weights</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">on the Mac, packed for the kernels, with reference logits</p>
+</div>
+<x-shape kind="arrow-right" style="background:#9AA5B1;width:32px;height:16px"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border:2px solid #B4501A;border-radius:14px;padding:20px">
+<h3 style="font-size:28px;font-weight:600">Run with C</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.3">on the phone, straight on Vulkan</p>
+</div>
+</div>
+<div style="display:flex;gap:24px;align-items:flex-start">
+<p style="width:700px;font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.35;color:#DDE5F0;background:#172338;border-radius:12px;padding:22px 26px">load_kernels(dir);&#160;&#160;&#160;&#160;// .spv → pipelines<br>record(cmd, plan, n);&#160;// every dispatch, once<br>for (p = 0; p &lt; n_tokens; ++p) {<br>&#160;&#160;*token = tok; *pos = p;&#160;// params buffer<br>&#160;&#160;submit_wait(queue, cmd);<br>&#160;&#160;tok = argmax(logits);&#160;&#160;&#160;// on the CPU<br>}</p>
+<table style="flex:1;font-size:24px;color:#18212F">
+<tr><th style="width:28%">Model</th><th style="width:32%">Mojo kernels</th><th style="width:20%">C runner</th><th style="width:20%">Dispatches a token</th></tr>
+<tr><td>Llama 3.2 1B</td><td>9, and 8 for prefill</td><td>563 lines</td><td>150</td></tr>
+<tr style="background:#EEF1F5"><td>Bonsai 2 2B</td><td>21 (the port’s), 20 for prefill</td><td>747 lines</td><td>721</td></tr>
+<tr><td>Qwen3-8B</td><td>7 new, 3 of Bonsai’s</td><td>414 lines</td><td>615</td></tr>
+</table>
+</div>
+<p style="font-size:28px;line-height:1.4;border-left:6px solid #F08A3C;padding:8px 0 8px 28px">The C side knows only buffers and dispatches: a kernel’s pointers are its bindings in order, its numbers slots of one params buffer.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">llama_vk.c, bonsai_vk.c, qwen3_vk.c · built with the Android NDK · Vulkan loaded from the phone’s libvulkan.so</p>
+</section>
+<section id="results" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Prefill and decode on the Adreno 840</h2>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:19%">Model</th><th style="width:10%">On the GPU</th><th style="width:17%">Decode rate</th><th style="width:21%">Prefill rate, batched</th><th style="width:19%">Prefill rate, one token at a time</th><th style="width:14%">Checked</th></tr>
+<tr><td>Llama 3.2 1B, fp16</td><td>2.47 GB</td><td><b>23 tok/s</b> · 43 ms</td><td><b>684 tok/s</b> · 0.63 s, 28×</td><td>24 tok/s · 17.7 s</td><td>PyTorch 48/48</td></tr>
+<tr style="background:#EEF1F5"><td>Llama 3.2 1B, 4-bit</td><td>1.18 GB</td><td><b>75 tok/s</b> · 13 ms</td><td><b>695 tok/s</b> · 0.62 s</td><td>not measured</td><td>PyTorch 48/48</td></tr>
+<tr><td>Bonsai 2 2B, ternary</td><td>0.48 GB</td><td><b>80 tok/s</b> · 12.4 ms</td><td><b>474 tok/s</b> · 0.87 s, 6×</td><td>80 tok/s · 5.2 s</td><td>MLX 16/16</td></tr>
+<tr style="background:#EEF1F5"><td>Qwen3-8B, ternary</td><td>2.19 GB</td><td><b>25 tok/s</b> · 40 ms</td><td>not built yet</td><td>27 tok/s · 38 ms each</td><td>MLX 16/16</td></tr>
+</table>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Decode: memory bandwidth</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">One token is a matrix-vector product: its time is the bytes of weights read. Fewer bits per weight took Llama from 43 to 13 ms.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Prefill: the matrix units</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">All prompt tokens at once reuse every weight: fp32 cooperative-matrix products at about 1.8 TFLOP/s, 6 to 28 times faster.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Prompts: Llama 431 tokens, Bonsai 412, Qwen3 19–23 · Llama and Bonsai decode: Galaxy S26 Ultra · the rest: SM8850 reference phone</p>
+</section>
+<section id="max" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:28px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Next: MAX itself on the Adreno</h2>
+<div style="display:flex;gap:20px">
+<p style="flex:1;font-size:24px;color:#DDE5F0;background:#101B2D;border-radius:12px;padding:18px 24px">26/26 MAX test graphs compile for vulkan:adreno840</p>
+<p style="flex:1;font-size:24px;color:#DDE5F0;background:#101B2D;border-radius:12px;padding:18px 24px">MAX’s matmul runs on the matrix units: 3/3 pass</p>
+<p style="flex:1;font-size:24px;color:#DDE5F0;background:#101B2D;border-radius:12px;padding:18px 24px">MAX already drives an Adreno through a remote device</p>
+</div>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<h3 style="font-size:32px;font-weight:600;color:#2563C9">Advantages</h3>
+<ul style="font-size:24px;color:#4A5568;line-height:1.4">
+<li>One model definition: the same MAX graph as on NVIDIA and AMD, no hand-written runner per model</li>
+<li>The graph compiler fuses and plans memory: far fewer than today’s 615 to 721 dispatches a token</li>
+<li>Pipelines bring the tokenizer, sampling, KV cache and serving</li>
+<li>Compile on the Mac, ship a compiled model to the phone</li>
+</ul>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">Challenges</h3>
+<ul style="font-size:24px;color:#4A5568;line-height:1.4">
+<li>No Android build of MAX’s runtime, and no on-phone Vulkan device plugin yet</li>
+<li>Kernels must fit Adreno: 64-row tiles, fp16-only sums, 32 KB shared memory</li>
+<li>Ternary and 4-bit formats are custom kernels today</li>
+<li>Driver builds differ: every compiled graph needs checking on the device</li>
+<li>Phone memory is shared and small: weights mapped once, compiling off the device</li>
+</ul>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">MAX’s device plugin interface: about 60 C functions · remote device: MAX on the Mac, Vulkan on the phone</p>
+</section>
+</div>
+<div id="notes"></div>
+<div id="bar"></div>
+<script>
+const slides = [...document.querySelectorAll("section")];
+const notes = ["Mojo officially targets NVIDIA, AMD and Apple GPUs. Since Modular open-sourced the compiler, we added Adreno as a native backend, in five pieces. First, the target itself: the accelerator name adreno840 selects Vulkan SPIR-V output with 64-lane subgroups and enables cooperative matrices, the GPU\u2019s matrix units. Second, the GPU intrinsics: when a kernel asks for its thread index, a barrier, a lane shuffle, a warp reduction or a math function, the lowering emits the matching SPIR-V builtin. Third, the Vulkan kernel ABI pass reshapes each kernel into a Vulkan entry point: every pointer argument becomes the next storage buffer, every scalar a slot in one params buffer; it also structures control flow the way Vulkan requires and gives cooperative matrices their types. Fourth, LLVM\u2019s SPIR-V backend, linked into mojo, writes the binary, with two small patches. Fifth, MAX: the CoopMatrix type for kernel authors, MAX\u2019s matmul picking a matrix-unit kernel on the 840, and MAX graphs compiling for a Vulkan Adreno device. All of it is built on Modular\u2019s open-source compiler, and the result is one flag: target adreno840, get a Vulkan shader per kernel that runs on Qualcomm\u2019s stock driver.", "Here is what the backend produces, from real kernels. The first row is subgroup code. In Mojo you write shuffle_xor to exchange a value with the lane whose index differs in one bit, and warp_sum to add a value across the whole subgroup, 64 lanes on the Adreno. In the SPIR-V, the shuffle becomes the lane id read from the SubgroupLocalInvocationId builtin, an exclusive-or with the mask, and a GroupNonUniformShuffle at subgroup scope; the warp sum becomes a single GroupNonUniformFAdd reduction. The second row is a cooperative matrix, the matrix units. A, B and Acc are CoopMatrix types: a 64 by 8 tile of A, an 8 by 64 tile of B, a 64 by 64 accumulator, all fp32. In the SPIR-V each becomes an OpTypeCooperativeMatrixKHR, the zero accumulator a constant, the loads from shared memory carry their layout, row-major for A and column-major for B, and their stride, the multiply-add is one instruction, and the store writes the tile to the output buffer. The listings are spirv-dis output of our compiled kernels with the ids renamed so they can be read; around them, every pointer argument of the kernel is a storage buffer at the next binding, and every scalar argument a slot of one params buffer.", "This is how a model actually runs. The kernels are plain Mojo GPU functions, written as for any GPU. The compiler, with the adreno840 target, turns each into its own SPIR-V file, and every file is checked with spirv-val. On the Mac, an exporter writes the weights in exactly the layout the kernels read, packed 4-bit or ternary where the model is, together with reference logits from PyTorch or MLX. MAX\u2019s runtime does not exist on Android, so the part that runs the model is a small C program, built with the Android NDK, that talks to Vulkan directly through the phone\u2019s own libvulkan. At start-up it loads every SPIR-V file into a pipeline, copies the weights into GPU buffers, and records every dispatch of one token into a single command buffer, once. Then, per token, it only writes the token id and the position into the params buffer, submits that command buffer, waits, and takes the argmax on the CPU. The runner needs to know nothing about Mojo: a kernel\u2019s pointer arguments are its buffer bindings in order, and its scalar arguments are slots of one params buffer. The table gives the sizes: Llama 3.2 1B is nine Mojo kernels plus eight for its prefill, with a 563-line runner and 150 dispatches a token; Bonsai 2 2B is the 21 kernels of another developer\u2019s port plus 20 for prefill, 747 lines and 721 dispatches; the ternary Qwen3-8B adds seven kernels to three of Bonsai\u2019s, with a 414-line runner and 615 dispatches a token.", "Here are the results for every model, all on an Adreno 840 with Qualcomm\u2019s stock driver, and all checked against a reference. Decode first. Llama 3.2 1B generates at 43 milliseconds a token with fp16 weights, 23 tokens a second, and at 13 milliseconds with 4-bit weights, about 75 a second. Bonsai 2 2B, with ternary weights, is the fastest at 12.4 milliseconds, 80 tokens a second. The ternary Qwen3-8B, the largest model, generates 25 tokens a second. Then prefill, reading the prompt, as a rate in prompt tokens per second. Token by token, Llama reads 24 tokens a second, 17.7 seconds for a 431-token prompt; batched on the matrix units it reads 684 tokens a second, 0.63 seconds, 28 times faster, and 695 a second with 4-bit weights. Bonsai goes from 80 tokens a second token by token to 474 batched, six times faster, for a 412-token prompt in 0.87 seconds. Qwen3-8B still reads its prompt one token at a time, about 27 tokens a second; its batched prefill is the next step. Note that token by token, prefill runs at the decode rate: it is the same path. Two rules explain the table. Decode is bound by memory bandwidth: one token is a matrix-vector product, so its time is the bytes the weights take. Prefill is bound by arithmetic once the tokens are batched, and there the matrix units pay off. Every row matches its reference token for token: PyTorch for Llama, MLX in FP32 for the ternary models.", "The next step is MAX itself, and part of the way is already done. All 26 of our MAX test graphs, ResNet-18 included, compile for a Vulkan Adreno 840 device; MAX\u2019s matmul picks a matrix-unit kernel there, and its three test graphs pass on the phone; and MAX has already driven an Adreno through a remote device, MAX on the Mac and Vulkan on the phone. Bringing the whole of MAX to the phone has clear advantages. A model would be defined once, as the same MAX graph that runs on NVIDIA and AMD, instead of a hand-written C runner per model. The graph compiler would fuse operations and plan memory, cutting the 615 to 721 dispatches a token our runners record today. MAX\u2019s pipelines bring the tokenizer, sampling, KV cache management and serving. And models can be compiled on a Mac and shipped compiled, so the phone never runs the compiler. The challenges are just as concrete. MAX\u2019s runtime has no Android build, and its device plugin, about 60 C functions, needs a Vulkan implementation on the phone. The kernels have to fit Adreno\u2019s shapes: 64-row matrix tiles, fp16 products that sum only in fp16, 32 kilobytes of shared memory. The ternary and 4-bit formats that make models small are custom kernels today and would become MAX custom ops. Driver builds behave differently, so compiled graphs need checking on the device. And phone memory is shared and small, so weights must be mapped once and compilation kept off the phone."];
+let i = Math.max(0, Math.min(slides.length - 1, (parseInt(location.hash.slice(1)) || 1) - 1));
+function fit() {
+  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const x = (innerWidth - 1920 * s) / 2, y = (innerHeight - 1080 * s) / 2;
+  slides.forEach(el => el.style.transform = `translate(${x}px, ${y}px) scale(${s})`);
+}
+function show(n) {
+  i = Math.max(0, Math.min(slides.length - 1, n));
+  slides.forEach((el, k) => el.classList.toggle("current", k === i));
+  document.getElementById("notes").textContent = notes[i];
+  document.getElementById("bar").textContent = `${i + 1} / ${slides.length} · ← → to move · N for speaker notes`;
+  history.replaceState(null, "", "#" + (i + 1));
+}
+addEventListener("keydown", e => {
+  if (["ArrowRight", "PageDown", " "].includes(e.key)) show(i + 1);
+  else if (["ArrowLeft", "PageUp"].includes(e.key)) show(i - 1);
+  else if (e.key === "Home") show(0);
+  else if (e.key === "End") show(slides.length - 1);
+  else if (e.key === "n" || e.key === "N") {
+    const el = document.getElementById("notes"); el.style.display = el.style.display === "block" ? "none" : "block";
+  }
+});
+addEventListener("click", e => { if (!e.target.closest("#notes")) show(e.clientX > innerWidth / 2 ? i + 1 : i - 1); });
+addEventListener("resize", fit);
+if (location.search.includes("clean")) document.getElementById("bar").style.display = "none";
+fit(); show(i);
+</script>
+</body>
+</html>

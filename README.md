@@ -50,6 +50,11 @@ The Adreno 840 alone, on Qualcomm's stock driver: **[Mojo on the Adreno 840](doc
 (13 slides, PDF): the native adreno840 target, cooperative matrices, the driver's quirks, and Llama 3.2 1B,
 Bonsai 2 2B and ternary Qwen3-8B on the phone. [View it online](https://claude.ai/artifact/BVe8mtq41xJ3tQ7k95k44Y).
 
+Five slides on the Adreno backend itself: **[Adreno in Modular](docs/presentation-adreno-in-modular/adreno-in-modular.pdf)**
+(PDF): how the adreno840 backend sits in Modular's compiler, a Mojo kernel next to the SPIR-V it becomes
+(subgroup shuffles and cooperative matrices), the C runners, prefill and decode rates for every model,
+and what bringing MAX to the phone would take. [View it online](https://claude.ai/artifact/KGCduYsofd5m8pzQtXjJZ4).
+
 [![Mojo and MAX on Adreno, title slide](docs/presentation/cover.png)](docs/presentation/mojo-and-max-on-adreno.pdf)
 
 | backend | path |
