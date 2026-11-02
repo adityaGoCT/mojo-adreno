@@ -1,9 +1,10 @@
-// Requests between the remote MAX device's driver plugin (Mac) and its Vulkan executor (phone).
-// A request is {u32 op, u32 length, payload}. INFO, READ and SYNC are answered with
-// {i32 status, u32 length, payload}, which reports the first error since the last answer; the
-// plugin names buffers and modules itself, so it streams every other request without waiting.
-#ifndef REMOTE_PROTOCOL_H
-#define REMOTE_PROTOCOL_H
+// Requests from the driver plugin (driver/plugin.cpp) to its Vulkan executor (driver/executor.c),
+// in the same process on the phone or over TCP from the Mac (remote/). A request is {u32 op, u32
+// length, payload}. INFO, READ and SYNC are answered with {i32 status, u32 length, payload}, which
+// reports the first error since the last answer; the plugin names buffers and modules itself, so
+// it streams every other request without waiting.
+#ifndef DRIVER_PROTOCOL_H
+#define DRIVER_PROTOCOL_H
 
 #include <stdint.h>
 
@@ -11,7 +12,8 @@
 #define MAX_BINDINGS 64
 
 enum {
-  OP_INFO = 1,  // -> "device name|vulkan version|storage buffer offset alignment"
+  OP_INFO = 1,  // -> "device name|vulkan version|storage buffer offset alignment|shared memory bytes|
+                //     workgroup invocations|workgroup size x|y|z|subgroup size"
   OP_ALLOC,     // u64 buffer, u64 size
   OP_FREE,      // u64 buffer
   OP_WRITE,     // u64 buffer, u64 offset, bytes
@@ -37,4 +39,4 @@ typedef struct {
   uint64_t offset;
 } binding_t;
 
-#endif  // REMOTE_PROTOCOL_H
+#endif  // DRIVER_PROTOCOL_H

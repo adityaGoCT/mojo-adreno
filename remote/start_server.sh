@@ -13,9 +13,9 @@ MOJO_SRC=${MOJO_SRC:-../modular}
 DEV=/data/local/tmp/mojo/remote
 mkdir -p build/remote
 clang++ -std=c++17 -O1 -shared -fPIC -I"$MOJO_SRC/SDK/include" -o build/remote/libM_driver_vulkan_remote.dylib \
-    remote/vulkan_remote_plugin.cpp
+    driver/plugin.cpp remote/transport.cpp
 "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android34-clang" -O2 -o build/remote/vk_server \
-    remote/vk_server.c -ldl
+    remote/vk_server.c driver/executor.c -ldl
 adb shell pkill -x vk_server || true   # -x: the server, not this shell, whose command names it
 adb shell mkdir -p $DEV
 adb push build/remote/vk_server $DEV/ > /dev/null

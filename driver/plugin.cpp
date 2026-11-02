@@ -1,26 +1,24 @@
 // A MAX driver plugin (the M_driver_* HAL interface in modular/modular's SDK/include/HAL) for a
-// remote Vulkan device: MAX runs on the Mac, and every allocation, copy and kernel launch goes to
-// remote/vk_server.c on the phone over TCP (`adb forward tcp:7788 tcp:7788`).
+// Vulkan device: MAX's DeviceContext allocates, copies and launches through it. It runs
+//  - on the phone, with the Vulkan executor in the same process (driver/local.cpp):
+//      MODULAR_DRIVER_PLUGINS="vulkan@/data/local/tmp/.../libM_driver_vulkan.so"
+//  - on the Mac, as a remote device whose executor runs on the phone (remote/transport.cpp,
+//    remote/vk_server.c, `adb forward tcp:7788 tcp:7788`):
+//      MODULAR_DRIVER_PLUGINS="vulkan@/path/to/libM_driver_vulkan_remote.dylib"
 //
-//   MODULAR_DRIVER_PLUGINS="vulkan@/path/to/libM_driver_vulkan_remote.dylib"
-//
-// Kernels come from Mojo's Vulkan SPIR-V target (`adreno710`), whose modules carry a launch
-// description (OpModuleProcessed "mojo.vulkan.abi {json}"). A launch passes each argument as
+// Kernels come from Mojo's Vulkan SPIR-V target (adreno710, adreno840), whose modules carry a
+// launch description (OpModuleProcessed "mojo.vulkan.abi {json}"). A launch passes each argument as
 // bytes, as for CUDA; the description says where each pointer and scalar inside them goes: a
 // pointer (a device address this plugin handed out) becomes a storage-buffer binding at the
 // allocation and offset it points into, a scalar a 64-bit slot of the params buffer.
 //
-// Requests stream to the server in order without waiting, and it batches the GPU work; the plugin
-// waits only for data it reads back and at synchronization points (queue or event synchronize, a
-// host function), which also report errors from the requests before them.
+// Requests go to the executor in order without waiting for it, and it batches the GPU work; the
+// plugin waits only for data it reads back and at synchronization points (queue or event
+// synchronize, a host function), which also report errors from the requests before them.
 #include "HAL/M_driver_api.h"
+#include "json.h"
 #include "protocol.h"
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "transport.h"
 
 #include <algorithm>
 #include <cctype>
@@ -36,218 +34,117 @@
 
 namespace {
 
-// --- connection ----------------------------------------------------------------------------
+// --- requests to the executor ----------------------------------------------------------------
 
-std::mutex lock;  // one request at a time on the one connection
-int sock = -1;
+std::mutex lock;  // one request at a time
 std::string lastError;
 
-// VK_REMOTE_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
+// VK_DRIVER_<name>, or the remote device's older VK_REMOTE_<name>.
+const char *env(const char *name) {
+  std::string driver = std::string("VK_DRIVER_") + name, remote = std::string("VK_REMOTE_") + name;
+  const char *value = getenv(driver.c_str());
+  return value ? value : getenv(remote.c_str());
+}
+
+const char *opNames[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync"};
+
+// VK_DRIVER_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
 // received, printed at exit.
 struct Profile {
   struct Entry { uint64_t count = 0, sent = 0, received = 0; double seconds = 0; };
   Entry ops[16];
-  bool on = getenv("VK_REMOTE_PROFILE") != nullptr;
+  bool on = env("PROFILE") != nullptr;
   ~Profile() {
     if (!on)
       return;
-    static const char *names[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load",
-                                  "launch", "sync"};
-    fprintf(stderr, "vulkan_remote profile:\n");
+    fprintf(stderr, "vulkan driver profile (%s):\n", transportKind());
     for (int op = 1; op <= OP_SYNC; ++op)
       if (ops[op].count)
-        fprintf(stderr, "  %-7s %6llu requests %9.3f s  sent %8.2f MB  received %8.2f MB\n", names[op],
+        fprintf(stderr, "  %-7s %6llu requests %9.3f s  sent %8.2f MB  received %8.2f MB\n", opNames[op],
                 static_cast<unsigned long long>(ops[op].count), ops[op].seconds, ops[op].sent / 1e6,
                 ops[op].received / 1e6);
   }
 } profile;
 
-bool connectServer() {
-  if (sock >= 0)
-    return true;
-  const char *env = getenv("VK_REMOTE_PORT");
-  int port = env ? atoi(env) : DEFAULT_PORT;
-  sock = socket(AF_INET, SOCK_STREAM, 0);
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(static_cast<uint16_t>(port));
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (connect(sock, reinterpret_cast<sockaddr *>(&addr), sizeof addr)) {
-    close(sock);
-    sock = -1;
-    lastError = "cannot reach vk_server on 127.0.0.1:" + std::to_string(port) +
-                " (adb forward tcp:" + std::to_string(port) + " tcp:" + std::to_string(port) +
-                ", and start it on the phone)";
-    return false;
-  }
-  int one = 1;
-  setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-  return true;
-}
-
-bool sendAll(const void *data, size_t n) {
-  const char *p = static_cast<const char *>(data);
-  while (n) {
-    ssize_t k = send(sock, p, n, 0);
-    if (k <= 0)
-      return false;
-    p += k;
-    n -= static_cast<size_t>(k);
-  }
-  return true;
-}
-
-bool recvAll(void *data, size_t n) {
-  char *p = static_cast<char *>(data);
-  while (n) {
-    ssize_t k = recv(sock, p, n, 0);
-    if (k <= 0)
-      return false;
-    p += k;
-    n -= static_cast<size_t>(k);
-  }
-  return true;
-}
-
 // Sends one request (its payload in up to two pieces). INFO, READ and SYNC wait for the answer:
 // its payload goes to `out`, or its message (the first error since the last answer) to
-// `lastError`. Other requests return once sent.
+// `lastError`.
 bool call(uint32_t op, const void *a, size_t na, const void *b = nullptr, size_t nb = 0,
           std::string *out = nullptr) {
   std::lock_guard<std::mutex> guard(lock);
-  if (!connectServer())
-    return false;
   auto start = std::chrono::steady_clock::now();
-  if (getenv("VK_REMOTE_DEBUG") && op != OP_LAUNCH) {  // every request but launches (logged in full)
-    static const char *names[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync"};
-    fprintf(stderr, "vulkan_remote: %s", op <= OP_SYNC ? names[op] : "?");
+  if (env("DEBUG") && op != OP_LAUNCH) {  // every request but launches (logged in full)
+    fprintf(stderr, "vulkan driver: %s", op <= OP_SYNC ? opNames[op] : "?");
     for (size_t i = 0; i < std::min<size_t>(na / 8, 5); ++i)
       fprintf(stderr, " %llx", static_cast<unsigned long long>(static_cast<const uint64_t *>(a)[i]));
     fprintf(stderr, " (+%zu bytes)\n", nb);
   }
-  uint32_t header[2] = {op, static_cast<uint32_t>(na + nb)};
-  uint32_t reply[2] = {0, 0};
-  bool answered = op == OP_INFO || op == OP_READ || op == OP_SYNC;
-  if (!sendAll(header, sizeof header) || (na && !sendAll(a, na)) || (nb && !sendAll(b, nb)) ||
-      (answered && !recvAll(reply, sizeof reply))) {
-    close(sock);
-    sock = -1;
-    lastError = "lost the connection to vk_server";
-    return false;
-  }
-  std::string payload(reply[1], '\0');
-  if (reply[1] && !recvAll(payload.data(), reply[1])) {
-    close(sock);
-    sock = -1;
-    lastError = "lost the connection to vk_server";
-    return false;
-  }
-  if (reply[0]) {
-    lastError = "vk_server: " + payload;
-    fprintf(stderr, "vulkan_remote: %s\n", lastError.c_str());
+  std::string answer, error;
+  if (!transportCall(op, a, na, b, nb, &answer, error)) {
+    lastError = error;
+    fprintf(stderr, "vulkan driver: %s\n", lastError.c_str());
     return false;
   }
   if (profile.on && op < 16) {
     Profile::Entry &e = profile.ops[op];
     e.count++;
     e.sent += na + nb;
-    e.received += reply[1];
+    e.received += answer.size();
     e.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   }
   if (out)
-    *out = std::move(payload);
+    *out = std::move(answer);
   return true;
 }
 
+// What the executor reports of its device (OP_INFO), asked once.
+struct DeviceInfo {
+  std::string name, arch;
+  uint64_t alignment = 64;
+  int64_t sharedMemory = 32768, invocations = 1024, size[3] = {1024, 1024, 64}, subgroup = 64;
+};
+
+const DeviceInfo &deviceInfo() {
+  static DeviceInfo info = [] {
+    DeviceInfo d;
+    std::string text;
+    if (call(OP_INFO, nullptr, 0, nullptr, 0, &text)) {
+      std::vector<std::string> fields;
+      for (size_t at = 0;;) {
+        size_t bar = text.find('|', at);
+        fields.push_back(text.substr(at, bar - at));
+        if (bar == std::string::npos)
+          break;
+        at = bar + 1;
+      }
+      d.name = fields[0];
+      auto number = [&](size_t i, int64_t fallback) {
+        return i < fields.size() && !fields[i].empty() ? strtoll(fields[i].c_str(), nullptr, 10) : fallback;
+      };
+      d.alignment = static_cast<uint64_t>(number(2, 64));
+      d.sharedMemory = number(3, d.sharedMemory);
+      d.invocations = number(4, d.invocations);
+      for (int i = 0; i < 3; ++i)
+        d.size[i] = number(5 + i, d.size[i]);
+      d.subgroup = number(8, d.subgroup);
+    }
+    // The compiler's arch: "adreno" and the model number in the driver's name ("Adreno (TM) 840",
+    // "Turnip Adreno (TM) 710"), unless VK_DRIVER_ARCH names it.
+    if (const char *arch = env("ARCH"))
+      d.arch = arch;
+    else if (size_t at = d.name.find("Adreno"); at != std::string::npos) {
+      size_t digit = d.name.find_first_of("0123456789", at);
+      if (digit != std::string::npos)
+        d.arch = "adreno" + d.name.substr(digit, d.name.find_first_not_of("0123456789", digit) - digit);
+    }
+    if (d.arch.empty())
+      d.arch = "adreno710";
+    return d;
+  }();
+  return info;
+}
+
 M_driver_status_t failed() { return M_DRIVER_STATUS_UNKNOWN_ERROR; }
-
-// --- a minimal JSON reader, for launch descriptions ----------------------------------------
-
-struct Json {
-  enum Kind { Null, Bool, Number, String, Array, Object } kind = Null;
-  double number = 0;
-  std::string text;
-  std::vector<Json> items;
-  std::vector<std::pair<std::string, Json>> fields;
-
-  const Json *get(const char *key) const {
-    for (auto &field : fields)
-      if (field.first == key)
-        return &field.second;
-    return nullptr;
-  }
-  int64_t integer(const char *key, int64_t fallback = -1) const {
-    const Json *value = get(key);
-    return value && value->kind == Number ? static_cast<int64_t>(value->number) : fallback;
-  }
-};
-
-struct JsonParser {
-  const char *p, *end;
-  void space() {
-    while (p < end && isspace(static_cast<unsigned char>(*p)))
-      ++p;
-  }
-  bool parse(Json &out) {
-    space();
-    if (p >= end)
-      return false;
-    if (*p == '{') {
-      out.kind = Json::Object;
-      ++p;
-      space();
-      if (p < end && *p == '}')
-        return ++p, true;
-      for (;;) {
-        Json key, value;
-        if (!parse(key) || key.kind != Json::String)
-          return false;
-        space();
-        if (p >= end || *p++ != ':' || !parse(value))
-          return false;
-        out.fields.emplace_back(key.text, std::move(value));
-        space();
-        if (p < end && *p == ',') { ++p; continue; }
-        return p < end && *p++ == '}';
-      }
-    }
-    if (*p == '[') {
-      out.kind = Json::Array;
-      ++p;
-      space();
-      if (p < end && *p == ']')
-        return ++p, true;
-      for (;;) {
-        Json value;
-        if (!parse(value))
-          return false;
-        out.items.push_back(std::move(value));
-        space();
-        if (p < end && *p == ',') { ++p; continue; }
-        return p < end && *p++ == ']';
-      }
-    }
-    if (*p == '"') {
-      out.kind = Json::String;
-      for (++p; p < end && *p != '"'; ++p) {
-        if (*p == '\\' && p + 1 < end)
-          ++p;  // the descriptions only escape quotes and backslashes
-        out.text += *p;
-      }
-      return p < end && *p++ == '"';
-    }
-    if (!strncmp(p, "null", 4)) { p += 4; return true; }
-    if (!strncmp(p, "true", 4)) { out.kind = Json::Bool; out.number = 1; p += 4; return true; }
-    if (!strncmp(p, "false", 5)) { out.kind = Json::Bool; p += 5; return true; }
-    char *next;
-    out.kind = Json::Number;
-    out.number = strtod(p, &next);
-    if (next == p)
-      return false;
-    p = next;
-    return true;
-  }
-};
 
 // --- launch descriptions -------------------------------------------------------------------
 
@@ -278,44 +175,27 @@ bool describe(const std::string &spirv, Description &out) {
   size_t count = spirv.size() / 4;
   if (count < 5 || words[0] != 0x07230203)
     return lastError = "not a SPIR-V module", false;
-  static const char prefix[] = "mojo.vulkan.abi ";
-  for (size_t at = 5; at < count;) {
-    uint32_t n = words[at] >> 16, opcode = words[at] & 0xffff;
-    if (!n || at + n > count)
-      break;
-    if (opcode == 330) {  // OpModuleProcessed
-      const char *text = reinterpret_cast<const char *>(&words[at + 1]);
-      size_t length = strnlen(text, (n - 1) * 4);
-      if (length > sizeof prefix - 1 && !strncmp(text, prefix, sizeof prefix - 1)) {
-        Json json;
-        JsonParser parser{text + sizeof prefix - 1, text + length};
-        if (!parser.parse(json) || json.kind != Json::Object)
-          return lastError = "malformed launch description", false;
-        if (const Json *buffers = json.get("buffers"))
-          for (const Json &b : buffers->items) {
-            const Json *access = b.get("access");
-            out.buffers.push_back(
-                {b.integer("arg"), b.integer("offset"), 8, -1, !access || access->text != "none"});
-          }
-        if (const Json *params = json.get("params"); params && params->kind == Json::Object) {
-          out.hasParams = true;
-          if (const Json *slots = params->get("slots"))
-            for (const Json &s : slots->items) {
-              Leaf leaf;
-              if (const Json *value = s.get("value"))
-                leaf.blockDim = value->text.back() - 'x';
-              else
-                leaf = {s.integer("arg"), s.integer("offset"),
-                        scalarBytes(s.get("type") ? s.get("type")->text : "")};
-              out.slots.push_back(leaf);
-            }
-        }
-        return true;
-      }
+  Json json;
+  if (!launchDescription(words, count, json))
+    return lastError = "SPIR-V module without a mojo.vulkan.abi launch description", false;
+  if (const Json *buffers = json.get("buffers"))
+    for (const Json &b : buffers->items) {
+      const Json *access = b.get("access");
+      out.buffers.push_back({b.integer("arg"), b.integer("offset"), 8, -1, !access || access->text != "none"});
     }
-    at += n;
+  if (const Json *params = json.get("params"); params && params->kind == Json::Object) {
+    out.hasParams = true;
+    if (const Json *slots = params->get("slots"))
+      for (const Json &s : slots->items) {
+        Leaf leaf;
+        if (const Json *value = s.get("value"))
+          leaf.blockDim = value->text.back() - 'x';
+        else
+          leaf = {s.integer("arg"), s.integer("offset"), scalarBytes(s.get("type") ? s.get("type")->text : "")};
+        out.slots.push_back(leaf);
+      }
   }
-  return lastError = "SPIR-V module without a mojo.vulkan.abi launch description", false;
+  return true;
 }
 
 // --- objects -------------------------------------------------------------------------------
@@ -368,8 +248,8 @@ M_driver_status_t allocate(uint64_t size, M_driver_memory_t *memory) {
   m->address = nextAddress;
   nextAddress += (size + 0xffff) & ~0xffffull;  // 64 KiB apart: never adjacent
   byAddress[m->address] = m;
-  if (getenv("VK_REMOTE_DEBUG"))
-    fprintf(stderr, "vulkan_remote: alloc %llu bytes at %llx\n", static_cast<unsigned long long>(size),
+  if (env("DEBUG"))
+    fprintf(stderr, "vulkan driver: alloc %llu bytes at %llx\n", static_cast<unsigned long long>(size),
             static_cast<unsigned long long>(m->address));
   *memory = reinterpret_cast<M_driver_memory_t>(m);
   return M_DRIVER_STATUS_SUCCESS;
@@ -474,8 +354,8 @@ M_driver_status_t fill(M_driver_memory_view_t dst, uint64_t value, uint64_t valu
 M_driver_status_t execute(Function *f, const M_driver_dim_t &grid, const M_driver_dim_t &block,
                           void **args, uint64_t *argSizes, uint32_t numArgs) {
   const Description &d = f->description;
-  if (getenv("VK_REMOTE_DEBUG")) {  // the launch as MAX passes it
-    fprintf(stderr, "vulkan_remote: launch grid %u %u %u block %u %u %u, %u args:", grid.x, grid.y, grid.z,
+  if (env("DEBUG")) {  // the launch as MAX passes it
+    fprintf(stderr, "vulkan driver: launch grid %u %u %u block %u %u %u, %u args:", grid.x, grid.y, grid.z,
             block.x, block.y, block.z, numArgs);
     for (uint32_t i = 0; i < numArgs; ++i) {
       fprintf(stderr, "\n  arg %u (%llu bytes):", i, static_cast<unsigned long long>(argSizes[i]));
@@ -550,7 +430,7 @@ M_driver_status_t M_driver_status_message(M_driver_driver_t, M_driver_status_t s
   if (!buffer || size <= 0)
     return M_DRIVER_STATUS_ARGUMENT_OUT_OF_RANGE;
   std::string message = status == M_DRIVER_STATUS_SUCCESS ? "success"
-                        : lastError.empty() ? "vulkan_remote error " + std::to_string(status)
+                        : lastError.empty() ? "vulkan driver error " + std::to_string(status)
                                             : lastError;
   snprintf(buffer, static_cast<size_t>(size), "%s", message.c_str());
   return M_DRIVER_STATUS_SUCCESS;
@@ -590,7 +470,7 @@ M_driver_status_t M_driver_property(M_driver_driver_t, const char *name, void *v
   return M_DRIVER_STATUS_UNKNOWN_PROPERTY_NAME;
 }
 
-// --- device: the phone's Adreno 710 ----------------------------------------------------------
+// --- device: the phone's GPU ------------------------------------------------------------------
 
 M_DRIVER_API_EXPORT
 M_driver_status_t M_driver_device_count(M_driver_driver_t, int64_t *count) {
@@ -619,9 +499,9 @@ M_driver_status_t M_driver_device_property(M_driver_device_t, const char *name, 
     return M_DRIVER_STATUS_SUCCESS;
   };
   if (!strcmp(name, M_DRIVER_DEVICE_PROPERTY_NAME))
-    return text("Adreno 710 (remote, Vulkan)");
+    return text((deviceInfo().name + " (" + transportKind() + ", Vulkan)").c_str());
   if (!strcmp(name, M_DRIVER_DEVICE_PROPERTY_ARCH))
-    return text(getenv("VK_REMOTE_ARCH") ? getenv("VK_REMOTE_ARCH") : "adreno710");
+    return text(deviceInfo().arch.c_str());
   if (!strcmp(name, M_DRIVER_DEVICE_PROPERTY_HOST_UNIFIED)) {
     *static_cast<int64_t *>(value) = 0;
     return M_DRIVER_STATUS_SUCCESS;
@@ -644,21 +524,23 @@ M_DRIVER_API_EXPORT
 M_driver_status_t M_driver_device_attribute(M_driver_device_t, int32_t attribute, int32_t *value) {
   if (!value)
     return M_DRIVER_STATUS_INVALID_ARG;
-  // CUDA's numbering, as MAX's DeviceAttribute: what Adreno 710 offers through Vulkan.
+  // CUDA's numbering, as MAX's DeviceAttribute: the device's Vulkan limits where it has them.
+  const DeviceInfo &d = deviceInfo();
+  auto narrow = [](int64_t v) { return static_cast<int32_t>(std::min<int64_t>(v, INT32_MAX)); };
   switch (attribute) {
-  case 1: *value = 1024; break;            // max threads per block
-  case 2: case 3: *value = 1024; break;    // max block dim x, y
-  case 4: *value = 64; break;              // max block dim z
+  case 1: case 39: *value = narrow(d.invocations); break;  // max threads per block, per multiprocessor
+  case 2: case 3: case 4: *value = narrow(d.size[attribute - 2]); break;  // max block dim x, y, z
   case 5: case 6: case 7: *value = 65535; break;  // max grid dim
-  case 8: case 97: *value = 32768; break;  // shared memory per block (and opt-in)
-  case 10: *value = 64; break;             // warp size (subgroup size of the target)
+  case 8: case 81: case 97: *value = narrow(d.sharedMemory); break;  // shared memory per block, opt-in, per SM
+  case 10: *value = 64; break;             // warp size (a Mojo warp: 64 lanes)
   case 12: case 82: *value = 65536; break; // registers
   case 13: *value = 950000; break;         // clock rate, kHz
-  case 16: *value = 2; break;              // multiprocessors (shader processors)
-  case 39: *value = 1024; break;           // max threads per multiprocessor
-  case 75: *value = 7; break;              // "compute capability": Adreno 7xx
-  case 76: *value = 10; break;
-  case 81: *value = 32768; break;          // shared memory per multiprocessor
+  case 16: *value = 2; break;              // multiprocessors (a guess for grid sizing)
+  case 75: case 76: {                      // "compute capability": 7.10 for adreno710, 8.40 for adreno840
+    int model = atoi(d.arch.c_str() + std::min<size_t>(d.arch.size(), 6));
+    *value = attribute == 75 ? model / 100 : model % 100;
+    break;
+  }
   case 106: *value = 16; break;            // max blocks per multiprocessor
   default: *value = 0; break;
   }

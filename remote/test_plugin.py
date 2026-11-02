@@ -44,8 +44,8 @@ def build_and_start():
     the returned `adb shell` process (adb keeps a shell session open while its command runs)."""
     BUILD.mkdir(parents=True, exist_ok=True)
     sh("clang++", "-std=c++17", "-O1", "-shared", "-fPIC", f"-I{MOJO_SRC}/SDK/include", "-o",
-       BUILD / "libM_driver_vulkan_remote.dylib", HERE / "vulkan_remote_plugin.cpp")
-    sh(CC, "-O2", "-o", BUILD / "vk_server", HERE / "vk_server.c", "-ldl")
+       BUILD / "libM_driver_vulkan_remote.dylib", ROOT / "driver/plugin.cpp", HERE / "transport.cpp")
+    sh(CC, "-O2", "-o", BUILD / "vk_server", HERE / "vk_server.c", ROOT / "driver/executor.c", "-ldl")
     sh("adb", "shell", "pkill -x vk_server", check=False)  # -x: not this shell, whose command names it
     sh("adb", "shell", f"mkdir -p {DEV}")
     sh("adb", "push", BUILD / "vk_server", f"{DEV}/")

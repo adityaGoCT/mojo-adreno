@@ -352,9 +352,9 @@ their arguments need more of MAX's host logic.
 
 MAX's runtime does not run on Android, so `remote/` makes the phone a device of MAX on the Mac:
 MAX keeps its graph compiler and host code on the Mac, and its kernels run on the Adreno.
-`vulkan_remote_plugin.cpp` is a MAX driver plugin (the `M_driver_*` C interface in modular's
+`driver/plugin.cpp`, built with `remote/transport.cpp`, is a MAX driver plugin (the `M_driver_*` C interface in modular's
 `SDK/include/HAL`): it hands out device addresses for allocations and forwards copies, fills and
-launches over `adb forward` to `vk_server.c`, a Vulkan executor on the phone. At a launch it reads
+launches over `adb forward` to `vk_server.c`, which runs `driver/executor.c` on the phone. At a launch it reads
 the kernel's launch description to turn MAX's CUDA-style arguments (a pointer to each argument's
 bytes) into bindings at the allocation and offset each pointer points into, and params slots.
 
@@ -386,6 +386,20 @@ MODULAR_DRIVER_PLUGINS="cpu@$PWD/bazel-bin/Target/CPUPlugin.so;vulkan@$HOME/runi
 `VK_REMOTE_PROFILE=1` prints the plugin's requests and waits, `VK_SERVER_PROFILE=1` (to
 `start_server.sh`) the server's batches, and `=2` times each launch on its own. Running MAX on the
 phone itself would need an Android build of its runtime.
+
+### The driver plugin on the phone
+
+[`driver/`](driver) builds the same plugin for Android, with the Vulkan executor in its own process:
+`libM_driver_vulkan.so`, for `MODULAR_DRIVER_PLUGINS` on the phone. That makes it the device side of
+`DeviceContext` there.
+
+It batches 64 commands a submission. Through the HAL C interface, as MAX's runtime calls it, a Galaxy
+S26 Ultra runs MAX's matmul and add kernels, our cooperative-matrix matmuls and Bonsai's `residual`,
+and all match the CPU. 721 launches in a row, one Bonsai token's worth, take 5.6 µs each, against
+105 µs with a submission per launch.
+
+Mojo host code on the phone, such as the Android port's `model.mojo`, still needs MAX's runtime built
+for Android; see [`driver/README.md`](driver/README.md).
 
 ### Cooperative matrices on an Adreno 840
 
@@ -526,7 +540,9 @@ qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLS
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
                    as SPIR-V; bonsai_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
-remote/            MAX's remote device: driver plugin (Mac), Vulkan executor (phone), protocol, tests
+driver/            MAX driver plugin for Vulkan (the HAL's M_driver_* interface): libM_driver_vulkan.so
+                   on the phone, its Vulkan executor and an on-phone test (see its README)
+remote/            MAX's remote device: the driver plugin on the Mac over TCP, vk_server on the phone, tests
 coopmat/           KHR cooperative matrices: Mojo kernels for adreno840, check.sh, run_coopmat.py
                    (runs them on an Adreno 840), driver probe
 docs/presentation/ the deck: PDF, HTML viewer, speaker notes, slide sources
