@@ -398,8 +398,16 @@ S26 Ultra runs MAX's matmul and add kernels, our cooperative-matrix matmuls and 
 and all match the CPU. 721 launches in a row, one Bonsai token's worth, take 5.6 µs each, against
 105 µs with a submission per launch.
 
-Mojo host code on the phone, such as the Android port's `model.mojo`, still needs MAX's runtime built
-for Android; see [`driver/README.md`](driver/README.md).
+### Mojo host code on the phone
+
+[`android/`](android) builds Mojo programs that use MAX's `DeviceContext` for Android ARM64. Each
+program carries its kernels as adreno840 SPIR-V and links against MAX's runtime, which the fork now
+cross-builds for Android. On the phone it launches through the driver plugin, with no C runner.
+
+The Android port's own Bonsai 2 2B `model.mojo`, with "opencl" changed to "vulkan", runs on our
+backend. It matches the MLX reference token for token and decodes at 74–76 tok/s, against 80 for
+`bonsai_vk.c`. The phone downloads the checkpoint from Hugging Face itself, and
+`bonsai/convert.cpp` (`prepare.py`'s export in C++) converts it there.
 
 ### Cooperative matrices on an Adreno 840
 
@@ -540,6 +548,8 @@ qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLS
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
                    as SPIR-V; bonsai_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
+android/           Mojo host code on the phone: DeviceContext programs for Android (vecadd, the port's
+                   Bonsai model.mojo), build.py (MAX's runtime for Android, programs; see its README)
 driver/            MAX driver plugin for Vulkan (the HAL's M_driver_* interface): libM_driver_vulkan.so
                    on the phone, its Vulkan executor and an on-phone test (see its README)
 remote/            MAX's remote device: the driver plugin on the Mac over TCP, vk_server on the phone, tests

@@ -159,3 +159,18 @@ What it does show: the kernels lose nothing by going through SPIR-V and Vulkan i
 
 `kernels/kernels.mojo` is © Modular Inc. and the port's authors, Apache-2.0 with LLVM Exceptions (its
 header is kept).
+
+## The weights on the phone, without adb
+
+`bonsai/convert.cpp` is `prepare.py`'s export in C++. Built for Android (`android/build.py bonsai`),
+it writes `weights.bin` on the phone from the checkpoint the phone downloads itself:
+
+```bash
+adb shell "cd $D; curl -sSL -o model.safetensors https://huggingface.co/prism-ml/Ternary-Bonsai-2-2B-mlx-2bit/resolve/1c6cbae21f8c38830ce337972b46fdae7b18eaaa/model.safetensors"
+adb shell "cd $D; ./bonsai_convert model.safetensors weights.bin 128"
+```
+
+On a Samsung Remote Test Lab phone, the 1.2 GB download took under a minute. Pushing the 596 MB
+`weights.bin` over the lab's adb bridge would take more than an hour. The output's 604 weight
+tensors are byte for byte `prepare.py`'s; the RoPE table, from libm instead of numpy, is within 1 ulp.
+Only the prompt and the reference logits (16 MB) still come from the Mac.
