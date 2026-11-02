@@ -2,10 +2,15 @@
 
   python qwen3/run.py --model M --hf H                    # validate against M's MLX reference
   python qwen3/run.py --model M --hf H --prompt 'Explain in two sentences why the sky is blue.'
+  python qwen3/run.py --model M --hf H --runner mojo --weights model   # qwen3/qwen3.mojo (DeviceContext)
 
 M: qwen3/export.py's output, already on the phone in /data/local/tmp/q8 (weights.bin, manifest.txt,
 reference.f32); H: the checkpoint, for its tokenizer. Builds and pushes the runner and the kernels
 (qwen3/build_kernels.py) first. Tokenization and decoding run on the Mac.
+
+--runner mojo runs qwen3/qwen3.mojo instead: the forward pass in Mojo through MAX's DeviceContext and the
+Vulkan driver plugin (android/build.py qwen3). --weights names the directory of weights.bin and
+manifest.txt under /data/local/tmp/q8, such as `model` where qwen3_convert wrote them on the phone.
 """
 
 import argparse
@@ -37,13 +42,23 @@ def main():
     ap.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"))
     ap.add_argument("--prompt")
     ap.add_argument("--tokens", type=int, default=64)
+    ap.add_argument("--runner", default="c", choices=["c", "mojo"])
+    ap.add_argument("--weights", default=".", help="weights.bin and manifest.txt under /data/local/tmp/q8")
     a = ap.parse_args()
     adb = ["adb"] + (["-s", a.serial] if a.serial else [])
-    (BUILD / "bin").mkdir(parents=True, exist_ok=True)
-    sh(CC, "-O2", "-o", BUILD / "bin/qwen3_vk", HERE / "qwen3_vk.c", "-ldl", "-lm")
-    sh(*adb, "shell", f"mkdir -p {DIR}/k")
-    sh(*adb, "push", BUILD / "bin/qwen3_vk", f"{DIR}/")
-    sh(*adb, "push", *sorted(BUILD.glob("*.spv")), f"{DIR}/k/")
+    if a.runner == "mojo":
+        sh(sys.executable, HERE.parent / "android/build.py", "qwen3")
+        sh(*adb, "shell", f"mkdir -p {DIR}/mojo")
+        sh(*adb, "push", *sorted(p for p in (HERE.parent / "build/android/qwen3").iterdir() if p.suffix != ".o"),
+           f"{DIR}/mojo/")
+        runner = f"MODULAR_DRIVER_PLUGINS=vulkan@{DIR}/mojo/libM_driver_vulkan.so mojo/qwen3"
+    else:
+        (BUILD / "bin").mkdir(parents=True, exist_ok=True)
+        sh(CC, "-O2", "-o", BUILD / "bin/qwen3_vk", HERE / "qwen3_vk.c", "-ldl", "-lm")
+        sh(*adb, "shell", f"mkdir -p {DIR}/k")
+        sh(*adb, "push", BUILD / "bin/qwen3_vk", f"{DIR}/")
+        sh(*adb, "push", *sorted(BUILD.glob("*.spv")), f"{DIR}/k/")
+        runner = "./qwen3_vk"
     manifest = json.loads((a.model / "manifest.json").read_text())
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(str(a.hf))
@@ -56,7 +71,8 @@ def main():
                                        add_generation_prompt=True, enable_thinking=False)
         ids, steps = tok.encode(text, add_special_tokens=False), a.tokens
         print(f"prompt: {a.prompt!r}, {len(ids)} tokens")
-    out = sh(*adb, "shell", f"cd {DIR}; {env}./qwen3_vk . k {steps} {' '.join(map(str, ids))}")
+    kernels = "" if a.runner == "mojo" else " k"
+    out = sh(*adb, "shell", f"cd {DIR}; {env}{runner} {a.weights}{kernels} {steps} {' '.join(map(str, ids))}")
     gen = []
     for line in out.splitlines():
         m = re.match(r"tok (\d+) ", line)

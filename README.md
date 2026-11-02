@@ -404,6 +404,13 @@ and all match the CPU. 721 launches in a row, one Bonsai token's worth, take 5.6
 program carries its kernels as adreno840 SPIR-V and links against MAX's runtime, which the fork now
 cross-builds for Android. On the phone it launches through the driver plugin, with no C runner.
 
+Every model runs this way:
+- **Llama 3.2 1B:** `llama/model.mojo`, 24.7 tok/s in fp16 and 78.1 in 4-bit, every token as PyTorch.
+- **Ternary Qwen3-8B:** `qwen3/model.mojo`, 25.1 tok/s, every token as MLX.
+
+Both match their C runners' speed. The phone downloads each checkpoint from Hugging Face and
+converts it itself (see [`android/README.md`](android/README.md)).
+
 The Android port's own Bonsai 2 2B `model.mojo`, with "opencl" changed to "vulkan", runs on our
 backend. It matches the MLX reference token for token and decodes at 74–76 tok/s, against 80 for
 `bonsai_vk.c`. The phone downloads the checkpoint from Hugging Face itself, and
@@ -548,8 +555,8 @@ qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLS
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
                    as SPIR-V; bonsai_vk.c (Vulkan runtime), run.py (see its README)
 max_kernels/       MAX's own kernels from the native target, run on the phone and checked
-android/           Mojo host code on the phone: DeviceContext programs for Android (vecadd, the port's
-                   Bonsai model.mojo), build.py (MAX's runtime for Android, programs; see its README)
+android/           Mojo host code on the phone: DeviceContext programs for Android (vecadd, Llama, Qwen3,
+                   the port's Bonsai model.mojo), build.py (MAX's runtime for Android, programs; see its README)
 driver/            MAX driver plugin for Vulkan (the HAL's M_driver_* interface): libM_driver_vulkan.so
                    on the phone, its Vulkan executor and an on-phone test (see its README)
 remote/            MAX's remote device: the driver plugin on the Mac over TCP, vk_server on the phone, tests

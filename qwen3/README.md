@@ -53,3 +53,32 @@ python3 qwen3/build_kernels.py
 python qwen3/run.py --model OUT --hf CKPT                     # validate
 python qwen3/run.py --model OUT --hf CKPT --prompt 'Explain in two sentences why the sky is blue.'
 ```
+
+## In Mojo, through DeviceContext
+
+[`model.mojo`](model.mojo) is `qwen3_vk.c`'s forward pass as MAX `DeviceContext` launches of the same
+kernels, and [`qwen3.mojo`](qwen3.mojo) the program around it. It takes `qwen3_vk`'s arguments and
+checks against the same reference (`QWEN3_REF`). Built for Android (`android/build.py qwen3`), it runs
+through the Vulkan driver plugin (`driver/`). On a Galaxy S26 Ultra (stock driver):
+
+```
+weights: 441 tensors, 2.186006464 GB, context 128
+check 0 : token 785 reference 785  max abs 0.006471  rel L2 0.00078932 OK
+  ...
+check 15 : token 59108 reference 59108  max abs 0.008191  rel L2 0.00055052 OK
+decode: 15 tokens, 39.8 ms/token (25.1 tokens/s)
+validation: 16 steps, max abs logit error 0.008191 , all greedy ids match
+```
+
+It is as fast as `qwen3_vk` and its logits are the same to 0.0082. `run.py --runner mojo --weights
+model` runs it.
+
+The weights came from Hugging Face to the phone directly. [`convert.cpp`](convert.cpp) is
+`export.py`'s export in C++ and writes `weights.bin` and `manifest.txt` from the downloaded
+checkpoint (SHA-256 `f43270cb…`) in seconds, byte for byte `export.py`'s. The exception is the 64 KB
+RoPE table, which MLX computes and the Mac supplies (`rope.f32`, cut out of an export):
+
+```bash
+adb shell "cd /data/local/tmp/q8; curl -sSL -o model.safetensors https://huggingface.co/prism-ml/Ternary-Bonsai-8B-mlx-2bit/resolve/main/model.safetensors"
+adb shell "cd /data/local/tmp/q8; ./qwen3_convert model.safetensors rope.f32 model"
+```

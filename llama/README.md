@@ -163,6 +163,19 @@ On the 840's Android 16 driver build the fused `p_attention` fails to link ("Fai
 shaders"; one cut-down variant ran out of registers), so `llama_vk` falls back to
 `p_attention_scalar`, one workgroup per token (99 ms instead of 46 for the 16 layers).
 
+### In Mojo, through DeviceContext
+
+[`model.mojo`](model.mojo) is `llama_vk.c`'s decode as MAX `DeviceContext` launches of the same
+kernels, and [`llama.mojo`](llama.mojo) the program around it. It takes `llama_vk`'s arguments and
+prints its lines, so `run.py --runner mojo` checks it against PyTorch. Built for Android
+(`android/build.py llama`), it runs through the Vulkan driver plugin (`driver/`). On the S26 Ultra,
+both runs below match PyTorch for all 48 tokens:
+- fp16: 24.7 tok/s (40.6 ms a token), logits within 7.3e-5;
+- `--quant q4`: 78.1 tok/s (12.8 ms), logits within 6.7e-5.
+
+That is as fast as `llama_vk`, which records a token's dispatches once: decode is bound by the
+weights' bytes.
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the

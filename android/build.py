@@ -4,6 +4,8 @@ run on the Adreno through driver/libM_driver_vulkan.so.
 
   python3 android/build.py runtime     # MAX's runtime for Android (Bazel, --config=android-arm64)
   python3 android/build.py vecadd      # build/android/vecadd/: android/vecadd.mojo
+  python3 android/build.py llama       # build/android/llama/: llama/llama.mojo (Llama 3.2 1B)
+  python3 android/build.py qwen3       # build/android/qwen3/: qwen3/qwen3.mojo (ternary Qwen3-8B), qwen3_convert
   python3 android/build.py bonsai      # build/android/bonsai/: the Android port's Bonsai model.mojo,
                                        # and bonsai_convert for its weights
 
@@ -111,7 +113,9 @@ def stage(out):
 
 def link(out, exe, sources, defines=(), includes=()):
     cxx = NDK_BIN / "aarch64-linux-android33-clang++"
-    args = [cxx, "-O2", "-std=c++17", *[f"-D{d}" for d in defines], *[f"-I{i}" for i in includes], *sources,
+    compat = BUILD / "bionic_compat.o"  # glibc names the stdlib calls on Linux targets
+    sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-c", "-o", compat, HERE / "bionic_compat.c")
+    args = [cxx, "-O2", "-std=c++17", *[f"-D{d}" for d in defines], *[f"-I{i}" for i in includes], *sources, compat,
             f"-L{BUILD / 'runtime'}", "-lKGENCompilerRTShared", "-Wl,-rpath,$ORIGIN", "-ldl", "-o", out / exe]
     sh(*args)
     stage(out)
@@ -122,6 +126,26 @@ def vecadd():
     out.mkdir(parents=True, exist_ok=True)
     mojo_object(HERE / "vecadd.mojo", out / "vecadd.o")
     link(out, "vecadd", [out / "vecadd.o"])
+
+
+def llama():
+    """llama/llama.mojo: llama/model.mojo's forward pass, the kernels of llama/kernels."""
+    out = BUILD / "llama"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "llama/llama.mojo", out / "llama.o", includes=[ROOT / "llama", ROOT / "llama/kernels"])
+    link(out, "llama", [out / "llama.o"])
+
+
+def qwen3():
+    """qwen3/qwen3.mojo: qwen3/model.mojo's forward pass, the Android port's packed kernels and qwen3k; and
+    qwen3_convert (qwen3/convert.cpp), which writes the weights on the phone from the checkpoint."""
+    out = BUILD / "qwen3"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "qwen3/qwen3.mojo", out / "qwen3.o",
+                includes=[ROOT / "bonsai/kernels", ROOT / "qwen3/kernels", ROOT / "qwen3"])
+    link(out, "qwen3", [out / "qwen3.o"])
+    sh(NDK_BIN / "aarch64-linux-android33-clang++", "-std=c++17", "-O2", "-static-libstdc++", "-o",
+       out / "qwen3_convert", ROOT / "qwen3/convert.cpp")
 
 
 def bonsai():
@@ -146,7 +170,7 @@ def bonsai():
 
 
 def main():
-    steps = {"runtime": runtime, "vecadd": vecadd, "bonsai": bonsai}
+    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
         if name not in steps:

@@ -11,66 +11,18 @@
 // constants; then a RoPE table for `capacity` positions. The reference logits (MLX) stay on the
 // Mac. All 604 weight tensors come out byte for byte as prepare.py writes them; the RoPE table,
 // computed with libm instead of numpy, is within 1 ulp.
-#include "../driver/json.h"
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "../runner/safetensors.h"
 
 #include <cmath>
-#include <cstdio>
-#include <map>
-#include <stdexcept>
-#include <string>
-#include <vector>
 
 namespace {
-
-struct Tensor {
-  std::string dtype;
-  std::vector<int64_t> shape;
-  const char *data = nullptr;
-  int64_t count() const {
-    int64_t n = 1;
-    for (int64_t d : shape)
-      n *= d;
-    return n;
-  }
-};
 
 std::map<std::string, Tensor> tensors;
 FILE *out;
 int written;
 
-float halfToFloat(uint16_t h) {
-  uint32_t sign = (h & 0x8000u) << 16, exp = (h >> 10) & 0x1f, mant = h & 0x3ff, bits;
-  if (exp == 0) {
-    if (!mant) {
-      bits = sign;
-    } else {  // subnormal: normalize
-      exp = 1;
-      while (!(mant & 0x400))
-        mant <<= 1, --exp;
-      bits = sign | ((exp + 112) << 23) | ((mant & 0x3ff) << 13);
-    }
-  } else if (exp == 31) {
-    bits = sign | 0x7f800000u | (mant << 13);
-  } else {
-    bits = sign | ((exp + 112) << 23) | (mant << 13);
-  }
-  float f;
-  memcpy(&f, &bits, 4);
-  return f;
-}
-
 const Tensor &get(const std::string &name, const char *dtype, std::vector<int64_t> shape) {
-  auto it = tensors.find("language_model.model." + name);
-  if (it == tensors.end())
-    throw std::runtime_error("missing tensor " + name);
-  if (it->second.dtype != dtype || it->second.shape != shape)
-    throw std::runtime_error("unexpected dtype or shape: " + name);
-  return it->second;
+  return tensorOf(tensors, "language_model.model." + name, dtype, shape);
 }
 
 void emit(const void *data, uint64_t bytes) {
@@ -84,13 +36,8 @@ void emitF32(const std::string &name, int64_t n) {
   emit(t.data, n * 4);
 }
 
-// `rows` x `cols` of 4-byte elements, transposed.
 void emitTransposed(const char *data, int64_t rows, int64_t cols) {
-  std::vector<uint32_t> t(rows * cols);
-  const uint32_t *src = reinterpret_cast<const uint32_t *>(data);
-  for (int64_t r = 0; r < rows; ++r)
-    for (int64_t c = 0; c < cols; ++c)
-      t[c * rows + r] = src[r * cols + c];
+  std::vector<uint32_t> t = transposed(data, rows, cols);
   emit(t.data(), t.size() * 4);
 }
 
@@ -124,32 +71,7 @@ int main(int argc, char **argv) {
   try {
     if (capacity < 1 || capacity > 8192)
       throw std::runtime_error("capacity must be 1-8192");
-    int fd = open(argv[1], O_RDONLY);
-    struct stat st;
-    if (fd < 0 || fstat(fd, &st))
-      throw std::runtime_error(std::string("cannot open ") + argv[1]);
-    const char *file = static_cast<const char *>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
-    if (file == MAP_FAILED)
-      throw std::runtime_error("cannot map the checkpoint");
-    uint64_t headerBytes;
-    memcpy(&headerBytes, file, 8);
-    if (headerBytes + 8 > static_cast<uint64_t>(st.st_size))
-      throw std::runtime_error("not a safetensors file");
-    Json header;
-    JsonParser parser{file + 8, file + 8 + headerBytes};
-    if (!parser.parse(header) || header.kind != Json::Object)
-      throw std::runtime_error("malformed safetensors header");
-    const char *data = file + 8 + headerBytes;
-    for (const auto &[name, value] : header.fields) {
-      if (name == "__metadata__")
-        continue;
-      Tensor t;
-      t.dtype = value.get("dtype")->text;
-      for (const Json &d : value.get("shape")->items)
-        t.shape.push_back(static_cast<int64_t>(d.number));
-      t.data = data + static_cast<int64_t>(value.get("data_offsets")->items[0].number);
-      tensors[name] = t;
-    }
+    tensors = loadSafetensors(argv[1]);
 
     out = fopen(argv[2], "wb");
     if (!out)

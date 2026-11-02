@@ -3,6 +3,7 @@
   PY=../iree-adreno-genai-tuner/.venv-iree312/bin/python      # torch + transformers (Part 1)
   $PY llama/run.py --model <HF snapshot dir> --prompt "..."     # Llama-3.2-1B-Instruct
   $PY llama/run.py --model random                               # same shapes, random weights (no download)
+  $PY llama/run.py --model <snapshot> --runner mojo             # llama.mojo's forward pass (DeviceContext)
 
 1. export: fp16 weights for llama_vk (q/k/v and gate/up fused; the tied embedding split into 4 chunks
    of <= 128 MB, the stock driver's largest storage binding) and RoPE cos/sin tables from transformers'
@@ -197,9 +198,15 @@ def reference(model, ids, max_new, eos):
     return toks, first
 
 
-def build_and_push(model_dir, backend, prefill=False):
-    sh(sys.executable, HERE / "build_kernels.py", "--flavor", backend, *(["prefill840"] if prefill else []))
-    sh(CC, "-O2", "-o", BUILD / "llama_vk", HERE / "llama_vk.c", "-ldl")
+def build_and_push(model_dir, backend, prefill=False, runner="c"):
+    if runner == "mojo":  # llama.mojo with MAX's runtime and the driver plugin (android/build.py)
+        sh(sys.executable, ROOT / "android/build.py", "llama")
+        sh("adb", "shell", f"mkdir -p {DEV}/mojo")
+        sh("adb", "push", *sorted(p for p in (ROOT / "build/android/llama").iterdir() if p.suffix != ".o"),
+           f"{DEV}/mojo/")
+    else:
+        sh(sys.executable, HERE / "build_kernels.py", "--flavor", backend, *(["prefill840"] if prefill else []))
+        sh(CC, "-O2", "-o", BUILD / "llama_vk", HERE / "llama_vk.c", "-ldl")
     remote = f"{DEV}/{model_dir.name}"  # model / model-random: same sizes, so separate directories
     sh("adb", "shell", f"mkdir -p {remote} {DEV}/{backend}")
     for f in ("weights.bin", "manifest.txt"):  # 2.5 GB: push only when the phone's copy differs in size
@@ -207,6 +214,8 @@ def build_and_push(model_dir, backend, prefill=False):
         if size != str((model_dir / f).stat().st_size):
             print(f"push {f} ({(model_dir / f).stat().st_size / 1e9:.2f} GB) ...", flush=True)
             sh("adb", "push", model_dir / f, f"{remote}/")
+    if runner == "mojo":
+        return
     sh("adb", "push", *sorted((BUILD / backend).glob("*.spv")), f"{DEV}/{backend}/")
     sh("adb", "push", BUILD / "llama_vk", f"{DEV}/")
     if prefill:
@@ -228,6 +237,9 @@ def main():
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--backend", default="stock", choices=["stock", "turnip", "native"],
                     help="native: kernels from a source-built Mojo's Vulkan SPIR-V target, on Mesa Turnip")
+    ap.add_argument("--runner", default="c", choices=["c", "mojo"],
+                    help="mojo: llama/llama.mojo, the forward pass in Mojo through MAX's DeviceContext and the "
+                         "Vulkan driver plugin (the stock driver; no --prefill)")
     ap.add_argument("--reexport", action="store_true")
     ap.add_argument("--quant", choices=["fp16", "q4"], default="fp16",
                     help="q4: int4 projections and lm_head (groups of 64, fp16 scales); embedding fp16")
@@ -259,13 +271,17 @@ def main():
     ref, ref_logits = reference(model, ids, a.max_new, eos)
     print(f"reference (PyTorch fp32 on the Mac CPU): {len(ref)} tokens in {time.time() - t1:.1f} s")
 
-    build_and_push(model_dir, a.backend, a.prefill)
+    if a.runner == "mojo" and a.prefill:
+        sys.exit("--runner mojo: decode only, without --prefill")
+    build_and_push(model_dir, a.backend, a.prefill, a.runner)
     env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if a.backend in ("turnip", "native") else ""
     if a.prefill:
         env += f"LLAMA_PREFILL={DEV}/prefill840 " + ("LLAMA_PROFILE=1 " if os.environ.get("LLAMA_PROFILE") else "")
+    runner = (f"MODULAR_DRIVER_PLUGINS=vulkan@{DEV}/mojo/libM_driver_vulkan.so mojo/llama {model_dir.name}"
+              if a.runner == "mojo" else f"./llama_vk {model_dir.name} {a.backend}")
     cmd = (f"cd {DEV}; {env}LLAMA_EOS={','.join(map(str, eos))} LLAMA_LOGITS={DEV}/logits.bin "
-           f"./llama_vk {model_dir.name} {a.backend} {a.max_new} {' '.join(map(str, ids))}")
-    print(f"phone ({a.backend}):", flush=True)
+           f"{runner} {a.max_new} {' '.join(map(str, ids))}")
+    print(f"phone ({'Mojo DeviceContext' if a.runner == 'mojo' else a.backend}):", flush=True)
     proc = subprocess.Popen(["adb", "shell", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     got, text = [], ""
     for line in proc.stdout:
