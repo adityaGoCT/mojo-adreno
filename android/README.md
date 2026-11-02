@@ -26,9 +26,10 @@ Each step does the following:
 - **runtime:** builds `//Mojo:CompilerRT` of the modular fork (`MOJO_SRC`, branch
   `adreno-spirv-target`) with Bazel's `--config=android-arm64` and the NDK (`ANDROID_NDK`). It adds
   NDK libc++ and `driver/libM_driver_vulkan.so`.
-- **packages:** builds MAX's package with the HAL `DeviceContext` from `max/mojo/max`, staged as
-  `//max/mojo/max/_driver/max_license:max_srcs_hal` stages it. The host compiler in `bazel-bin`
-  precompiles it, not Bazel: the Android build's change to `Support/Log.h` would make Bazel
+- **packages:** precompiles the fork's `std` and MAX's package with the HAL `DeviceContext` from
+  source, together in about 20 s, whenever a source is newer. The HAL package is `max/mojo/max`,
+  staged as `//max/mojo/max/_driver/max_license:max_srcs_hal` stages it. The host compiler in
+  `bazel-bin` does this, not Bazel: the Android build's change to `Support/Log.h` would make Bazel
   rebuild that compiler.
 - **programs:** compiles each program with `mojo build --emit object --target-triple
   aarch64-unknown-linux-android33 --target-accelerator adreno840` and links it with the NDK. The
@@ -132,9 +133,11 @@ adb shell "cd /data/local/tmp/q8; ./qwen3_convert model.safetensors rope.f32 mod
 adb shell "cd /data/local/tmp/q8; QWEN3_REF=reference.f32 MODULAR_DRIVER_PLUGINS=vulkan@/data/local/tmp/q8/mojo/libM_driver_vulkan.so mojo/qwen3 model 16 \$(cat prompt.txt)"
 ```
 
-Mojo's stdlib treats an Android target as Linux and calls three glibc names, `__errno_location`,
-`__xstat` and `__lxstat`. Android's Bionic has them under other names, so `android/bionic_compat.c`
-provides them for every program.
+Mojo's stdlib took an Android target for glibc Linux and called three glibc-only names:
+`__errno_location`, `__xstat` and `__lxstat`. In the fork, `CompilationTarget.is_android()` reads
+the target triple's environment, and on Android the stdlib calls Bionic's `__errno`, `stat` and
+`lstat` instead. On the phone, `os.path.isdir`, `os.path.islink` and a failed `open`'s errno message
+all work.
 
 ### Bonsai 2 2B through the port's `model.mojo`
 

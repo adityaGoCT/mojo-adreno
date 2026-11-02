@@ -68,25 +68,30 @@ def runtime():
 
 
 def packages():
-    """std, and MAX's package with the HAL DeviceContext, for the host compiler: max/mojo/max with
-    device_context_hal/_dcc_overlay.mojo as max/gpu/host/_overlay.mojo (as
-    //max/mojo/max/_driver/max_license:max_srcs_hal stages it), precompiled by the host compiler
-    of bazel-bin, without Bazel: the Android build's changes would make Bazel rebuild it."""
+    """std, and MAX's package with the HAL DeviceContext, precompiled from the fork's sources by the host
+    compiler of bazel-bin (not by Bazel: the Android build's change to Support/Log.h would make Bazel
+    rebuild that compiler). The HAL package is max/mojo/max with device_context_hal/_dcc_overlay.mojo as
+    max/gpu/host/_overlay.mojo, as //max/mojo/max/_driver/max_license:max_srcs_hal stages it. Both are
+    rebuilt when a source is newer."""
     out = BUILD / "packages"
-    if (out / "max.mojoc").exists():
-        return out
     out.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(MOJO_SRC / "bazel-bin/Mojo/stdlib/std/std.mojoc", out / "std.mojoc")
+    std_src, max_src = MOJO_SRC / "Mojo/stdlib/std", MOJO_SRC / "max/mojo/max"
+    newest = max(f.stat().st_mtime for d in (std_src, max_src) for f in d.rglob("*.mojo"))
+    if (out / "max.mojoc").exists() and (out / "max.mojoc").stat().st_mtime > newest:
+        return out
+    mojo = MOJO_SRC / "bazel-bin/Mojo/tools/mojo/mojo"
+    env = dict(os.environ, MODULAR_MAX_PACKAGE_ROOT=str(ROOT / ".venv-mojo/lib/python3.12/site-packages/modular"))
+    for pkg in ("std.mojoc", "max.mojoc"):
+        (out / pkg).unlink(missing_ok=True)
+    sh(mojo, "precompile", std_src, "-o", out / "std.mojoc", env=env)
     stage = BUILD / "hal_max/max"
     shutil.rmtree(stage.parent, ignore_errors=True)
-    src = MOJO_SRC / "max/mojo/max"
-    for f in src.rglob("*.mojo"):
-        (stage / f.relative_to(src)).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, stage / f.relative_to(src))
-    shutil.copy2(src / "_driver/max_license/device_context_hal/_dcc_overlay.mojo", stage / "gpu/host/_overlay.mojo")
+    for f in max_src.rglob("*.mojo"):
+        (stage / f.relative_to(max_src)).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, stage / f.relative_to(max_src))
+    shutil.copy2(max_src / "_driver/max_license/device_context_hal/_dcc_overlay.mojo", stage / "gpu/host/_overlay.mojo")
     (stage / "gpu/host/_legacy/device_graph.mojo").unlink()
-    sh(MOJO_SRC / "bazel-bin/Mojo/tools/mojo/mojo", "precompile", "-I", out, stage, "-o", out / "max.mojoc",
-       env=dict(os.environ, MODULAR_MAX_PACKAGE_ROOT=str(ROOT / ".venv-mojo/lib/python3.12/site-packages/modular")))
+    sh(mojo, "precompile", "-I", out, stage, "-o", out / "max.mojoc", env=env)
     return out
 
 
@@ -113,9 +118,7 @@ def stage(out):
 
 def link(out, exe, sources, defines=(), includes=()):
     cxx = NDK_BIN / "aarch64-linux-android33-clang++"
-    compat = BUILD / "bionic_compat.o"  # glibc names the stdlib calls on Linux targets
-    sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-c", "-o", compat, HERE / "bionic_compat.c")
-    args = [cxx, "-O2", "-std=c++17", *[f"-D{d}" for d in defines], *[f"-I{i}" for i in includes], *sources, compat,
+    args = [cxx, "-O2", "-std=c++17", *[f"-D{d}" for d in defines], *[f"-I{i}" for i in includes], *sources,
             f"-L{BUILD / 'runtime'}", "-lKGENCompilerRTShared", "-Wl,-rpath,$ORIGIN", "-ldl", "-o", out / exe]
     sh(*args)
     stage(out)
