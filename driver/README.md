@@ -40,7 +40,9 @@ block size.
 
 **Batching.** Launches, copies and fills are recorded into command buffers of 64 commands
 (`VK_SUBMIT_EVERY`), each command after a barrier on the ones before it. Nothing waits for the GPU
-until the host reads or writes memory, or synchronizes. On an Adreno 840 (Galaxy S26 Ultra, stock
+until the host reads or writes memory, or synchronizes. A launch of 2¹⁸ threads or more is submitted
+at once. 64 of a long prefill's launches in one submission outlast the driver's GPU watchdog, and the
+device is lost (`VK_ERROR_DEVICE_LOST`). Decode's launches, under 100K threads, stay batched. On an Adreno 840 (Galaxy S26 Ultra, stock
 driver), 721 launches in a row, as in one Bonsai token, take:
 
 | Commands a submission | Each launch | 721 launches |

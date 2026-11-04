@@ -1,12 +1,13 @@
 # Qwen3-8B decode kernels for qwen3_vk: what Qwen3 needs beyond the ternary projections, which are
 # bonsai/kernels/kernels.mojo's packed_linear, packed_reduce and packed_head, unchanged. Hidden 4096,
 # 32 query and 8 KV heads of 128. Projection inputs are fp16 pairs in 32-bit words (as the Hadamard
-# kernel leaves them for Bonsai): the kernels that feed a projection pack their output so. The bodies of
-# qk_norm_rope, attn_scores and attn_values are inline helpers (_qk_norm_rope, ...) that qwen3p.mojo's
-# prefill row kernels share: a kernel that calls another kernel does not compile for the Vulkan target.
+# kernel leaves them for Bonsai): the kernels that feed a projection pack their output so. The body
+# of qk_norm_rope is an inline helper (_qk_norm_rope) that qwen3p.mojo's prefill row kernel shares: a
+# kernel that calls another kernel does not compile for the Vulkan target.
 from std.math import exp, rsqrt
-from std.memory import bitcast
-from max.gpu import global_idx, thread_idx
+from std.memory import bitcast, stack_allocation
+from max.gpu import barrier, block_idx, global_idx, thread_idx
+from max.gpu.memory import AddressSpace
 from max.gpu.primitives.warp import shuffle_xor
 
 comptime F32 = Pointer[Float32, MutAnyOrigin]
@@ -94,42 +95,69 @@ def _qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, posi
 
 
 def attn_scores(q: F32, kc: F32, y: F32, position: Int32, capacity: Int32):
-    _attn_scores(q, kc, y, position, capacity)
-
-
-@always_inline
-def _attn_scores(q: F32, kc: F32, y: F32, position: Int32, capacity: Int32):
+    """Scaled q.k for positions 0 .. position, scores of head h at y[h * capacity + t]: a thread per KV head g
+    and position t computes the four query heads 4g .. 4g + 3 that share g, so each cached K row is read
+    once, four floats a load. Launched with 32 * capacity threads; 8 * (position + 1) work."""
     var i = global_idx.x
     var length = Int(position) + 1
-    if i < 32 * length:
-        var h = i // length
+    if i < 8 * length:
+        var g = i // length
         var t = i % length
-        var value: Float32 = 0
-        for d in range(128):
-            value += q[unsafe_offset=h * 128 + d] * kc[unsafe_offset=t * 1024 + (h // 4) * 128 + d]
-        y[unsafe_offset=h * Int(capacity) + t] = value * Float32(0.08838834764831845)
+        var k = kc.unsafe_offset(t * 1024 + g * 128)
+        var qg = q.unsafe_offset(g * 512)
+        var a0 = SIMD[DType.float32, 4](0)
+        var a1 = SIMD[DType.float32, 4](0)
+        var a2 = SIMD[DType.float32, 4](0)
+        var a3 = SIMD[DType.float32, 4](0)
+        for d in range(0, 128, 4):
+            var kv = k.unsafe_load[width=4](d)
+            a0 += qg.unsafe_load[width=4](d) * kv
+            a1 += qg.unsafe_load[width=4](128 + d) * kv
+            a2 += qg.unsafe_load[width=4](256 + d) * kv
+            a3 += qg.unsafe_load[width=4](384 + d) * kv
+        var s = Float32(0.08838834764831845)  # 1 / sqrt(128)
+        var row = y.unsafe_offset(4 * g * Int(capacity) + t)
+        row[unsafe_offset=0] = a0.reduce_add() * s
+        row[unsafe_offset=Int(capacity)] = a1.reduce_add() * s
+        row[unsafe_offset=2 * Int(capacity)] = a2.reduce_add() * s
+        row[unsafe_offset=3 * Int(capacity)] = a3.reduce_add() * s
 
 
 def attn_values(scores: F32, vc: F32, y: F32, position: Int32, capacity: Int32):
-    _attn_values(scores, vc, y, position, capacity)
-
-
-@always_inline
-def _attn_values(scores: F32, vc: F32, y: F32, position: Int32, capacity: Int32):
-    var i = global_idx.x
-    if i < 4096:
-        var h = i // 128
-        var d = i % 128
-        var highest: Float32 = -3.402823e38
-        for t in range(Int(position) + 1):
-            highest = max(highest, scores[unsafe_offset=h * Int(capacity) + t])
-        var total: Float32 = 0
-        var value: Float32 = 0
-        for t in range(Int(position) + 1):
-            var p = exp(scores[unsafe_offset=h * Int(capacity) + t] - highest)
+    """softmax(scores) V for one query head's 64 dimensions a workgroup, two workgroups a head. The max is a
+    shared-memory reduction; then the probabilities of each 64 positions are computed once, a lane a
+    position, into shared memory, and every lane sums them against its dimension of V. Shared memory and
+    barriers, not shuffles, after loops whose lanes diverge (see llama/kernels/attention.mojo)."""
+    var sp = stack_allocation[64, Float32, address_space=AddressSpace.SHARED]()
+    var lane = Int(thread_idx.x)
+    var h = Int(block_idx.x) // 2
+    var d = (Int(block_idx.x) % 2) * 64 + lane
+    var n = Int(position) + 1
+    var s = scores.unsafe_offset(h * Int(capacity))
+    var highest: Float32 = -3.402823e38
+    for t0 in range(0, n, 64):
+        if t0 + lane < n:
+            highest = max(highest, s[unsafe_offset=t0 + lane])
+    sp[lane] = highest
+    barrier()
+    comptime for stage in range(6):
+        if lane < 32 >> stage:
+            sp[lane] = max(sp[lane], sp[lane + (32 >> stage)])
+        barrier()
+    highest = sp[0]
+    barrier()
+    var v = vc.unsafe_offset((h // 4) * 128 + d)
+    var total: Float32 = 0
+    var value: Float32 = 0
+    for t0 in range(0, n, 64):
+        sp[lane] = exp(s[unsafe_offset=t0 + lane] - highest) if t0 + lane < n else 0
+        barrier()
+        for k in range(min(64, n - t0)):
+            var p = sp[k]
             total += p
-            value += p * vc[unsafe_offset=t * 1024 + (h // 4) * 128 + d]
-        y[unsafe_offset=i] = value / total
+            value += p * v[unsafe_offset=(t0 + k) * 1024]
+        barrier()
+    y[unsafe_offset=h * 128 + d] = value / total
 
 
 def add(x: F32, y: F32, n: Int32):

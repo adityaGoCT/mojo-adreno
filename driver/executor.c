@@ -4,9 +4,11 @@
 // Launches, device-side copies and fills are recorded into command buffers of `submit_every`
 // commands each, every command after a barrier on the ones before it, and a command buffer is
 // submitted once full: nothing waits for the GPU until the host needs memory (WRITE, READ, FREE, a
-// fill Vulkan cannot do) or at SYNC. The remote device submits each command alone: one submission
-// of many slow kernels can outlast the GPU driver's timeout and lose the device. Buffers are
-// host-visible and coherent, so host access is memcpy.
+// fill Vulkan cannot do) or at SYNC. A launch of BIG_LAUNCH threads or more ends its command buffer
+// and is submitted at once: 64 large prefill launches together outlast the driver's watchdog and
+// lose the device, while decode's launches (under 100K threads) stay batched. The remote device
+// submits each command alone: one submission of many slow kernels can outlast the GPU driver's
+// timeout and lose the device. Buffers are host-visible and coherent, so host access is memcpy.
 //
 // Pipelines require 64-lane subgroups where the driver lets them (a Mojo warp is 64 lanes, and
 // cooperative matrices on the Adreno 840 need it), and the device enables what LLVM's SPIR-V may
@@ -52,6 +54,7 @@ VK_FUNCS(DECL)
 #define MAX_PENDING 4096
 #define MAX_SUBMITS 256
 #define PARAMS_ARENA (1 << 20)
+#define BIG_LAUNCH (1 << 18)
 
 static VkDevice dev;
 static VkQueue queue;
@@ -394,6 +397,8 @@ static void launch(const char* p, uint32_t n) {
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
   vkCmdDispatch(cmd, l->groups[0], l->groups[1], l->groups[2]);
   end_command();
+  uint64_t threads = (uint64_t)l->groups[0] * l->groups[1] * l->groups[2] * l->block[0] * l->block[1] * l->block[2];
+  if (threads >= BIG_LAUNCH) submit();
   if (profile > 1) flush();  // VK_SERVER_PROFILE=2: each launch on its own, to time it
 }
 

@@ -5,8 +5,8 @@
 #   MODULAR_DRIVER_PLUGINS=vulkan@<dir>/libM_driver_vulkan.so qwen3 <model dir> <max new> <prompt token ids...>
 #     QWEN3_REF=<reference.f32>  compare all logits after the prompt and after each token with the
 #                                exporter's MLX reference; runs max_new steps even past the stop tokens
-#     QWEN3_PREFILL=<anything>   the whole prompt at once (Qwen3.prefill: the projections on cooperative
-#                                matrices); otherwise one token at a time through the decode path
+#     QWEN3_PREFILL=<anything>   the whole prompt at once (Qwen3.prefill: the projections and attention on
+#                                cooperative matrices); otherwise one token at a time through the decode path
 #
 # Then up to <max new> tokens greedily (argmax on the CPU) until <|im_end|> or <|endoftext|>. Output:
 # "tok <id> <ms>" lines.

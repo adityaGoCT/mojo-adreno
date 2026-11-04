@@ -3,8 +3,8 @@
 # (bonsai/kernels/kernels.mojo, unchanged), the rest qwen3/kernels/qwen3k.mojo. Weights from
 # qwen3/export.py or qwen3/convert.cpp (manifest.txt, weights.bin); the embedding stays in host memory
 # and the CPU dequantizes one row per token. fp32 activations and KV cache. prefill() runs a whole
-# prompt at once: the projections on cooperative matrices (bonsai/kernels/prefill.mojo's p_gemm_t2),
-# the rest qwen3/kernels/qwen3p.mojo's row kernels.
+# prompt at once: the projections and attention on cooperative matrices (bonsai/kernels/prefill.mojo's
+# p_gemm_t2; qwen3p.p_scores_mma, p_softmax, p_values_mma), the rest qwen3/kernels/qwen3p.mojo's row kernels.
 from std.collections import Dict
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
@@ -91,6 +91,7 @@ struct Qwen3(Movable):
         for _ in range(L):
             self.kc.append(ctx.enqueue_create_buffer[DType.float32](1024 * cap))
             self.vc.append(ctx.enqueue_create_buffer[DType.float32](1024 * cap))
+            ctx.enqueue_memset(self.vc[len(self.vc) - 1], Float32(0))  # prefill's P V reads past the prompt
 
         var weights = open(dir + "/weights.bin", "r")
         var total = 0
@@ -207,7 +208,6 @@ struct Qwen3(Movable):
         var yr = ctx.enqueue_create_buffer[DType.float32](rows * D)
         var gur = ctx.enqueue_create_buffer[DType.float32](rows * 2 * F)
         var actr = ctx.enqueue_create_buffer[DType.float32](rows * F)
-        ctx.enqueue_memset(attr, Float32(0))  # the padding rows' attention, which nothing writes
         var c = Int32(count)
         var cap = Int32(self.capacity)
         var rope = self.floats["rope"]
@@ -219,10 +219,11 @@ struct Qwen3(Movable):
             ctx.enqueue_function[qwen3p.p_qk_norm_rope](qkvr, self.floats[n + "q_norm"], self.floats[n + "k_norm"],
                                                         rope, self.kc[l], self.vc[l], c, grid_dim=Dim(48, rows),
                                                         block_dim=64)
-            ctx.enqueue_function[qwen3p.p_attn_scores](qkvr, self.kc[l], scores, c, cap,
-                                                       grid_dim=Dim(groups(32 * self.capacity, 64), rows), block_dim=64)
-            ctx.enqueue_function[qwen3p.p_attn_values](scores, self.vc[l], attr, c, cap, grid_dim=Dim(D // 64, rows),
-                                                       block_dim=64)
+            ctx.enqueue_function[qwen3p.p_scores_mma](qkvr, self.kc[l], scores, cap, grid_dim=Dim(rows // 64, 32),
+                                                      block_dim=64)
+            ctx.enqueue_function[qwen3p.p_softmax](scores, c, cap, grid_dim=Dim(32, rows), block_dim=64)
+            ctx.enqueue_function[qwen3p.p_values_mma](scores, self.vc[l], attr, cap, grid_dim=Dim(rows // 64, 64),
+                                                      block_dim=64)
             self.pproject(n + "o", attr, yr, D, D, rows)
             ctx.enqueue_function[qwen3p.p_add](xr, yr, grid_dim=Dim(D // 64, rows), block_dim=64)
             ctx.enqueue_function[qwen3p.p_rmsnorm](xr, self.floats[n + "post_norm"], xnr, grid_dim=Dim(1, rows),

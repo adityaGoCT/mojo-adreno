@@ -79,11 +79,12 @@ model` runs it.
 - **Projections:** Bonsai's `p_gemm_t2` (`bonsai/kernels/prefill.mojo`), which multiplies fp32 rows
   by the packed ternary weights on cooperative matrices. `export.py` already writes Qwen3's weights
   in its layout, so it serves q/k/v, o, gate/up and down unchanged.
-- **The rest:** [`kernels/qwen3p.mojo`](kernels/qwen3p.mojo), whose row kernels run every prompt row
-  at once:
+- **The rest:** [`kernels/qwen3p.mojo`](kernels/qwen3p.mojo), whose kernels run every prompt row
+  at once, row r at position r:
   - RMS norm, SwiGLU and the residual add in fp32;
-  - q/k norm with RoPE into the KV cache, and the attention scores and values, sharing the bodies of
-    `qwen3k`'s decode kernels, with row r at position r.
+  - q/k norm with RoPE into the KV cache, sharing the body of `qwen3k`'s decode kernel;
+  - attention on the matrix units: `p_scores_mma` (Q Kᵀ for 64 rows and 64 cached positions a step,
+    K read straight from the cache), `p_softmax` (in place), and `p_values_mma` (P V).
 - **Embedding and head:** the embedding rows are dequantized on the CPU, as for decode, and the last
   row's logits come from the decode head.
 
@@ -99,9 +100,62 @@ fp32 inputs instead of fp16 pairs.
 The matrix kernel works on 128-row tiles, so any prompt of up to 128 tokens (the export's context)
 costs about 1 s, 1.8 TFLOP at about 1.8 TFLOP/s. A 64-row tile would halve that for short prompts.
 
+#### A 1000-token prompt
+
+`model1024` is the same weights with a context of 1024. `qwen3_convert` takes the context from the
+RoPE table, and `rope1024.f32` extends MLX's 128-row table to 1024 positions. Its frequencies and
+YaRN factor are recovered from the 128 rows, which they rebuild to within 4.4e-6. The prompt is the
+first 1000 tokens of this repository's Part 4 post, ending in "Summarize the text above in three
+sentences." Qwen3 answers "The text describes how Mojo was adapted to run on an Adreno GPU by adding
+a Vulkan SPIR-V target, …".
+
+On the S26 Ultra, 1000 prompt tokens, then 24 generated:
+
+| | Prompt (1000 tokens) | Decode, at positions 1000-1023 |
+|---|---|---|
+| Batched prefill (`QWEN3_PREFILL`) | **8.4 s, 119 tokens/s** | **57.5 ms, 17.4 tokens/s** |
+| One token at a time | 53.3 s, 18.8 tokens/s (6.3× slower) | 70 ms (probably throttled after 53 s of work) |
+| `qwen3_vk`, one token at a time | 57.7 s | 79 ms (the same) |
+
+All three give the same 24 tokens. With the 19-token prompt and the same context, decode takes 43 ms
+a token. At position 1000, attention reads 8 MB of fp32 KV cache a layer, and that adds about 14 ms.
+
+The first long prompt took 20.8 s. Three changes brought it to 8.4 s:
+- **The watchdog.** 64 large launches in one submission outlast the driver's GPU watchdog and lose
+  the device (`VK_ERROR_DEVICE_LOST`). The plugin now submits each launch of 2¹⁸ threads or more at
+  once. Decode's launches stay batched.
+- **Scores on the matrix units.** The row kernel computed one score a thread with scalar loads and
+  took 12.2 s of the 20.8. `p_scores_mma` takes 0.44 s.
+- **P V on the matrix units.** `p_softmax` plus `p_values_mma` take 0.94 s, against 1.45 s for the
+  row kernel.
+
+Per kernel over 36 layers, each launch timed alone (`VK_SERVER_PROFILE=2`):
+
+| Kernel | Time |
+|---|---|
+| gate/up projection | 3.57 s |
+| down projection | 1.82 s |
+| q/k/v projection | 0.88 s |
+| P V (`p_values_mma`) | 0.75 s |
+| o projection | 0.62 s |
+| scores (`p_scores_mma`) | 0.44 s |
+| softmax | 0.19 s |
+| the rest (norms, RoPE, SwiGLU, adds) | 0.29 s |
+
+The ternary projections are 6.9 s of it, at about 2 TFLOP/s.
+
+Decode's attention kernels changed too, and `qwen3_vk` uses the same ones, with the same launches:
+- `attn_scores` computes a KV head's four query heads in one thread, so each cached K row is read
+  once, with four-float loads.
+- `attn_values` computes each probability once, into shared memory, instead of in all 128 threads
+  of the head.
+
+Together they take decode at position 1000 from 72 ms to 57.5 ms a token. `qwen3_vk` still matches
+MLX on all 16 steps.
+
 A kernel that calls another kernel does not compile for the Vulkan target: the kernel ABI pass
-rewrites both into entry points. So `qk_norm_rope`, `attn_scores` and `attn_values` keep their
-bodies in inline helpers, and the decode kernels and the prefill row kernels both call those.
+rewrites both into entry points. So `qk_norm_rope` keeps its body in an inline helper, and the
+decode kernel and the prefill row kernel both call it.
 
 The weights came from Hugging Face to the phone directly. [`convert.cpp`](convert.cpp) is
 `export.py`'s export in C++ and writes `weights.bin` and `manifest.txt` from the downloaded

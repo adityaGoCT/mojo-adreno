@@ -110,13 +110,32 @@ On the Galaxy S26 Ultra, with every model's weights downloaded and converted on 
 | Qwen3-8B, ternary | 25.1 tok/s, 39.8 ms | 25 tok/s, 40 ms | 16 of 16 tokens as MLX; max abs 0.0082 |
 
 Ternary Qwen3-8B now has a batched prefill too, written in Mojo (`Qwen3.prefill`, `QWEN3_PREFILL`).
-It runs Bonsai's ternary matrix kernel on cooperative matrices and `qwen3/kernels/qwen3p.mojo`'s row
-kernels. A 95-token prompt takes 1.0 s instead of 3.7 s one token at a time, and every token matches
-MLX.
+It runs Bonsai's ternary matrix kernel on cooperative matrices, attention on the matrix units, and
+`qwen3/kernels/qwen3p.mojo`'s row kernels. A 95-token prompt takes 1.0 s instead of 3.7 s one token
+at a time, and every token matches MLX.
 
 Llama's batched prefill runs from Mojo too (`Llama.prefill`, `LLAMA_PREFILL`). On a Galaxy Z Fold
 (Adreno 840, Android 17), the 431-token prompt takes 0.65 s in fp16 and 0.59 s in 4-bit, against
 `llama_vk`'s 0.62 s. Every token matches PyTorch.
+
+#### Long prompts: prefill and decode rates
+
+On the Galaxy S26 Ultra, each model with the longest prompt its context holds. Each run is warm
+(pipelines cached); decode is the generated tokens after the prompt.
+
+| Model | Prompt | Prefill | Decode after it | Check |
+|---|---|---|---|---|
+| Qwen3-8B, ternary | 1000 tokens (context 1024) | 8.4 s, **119 tokens/s** | 57.5 ms, **17.4 tokens/s** | the same 24 tokens one token at a time and in `qwen3_vk` |
+| Llama 3.2 1B, fp16 | 431 tokens (context 512) | 0.69 s, **622 tokens/s** | 39.7 ms, **25.2 tokens/s** | 80 of 80 tokens as PyTorch; logits within 6.4e-5 |
+| Llama 3.2 1B, 4-bit | 431 tokens | 0.65 s, **664 tokens/s** | 13.1 ms, **76.4 tokens/s** | 80 of 80 tokens as PyTorch (same int4 weights); 7.3e-5 |
+
+- **Qwen3:** one token at a time, the same 1000 tokens take 53.3 s, so batched prefill is 6.3×
+  faster. The ternary projections are 6.9 s of the 8.4 s. At position 1000, decode reads 8 MB of
+  fp32 KV cache a layer, which adds 14 ms to the 43 ms a token after a short prompt. The details are in
+  [`qwen3/README.md`](../qwen3/README.md#a-1000-token-prompt).
+- **Llama:** Llama's kernels hold 512 positions, so the prompt is 431 tokens and 80 are generated.
+  This S26's driver cannot create the fused attention kernel's pipeline, so `Llama.prefill` falls
+  back to `p_attention_scalar`. The Fold's driver builds it, in 39 s.
 
 Decode moves weights from memory, so launching each kernel as it comes costs nothing measurable for
 Llama and Qwen3. The runners record a token's dispatches once and resubmit them, so the batching
