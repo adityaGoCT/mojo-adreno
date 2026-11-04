@@ -34,6 +34,7 @@
     "bonsai",
     "qcom",
     "runtime-path",
+    "mojo-host",
     "lessons",
     "next"
   ],

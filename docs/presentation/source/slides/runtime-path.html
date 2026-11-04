@@ -1,25 +1,25 @@
 <section id="runtime-path" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
-<h2 style="font-size:64px;font-weight:600;line-height:1.15">What porting MAX’s runtime would take</h2>
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Porting MAX’s runtime: where it stands</h2>
 <div style="display:flex;flex-direction:column;gap:20px">
 <div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
 <p style="font-size:56px;font-weight:700;color:#2563C9;width:60px">1</p>
 <div style="flex:1;display:flex;flex-direction:column;gap:4px">
 <h3 style="font-size:30px;font-weight:600">A Vulkan driver plugin</h3>
-<p style="font-size:25px;color:#4A5568;line-height:1.35">Done, as a remote one: MAX’s C interface on the Mac, Vulkan on the phone. Next: all on the phone.</p>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">Done, on the phone: MAX’s C interface on Vulkan, 6.5 µs a launch. The remote device shares its code.</p>
 </div>
 </div>
 <div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
 <p style="font-size:56px;font-weight:700;color:#2563C9;width:60px">2</p>
 <div style="flex:1;display:flex;flex-direction:column;gap:4px">
 <h3 style="font-size:30px;font-weight:600">An Android build of the runtime</h3>
-<p style="font-size:25px;color:#4A5568;line-height:1.35">Cross-compiled for 64-bit ARM Android. The repository has no Android toolchain today.</p>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">Done: --config=android-arm64, from the Android OpenCL port, plus NDK r30 and stdlib fixes.</p>
 </div>
 </div>
 <div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
 <p style="font-size:56px;font-weight:700;color:#2563C9;width:60px">3</p>
 <div style="flex:1;display:flex;flex-direction:column;gap:4px">
 <h3 style="font-size:30px;font-weight:600">Compile on the Mac, run on the phone</h3>
-<p style="font-size:25px;color:#4A5568;line-height:1.35">Ship the compiled model as a .mef file, so the phone never runs the compiler.</p>
+<p style="font-size:25px;color:#4A5568;line-height:1.35">Done for Mojo host code: programs carry their kernels as SPIR-V. Next: MAX graphs as .mef files.</p>
 </div>
 </div>
 <div style="display:flex;gap:28px;align-items:center;background:#FFFFFF;border:1px solid #DDE1E6;border-radius:14px;padding:24px 32px">
@@ -30,6 +30,6 @@
 </div>
 </div>
 </div>
-<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 27 · driver interface: SDK/include/HAL in modular/modular</p>
-<aside>So what would it take to really run MAX on the phone? Four pieces. First, a Vulkan driver plugin. MAX defines a C interface for new devices, about sixty functions covering devices, memory, queues, events and loading kernels. We have one now, as a remote device: it runs on the Mac and forwards everything to the phone, which is how MAX runs our graphs today; moving it onto the phone is the remaining step. Second, the runtime libraries have to be built for Android; today the build has no Android toolchain at all. Third, the phone should not run the compiler. MAX can save a compiled model, so the realistic flow is to compile on the Mac for adreno710 and ship the result. Fourth, every operation a model uses has to compile for this target, run correctly, and then be tuned. For our 25 test graphs, ResNet-18 included, compiling and running correctly are done; speed and tuning are open-ended. Items one and two are weeks of engineering, and the tuning is where Modular’s own vendor-specific kernels will need Adreno-specific versions.</aside>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 27 · driver interface: SDK/include/HAL in modular/modular · plugin: driver/ in mojo-adreno</p>
+<aside>So what does it take to really run MAX on the phone? Four pieces, and three are now done. First, a Vulkan driver plugin. MAX defines a C interface for new devices, about sixty functions covering devices, memory, queues, events and loading kernels. Ours now runs on the phone itself: it implements that interface on Vulkan, batches 64 launches into each submission, and a launch costs 6.5 microseconds; the remote device of the last slides shares its code. Second, the runtime libraries built for Android: the fork now has an Android build configuration, taken from another developer's Android OpenCL port, plus two fixes of ours, one for the newer NDK and one in Mojo's standard library, which called glibc-only functions on Android. Third, compiling on the Mac and running on the phone: Mojo programs are compiled on the Mac with their kernels inside as SPIR-V, so the phone never runs the compiler; for MAX graphs, the same idea means shipping a compiled .mef file, which is next. Fourth, every operation a model uses has to compile for this target, run correctly, and then be tuned. For our 25 test graphs, ResNet-18 included, compiling and running correctly are done; speed and tuning are open-ended, and that is where Modular’s own vendor-specific kernels will need Adreno-specific versions.</aside>
 </section>
