@@ -40,15 +40,15 @@ Since Mojo's compiler went open source (August 2026), there is a second route: a
 compiles the same kernels and Llama straight to Vulkan SPIR-V, with no retargeter. See
 [Native SPIR-V target](#native-spir-v-target).
 
-Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (29 slides,
+Presentation: **[Mojo and MAX on Adreno](docs/presentation/mojo-and-max-on-adreno.pdf)** (30 slides,
 PDF), the whole experiment from the retargeter to the native target and a compile-only test of MAX
-graphs. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (slides with speaker
+graphs, to Mojo host code running on the phone. [View it online](https://claude.ai/artifact/9HodHBDh22HuBYoo5UxTN6) (slides with speaker
 notes, in the browser), or as an [HTML slide viewer](docs/presentation/mojo-and-max-on-adreno.html)
 (download and open it; ←/→ to move, N for notes) with [speaker notes](docs/presentation/mojo-and-max-on-adreno-speaker-notes.md).
 
 The Adreno 840 alone, on Qualcomm's stock driver: **[Mojo on the Adreno 840](docs/presentation-840/mojo-on-the-adreno-840.pdf)**
-(13 slides, PDF): the native adreno840 target, cooperative matrices, the driver's quirks, and Llama 3.2 1B,
-Bonsai 2 2B and ternary Qwen3-8B on the phone. [View it online](https://claude.ai/artifact/BVe8mtq41xJ3tQ7k95k44Y).
+(14 slides, PDF): the native adreno840 target, cooperative matrices, the driver's quirks, and Llama 3.2 1B,
+Bonsai 2 2B and ternary Qwen3-8B on the phone, from C runners and from Mojo host code. [View it online](https://claude.ai/artifact/BVe8mtq41xJ3tQ7k95k44Y).
 
 Five slides on the Adreno backend itself: **[Adreno in Modular](docs/presentation-adreno-in-modular/adreno-in-modular.pdf)**
 (PDF): how the adreno840 backend sits in Modular's compiler, a Mojo kernel next to the SPIR-V it becomes
@@ -405,7 +405,8 @@ program carries its kernels as adreno840 SPIR-V and links against MAX's runtime,
 cross-builds for Android. On the phone it launches through the driver plugin, with no C runner.
 
 Every model runs this way:
-- **Llama 3.2 1B:** `llama/model.mojo`, 24.7 tok/s in fp16 and 78.1 in 4-bit, every token as PyTorch.
+- **Llama 3.2 1B:** `llama/model.mojo`, 24.7 tok/s in fp16 and 78.1 in 4-bit, every token as PyTorch. Its
+  batched prefill reads a 431-token prompt in 0.65 s (4-bit: 0.59 s), as fast as `llama_vk`.
 - **Ternary Qwen3-8B:** `qwen3/model.mojo`, 25.1 tok/s, every token as MLX.
 
 Both match their C runners' speed. The phone downloads each checkpoint from Hugging Face and

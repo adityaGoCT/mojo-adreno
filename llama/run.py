@@ -239,7 +239,7 @@ def main():
                     help="native: kernels from a source-built Mojo's Vulkan SPIR-V target, on Mesa Turnip")
     ap.add_argument("--runner", default="c", choices=["c", "mojo"],
                     help="mojo: llama/llama.mojo, the forward pass in Mojo through MAX's DeviceContext and the "
-                         "Vulkan driver plugin (the stock driver; no --prefill)")
+                         "Vulkan driver plugin (the stock driver)")
     ap.add_argument("--reexport", action="store_true")
     ap.add_argument("--quant", choices=["fp16", "q4"], default="fp16",
                     help="q4: int4 projections and lm_head (groups of 64, fp16 scales); embedding fp16")
@@ -271,11 +271,9 @@ def main():
     ref, ref_logits = reference(model, ids, a.max_new, eos)
     print(f"reference (PyTorch fp32 on the Mac CPU): {len(ref)} tokens in {time.time() - t1:.1f} s")
 
-    if a.runner == "mojo" and a.prefill:
-        sys.exit("--runner mojo: decode only, without --prefill")
     build_and_push(model_dir, a.backend, a.prefill, a.runner)
     env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if a.backend in ("turnip", "native") else ""
-    if a.prefill:
+    if a.prefill:  # llama_vk: the kernel directory; llama.mojo: any value (its kernels are inside it)
         env += f"LLAMA_PREFILL={DEV}/prefill840 " + ("LLAMA_PROFILE=1 " if os.environ.get("LLAMA_PROFILE") else "")
     runner = (f"MODULAR_DRIVER_PLUGINS=vulkan@{DEV}/mojo/libM_driver_vulkan.so mojo/llama {model_dir.name}"
               if a.runner == "mojo" else f"./llama_vk {model_dir.name} {a.backend}")

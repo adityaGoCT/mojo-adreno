@@ -176,6 +176,23 @@ both runs below match PyTorch for all 48 tokens:
 That is as fast as `llama_vk`, which records a token's dispatches once: decode is bound by the
 weights' bytes.
 
+`Llama.prefill` runs the whole prompt at once with the kernels of `kernels/prefill`, launched per
+layer as `llama_vk.c`'s prefill plan records them. The matmuls run on cooperative matrices, and the
+embedding rows come from the decode `embed` kernel. `llama.mojo` uses it when `LLAMA_PREFILL` is
+set, as `run.py --runner mojo --prefill` does. On a Galaxy Z Fold (SM-F976U, Adreno 840, Android
+17), the 431-token prompt of `prompts/long.txt`:
+
+| | Prompt | Then decode | Against PyTorch |
+|---|---|---|---|
+| fp16, `llama.mojo` | 0.65 s | 40.2 ms a token | 48 of 48 tokens; logits within 4.8e-5 |
+| 4-bit, `llama.mojo` | 0.59 s | 13.7 ms a token | 48 of 48 tokens; logits within 8.3e-5 |
+| fp16, `llama_vk` | 0.62 s | 40.0 ms a token | |
+
+The first run on a phone also compiles the pipelines. On this driver build, the fused attention
+`p_attention` takes 39 s and `p_gemm` 3 s, for `llama_vk` too, which compiles them before it times
+anything. The driver plugin keeps a pipeline cache file, so later runs load them in under a
+millisecond.
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the

@@ -132,10 +132,11 @@ def vecadd():
 
 
 def llama():
-    """llama/llama.mojo: llama/model.mojo's forward pass, the kernels of llama/kernels."""
+    """llama/llama.mojo: llama/model.mojo's forward pass, the kernels of llama/kernels and kernels/prefill."""
     out = BUILD / "llama"
     out.mkdir(parents=True, exist_ok=True)
-    mojo_object(ROOT / "llama/llama.mojo", out / "llama.o", includes=[ROOT / "llama", ROOT / "llama/kernels"])
+    mojo_object(ROOT / "llama/llama.mojo", out / "llama.o",
+                includes=[ROOT / "llama", ROOT / "llama/kernels", ROOT / "llama/kernels/prefill"])
     link(out, "llama", [out / "llama.o"])
 
 

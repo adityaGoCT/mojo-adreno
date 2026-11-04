@@ -1,9 +1,10 @@
 # Llama 3.2 1B decode on the Adreno as MAX DeviceContext launches of the kernels in llama/kernels:
 # llama_vk.c's forward pass, in Mojo. Weights from llama/run.py's export (manifest.txt, weights.bin),
 # fp16 or int4; fp32 activations and KV cache. Through MAX's HAL DeviceContext and the Vulkan driver
-# plugin, each launch binds its buffers and scalars as llama_vk.c's dispatches do.
+# plugin, each launch binds its buffers and scalars as llama_vk.c's dispatches do. prefill() runs a
+# whole prompt at once with the kernels of llama/kernels/prefill: the matmuls on cooperative matrices.
 from std.collections import Dict
-from max.gpu.host import DeviceBuffer, DeviceContext
+from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import attention
 import embed
@@ -11,6 +12,14 @@ import gemv
 import gemv_add
 import gemv_add_q4
 import gemv_q4
+import p_add
+import p_attention
+import p_attention_scalar
+import p_gemm
+import p_gemm_q4
+import p_rmsnorm
+import p_rope_kv
+import p_silu_mul
 import rmsnorm
 import rope_kv
 import silu_mul
@@ -35,6 +44,7 @@ struct Llama(Movable):
     var words: Dict[String, DeviceBuffer[DType.uint32]]  # int4 weights, 8 a word
     var floats: Dict[String, DeviceBuffer[DType.float32]]  # the RoPE tables
     var q4: Bool
+    var fused_attention: Bool  # p_attention, until a driver cannot create it
     var x: DeviceBuffer[DType.float32]
     var xn: DeviceBuffer[DType.float32]
     var qkv: DeviceBuffer[DType.float32]
@@ -52,6 +62,7 @@ struct Llama(Movable):
         self.words = Dict[String, DeviceBuffer[DType.uint32]]()
         self.floats = Dict[String, DeviceBuffer[DType.float32]]()
         self.q4 = False
+        self.fused_attention = True
         self.x = ctx.enqueue_create_buffer[DType.float32](D)
         self.xn = ctx.enqueue_create_buffer[DType.float32](D)
         self.qkv = ctx.enqueue_create_buffer[DType.float32](QKV)
@@ -145,6 +156,75 @@ struct Llama(Movable):
             self.proj(False, 2 * F, p + "wgu", self.xn, self.gu, D)
             ctx.enqueue_function[silu_mul.silu_mul](self.gu, self.act, grid_dim=F // 256, block_dim=256)
             self.proj(True, D, p + "wdown", self.act, self.x, F)
-        ctx.enqueue_function[rmsnorm.rmsnorm](self.x, self.halves["final_norm"], self.xn, grid_dim=1, block_dim=256)
+        self.head()
+
+    def head(self) raises:
+        """The logits of `self.x`: the final norm, then the lm_head."""
+        self.ctx.enqueue_function[rmsnorm.rmsnorm](self.x, self.halves["final_norm"], self.xn, grid_dim=1,
+                                                   block_dim=256)
         for c in range(CHUNKS):  # lm_head: the (tied) embedding, a chunk at a time; int4: its own copy
             self.proj(False, CHUNK_ROWS, ("lm." if self.q4 else "embed.") + String(c), self.xn, self.logit_chunks[c], D)
+
+    def pproj(self, n: Int, k: Int, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
+              rows: Int) raises:
+        """Y = X W^T for `rows` rows, with W the tensor `name` (n x k) in fp16 or int4: 128 x 128 tiles of Y
+        on cooperative matrices, 256 threads each."""
+        var grid = Dim(n // 128, rows // 128)
+        if self.q4:
+            self.ctx.enqueue_function[p_gemm_q4.p_gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                           Int64(n), Int64(k), grid_dim=grid, block_dim=256)
+        else:
+            self.ctx.enqueue_function[p_gemm.p_gemm](self.halves[name], x, y, Int64(n), Int64(k), grid_dim=grid,
+                                                     block_dim=256)
+
+    def prefill(mut self, tokens: List[Int]) raises:
+        """Enqueues the whole prompt at once, at positions 0 .. len(tokens) - 1: per layer the decode steps
+        for all rows (the prompt padded to the matmul tile), then the last row's logits in `self.logits`."""
+        var ctx = self.ctx
+        var n = len(tokens)
+        var rows = (n + 127) // 128 * 128
+        if rows > MAXPOS:
+            raise Error("prefill: " + String(rows) + " padded prompt rows > " + String(MAXPOS))
+        var xr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        var xnr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        var qkvr = ctx.enqueue_create_buffer[DType.float32](rows * QKV)
+        var attr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        var gur = ctx.enqueue_create_buffer[DType.float32](rows * 2 * F)
+        var actr = ctx.enqueue_create_buffer[DType.float32](rows * F)
+        var yr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        ctx.enqueue_memset(xr, Float32(0))  # the padding rows
+        for t in range(n):  # the embedding rows, each by the decode path's embed kernel
+            ctx.enqueue_function[embed.embed](self.halves["embed." + String(tokens[t] // CHUNK_ROWS)],
+                                              xr.create_sub_buffer[DType.float32](t * D, D),
+                                              Int64(tokens[t] % CHUNK_ROWS), grid_dim=D // 256, block_dim=256)
+        var cos = self.floats["rope.cos"]
+        var sin = self.floats["rope.sin"]
+        for l in range(L):
+            var p = "l" + String(l) + "."
+            ctx.enqueue_function[p_rmsnorm.p_rmsnorm](xr, self.halves[p + "attn_norm"], xnr, grid_dim=rows,
+                                                      block_dim=256)
+            self.pproj(QKV, D, p + "wqkv", xnr, qkvr, rows)
+            ctx.enqueue_function[p_rope_kv.p_rope_kv](qkvr, cos, sin, self.kc[l], self.vc[l],  # row r: position r
+                                                      grid_dim=Dim((H + KVH) * HD // 2 // 256, rows), block_dim=256)
+            if self.fused_attention:
+                try:  # a 64-row block of queries a workgroup
+                    ctx.enqueue_function[p_attention.p_attention](qkvr, self.kc[l], self.vc[l], attr,
+                                                                  grid_dim=Dim(H, rows // 64), block_dim=64)
+                except e:
+                    # The 840's Android 16 driver build cannot link it.
+                    print("prefill: fused attention not available on this driver (" + String(e) +
+                          "), using p_attention_scalar")
+                    self.fused_attention = False
+            if not self.fused_attention:  # one workgroup a query row
+                ctx.enqueue_function[p_attention_scalar.p_attention_scalar](qkvr, self.kc[l], self.vc[l], attr,
+                                                                            grid_dim=Dim(H, rows), block_dim=64)
+            self.pproj(D, D, p + "wo", attr, yr, rows)
+            ctx.enqueue_function[p_add.p_add](xr, yr, grid_dim=Dim(D // 256, rows), block_dim=256)
+            ctx.enqueue_function[p_rmsnorm.p_rmsnorm](xr, self.halves[p + "mlp_norm"], xnr, grid_dim=rows,
+                                                      block_dim=256)
+            self.pproj(2 * F, D, p + "wgu", xnr, gur, rows)
+            ctx.enqueue_function[p_silu_mul.p_silu_mul](gur, actr, grid_dim=Dim(F // 256, rows), block_dim=256)
+            self.pproj(D, F, p + "wdown", actr, yr, rows)
+            ctx.enqueue_function[p_add.p_add](xr, yr, grid_dim=Dim(D // 256, rows), block_dim=256)
+        ctx.enqueue_copy(self.x, xr.create_sub_buffer[DType.float32]((n - 1) * D, D))  # the last prompt row
+        self.head()

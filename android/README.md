@@ -109,6 +109,10 @@ On the Galaxy S26 Ultra, with every model's weights downloaded and converted on 
 | Bonsai 2 2B, ternary | 74–76 tok/s | 80 tok/s | 16 of 16 tokens as MLX; max abs 0.021 |
 | Qwen3-8B, ternary | 25.1 tok/s, 39.8 ms | 25 tok/s, 40 ms | 16 of 16 tokens as MLX; max abs 0.0082 |
 
+Llama's batched prefill runs from Mojo too (`Llama.prefill`, `LLAMA_PREFILL`). On a Galaxy Z Fold
+(Adreno 840, Android 17), the 431-token prompt takes 0.65 s in fp16 and 0.59 s in 4-bit, against
+`llama_vk`'s 0.62 s. Every token matches PyTorch.
+
 Decode moves weights from memory, so launching each kernel as it comes costs nothing measurable for
 Llama and Qwen3. The runners record a token's dispatches once and resubmit them, so the batching
 plugin issues the same work. Only Bonsai, with 721 small launches a token, gives up 5–8%.

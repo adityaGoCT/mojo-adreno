@@ -12,6 +12,10 @@
 // cooperative matrices on the Adreno 840 need it), and the device enables what LLVM's SPIR-V may
 // declare: 8-, 16- and 64-bit integers, fp16, 8- and 16-bit storage, the Vulkan memory model and
 // KHR cooperative matrices.
+//
+// Pipelines go through a VkPipelineCache kept in a file (VK_PIPELINE_CACHE, by default
+// $TMPDIR/mojo-vulkan-pipelines.bin; empty: none), so the driver compiles each one once per device:
+// one Android 17 driver build takes 39 s for Llama's fused prefill attention.
 #define VK_NO_PROTOTYPES
 #include "executor.h"
 
@@ -38,7 +42,8 @@
   X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdDispatch) X(vkQueueSubmit)              \
   X(vkQueueWaitIdle) X(vkGetPhysicalDeviceFeatures2) X(vkDestroyBuffer) X(vkFreeMemory)          \
   X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdFillBuffer) X(vkDestroyShaderModule)         \
-  X(vkDestroyPipeline) X(vkDestroyPipelineLayout) X(vkDestroyDescriptorSetLayout)
+  X(vkDestroyPipeline) X(vkDestroyPipelineLayout) X(vkDestroyDescriptorSetLayout)                 \
+  X(vkCreatePipelineCache) X(vkGetPipelineCacheData)
 
 #define DECL(f) static PFN_##f f;
 VK_FUNCS(DECL)
@@ -62,6 +67,8 @@ static int in_cmd;             // commands in `cmd`
 static int nsubmitted;         // command buffers submitted since the last wait
 static int pending;            // commands since the last wait
 static int profile;
+static VkPipelineCache pipeline_cache;
+static char pipeline_cache_path[512];
 static char error[512];        // the first error since the last answer
 static char taken[512];
 
@@ -248,6 +255,46 @@ void vkx_reset(void) {
 
 // --- kernels ---------------------------------------------------------------------------------
 
+// The pipeline cache file: its data for the cache, or none.
+static void open_pipeline_cache(void) {
+  const char* env = getenv("VK_PIPELINE_CACHE");
+  if (env && !*env) return;
+  const char* tmp = getenv("TMPDIR");
+  if (env) snprintf(pipeline_cache_path, sizeof pipeline_cache_path, "%s", env);
+  else snprintf(pipeline_cache_path, sizeof pipeline_cache_path, "%s/mojo-vulkan-pipelines.bin", tmp ? tmp : "/data/local/tmp");
+  void* data = NULL;
+  long n = 0;
+  FILE* f = fopen(pipeline_cache_path, "rb");
+  if (f) {
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    data = n > 0 ? malloc((size_t)n) : NULL;
+    if (!data || fread(data, 1, (size_t)n, f) != (size_t)n) n = 0;
+    fclose(f);
+  }
+  // A driver ignores data from another driver or device (the header names them).
+  VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, NULL, 0, (size_t)n, data};
+  if (vkCreatePipelineCache(dev, &ci, NULL, &pipeline_cache) != VK_SUCCESS) pipeline_cache = VK_NULL_HANDLE;
+  free(data);
+  if (profile) fprintf(stderr, "pipeline cache: %s, %ld bytes\n", pipeline_cache_path, n);
+}
+
+// Writes the cache out after a new pipeline: to a temporary file, then renamed over the old one.
+static void save_pipeline_cache(void) {
+  size_t n = 0;
+  if (!pipeline_cache || vkGetPipelineCacheData(dev, pipeline_cache, &n, NULL) != VK_SUCCESS || !n) return;
+  void* data = malloc(n);
+  if (data && vkGetPipelineCacheData(dev, pipeline_cache, &n, data) == VK_SUCCESS) {
+    char tmp[sizeof pipeline_cache_path + 8];
+    snprintf(tmp, sizeof tmp, "%s.tmp", pipeline_cache_path);
+    FILE* f = fopen(tmp, "wb");
+    if (f && fwrite(data, 1, n, f) == n && !fclose(f)) rename(tmp, pipeline_cache_path);
+    else if (f) fclose(f);
+  }
+  free(data);
+}
+
 static int pipeline(module_t* m, const uint32_t block[3], uint32_t nbind, VkPipeline* pipe,
                     VkPipelineLayout* layout, VkDescriptorSetLayout* dsl) {
   for (int i = 0; i < m->ncache; ++i)
@@ -280,7 +327,11 @@ static int pipeline(module_t* m, const uint32_t block[3], uint32_t nbind, VkPipe
       cpi.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
   }
   cpi.layout = *layout;
-  if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, NULL, pipe) != VK_SUCCESS) return -1;
+  double t0 = now_ms();
+  if (vkCreateComputePipelines(dev, pipeline_cache, 1, &cpi, NULL, pipe) != VK_SUCCESS) return -1;
+  if (profile)
+    fprintf(stderr, "pipeline: module %ld, block %u %u %u, %u bindings: %.1f ms\n", (long)(m - modules), block[0],
+            block[1], block[2], nbind, now_ms() - t0);
   m->cache = realloc(m->cache, (m->ncache + 1) * sizeof *m->cache);
   memcpy(m->cache[m->ncache].block, block, 12);
   m->cache[m->ncache].nbind = nbind;
@@ -288,6 +339,7 @@ static int pipeline(module_t* m, const uint32_t block[3], uint32_t nbind, VkPipe
   m->cache[m->ncache].layout = *layout;
   m->cache[m->ncache].dsl = *dsl;
   m->ncache++;
+  save_pipeline_cache();
   return 0;
 }
 
@@ -558,6 +610,7 @@ int vkx_init(int submit_every_default) {
                                      VK_COMMAND_BUFFER_LEVEL_PRIMARY, MAX_SUBMITS};
   vkAllocateCommandBuffers(dev, &cai, cmds);
   if (make_buffer(&params, PARAMS_ARENA)) return fail("cannot allocate the params arena"), -1;
+  open_pipeline_cache();
   if (profile)
     fprintf(stderr, "vulkan executor: %s, Vulkan %u.%u, subgroup %u%s, cooperative matrices %s, %d commands a submission\n",
             props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),

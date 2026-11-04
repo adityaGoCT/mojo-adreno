@@ -4,9 +4,11 @@
 #
 #   MODULAR_DRIVER_PLUGINS=vulkan@<dir>/libM_driver_vulkan.so llama <model dir> <max new> <prompt token ids...>
 #     LLAMA_EOS=128001,128009   stop tokens          LLAMA_LOGITS=<file>   logits after the prompt (fp32)
+#     LLAMA_PREFILL=<anything>  the whole prompt at once (Llama.prefill: the matmuls on cooperative
+#                               matrices); otherwise one token at a time through the decode path
 #
-# The prompt runs one token at a time through the decode path, then up to <max new> tokens are
-# generated greedily (argmax on the CPU). Output: "tok <id> <ms>" for each generated token.
+# Then up to <max new> tokens are generated greedily (argmax on the CPU). Output: "tok <id> <ms>" for
+# each generated token.
 from std.os import getenv
 from std.sys import argv
 from std.time import perf_counter_ns
@@ -42,21 +44,26 @@ def main() raises:
     print("loaded in", round((now_ms() - t_load) / 1e3, 1), "s")
     var logits = List[Float32](length=V, fill=0)
 
+    var prefill = getenv("LLAMA_PREFILL") != ""
     var tok = prompt[0]
     var ngen = 0
     var t0 = now_ms()
     var tgen = 0.0
-    for p in range(len(prompt) + max_new):
+    for p in range(len(prompt) - 1 if prefill else 0, len(prompt) + max_new):
         var ts = now_ms()
-        if p < len(prompt):
-            tok = prompt[p]
-        model.forward(tok, p)
+        if prefill and p == len(prompt) - 1:
+            model.prefill(prompt)
+        else:
+            if p < len(prompt):
+                tok = prompt[p]
+            model.forward(tok, p)
         if p < len(prompt) - 1:
             continue  # the prompt's launches run on while the next token's are enqueued
         ctx.enqueue_copy(logits.unsafe_ptr(), model.logits)
         ctx.synchronize()
         if p == len(prompt) - 1:
-            print("prompt:", len(prompt), "tokens in", Int(now_ms() - t0), "ms")
+            print("prompt:", len(prompt), "tokens in", Int(now_ms() - t0), "ms",
+                  "(batched prefill)" if prefill else "(one token at a time)")
             var path = getenv("LLAMA_LOGITS")
             if path:
                 var f = open(path, "w")

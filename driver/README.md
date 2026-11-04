@@ -64,6 +64,12 @@ what LLVM's SPIR-V may declare:
 The arch MAX compiles for comes from the driver's device name, for example `Adreno (TM) 840` →
 `adreno840`, unless `VK_DRIVER_ARCH` is set.
 
+**The pipeline cache.** A pipeline is created at its kernel's first launch, through a
+`VkPipelineCache` kept in a file. The file is `$TMPDIR/mojo-vulkan-pipelines.bin` by default;
+`VK_PIPELINE_CACHE` names another, and an empty value turns the cache off. The driver then
+compiles each pipeline once per device. On a Galaxy Z Fold (Android 17), Llama's fused prefill
+attention takes 39 s to compile, and 0.2 ms from the cache.
+
 **Limits.** A pointer argument must point a multiple of `minStorageBufferOffsetAlignment` (64 on
 Adreno) into its allocation, since it becomes a binding offset. A kernel takes at most 64 storage
 buffers. Memory is host-visible and coherent, with one queue.
@@ -120,7 +126,8 @@ Environment variables:
 - `VK_DRIVER_ARCH`: the arch MAX compiles for.
 - `VK_DRIVER_PROFILE=1`: the plugin's requests, at exit.
 - `VK_DRIVER_DEBUG=1`: every request and launch.
-- `VK_SERVER_PROFILE=1`: the executor's batches; `=2` times each launch on its own.
+- `VK_SERVER_PROFILE=1`: the executor's batches and each pipeline's creation; `=2` times each launch on its own.
+- `VK_PIPELINE_CACHE`: the pipeline cache file; empty: no cache.
 
 ## Next: Mojo host code on the phone
 
