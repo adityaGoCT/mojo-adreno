@@ -44,6 +44,7 @@ def main():
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--runner", default="c", choices=["c", "mojo"])
     ap.add_argument("--weights", default=".", help="weights.bin and manifest.txt under /data/local/tmp/q8")
+    ap.add_argument("--prefill", action="store_true", help="--runner mojo: the whole prompt at once (QWEN3_PREFILL)")
     a = ap.parse_args()
     adb = ["adb"] + (["-s", a.serial] if a.serial else [])
     if a.runner == "mojo":
@@ -72,6 +73,10 @@ def main():
         ids, steps = tok.encode(text, add_special_tokens=False), a.tokens
         print(f"prompt: {a.prompt!r}, {len(ids)} tokens")
     kernels = "" if a.runner == "mojo" else " k"
+    if a.prefill:
+        if a.runner != "mojo":
+            sys.exit("--prefill: qwen3.mojo only (--runner mojo)")
+        env += "QWEN3_PREFILL=1 "
     out = sh(*adb, "shell", f"cd {DIR}; {env}{runner} {a.weights}{kernels} {steps} {' '.join(map(str, ids))}")
     gen = []
     for line in out.splitlines():

@@ -109,6 +109,11 @@ On the Galaxy S26 Ultra, with every model's weights downloaded and converted on 
 | Bonsai 2 2B, ternary | 74–76 tok/s | 80 tok/s | 16 of 16 tokens as MLX; max abs 0.021 |
 | Qwen3-8B, ternary | 25.1 tok/s, 39.8 ms | 25 tok/s, 40 ms | 16 of 16 tokens as MLX; max abs 0.0082 |
 
+Ternary Qwen3-8B now has a batched prefill too, written in Mojo (`Qwen3.prefill`, `QWEN3_PREFILL`).
+It runs Bonsai's ternary matrix kernel on cooperative matrices and `qwen3/kernels/qwen3p.mojo`'s row
+kernels. A 95-token prompt takes 1.0 s instead of 3.7 s one token at a time, and every token matches
+MLX.
+
 Llama's batched prefill runs from Mojo too (`Llama.prefill`, `LLAMA_PREFILL`). On a Galaxy Z Fold
 (Adreno 840, Android 17), the 431-token prompt takes 0.65 s in fp16 and 0.59 s in 4-bit, against
 `llama_vk`'s 0.62 s. Every token matches PyTorch.

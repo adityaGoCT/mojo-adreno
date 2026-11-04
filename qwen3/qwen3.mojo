@@ -5,9 +5,11 @@
 #   MODULAR_DRIVER_PLUGINS=vulkan@<dir>/libM_driver_vulkan.so qwen3 <model dir> <max new> <prompt token ids...>
 #     QWEN3_REF=<reference.f32>  compare all logits after the prompt and after each token with the
 #                                exporter's MLX reference; runs max_new steps even past the stop tokens
+#     QWEN3_PREFILL=<anything>   the whole prompt at once (Qwen3.prefill: the projections on cooperative
+#                                matrices); otherwise one token at a time through the decode path
 #
-# The prompt runs one token at a time, then up to <max new> tokens greedily (argmax on the CPU) until
-# <|im_end|> or <|endoftext|>. Output: "tok <id> <ms>" lines.
+# Then up to <max new> tokens greedily (argmax on the CPU) until <|im_end|> or <|endoftext|>. Output:
+# "tok <id> <ms>" lines.
 from std.math import sqrt
 from std.os import getenv
 from std.sys import argv
@@ -44,19 +46,24 @@ def main() raises:
     var reference = open(ref_path, "r") if ref_path else open("/dev/null", "r")
     var logits = List[Float32](length=V, fill=0)
 
+    var prefill = getenv("QWEN3_PREFILL") != ""
+    for t in prompt:
+        if t < 0 or t >= V:
+            raise Error("token " + String(t) + " out of range")
     var tok = 0
     var ngen = 0
     var failed = False
     var worst = 0.0
     var t0 = now_ms()
     var tgen = 0.0
-    for p in range(len(prompt) + max_new):
-        if p < len(prompt):
-            tok = prompt[p]
-        if tok < 0 or tok >= V:
-            raise Error("token " + String(tok) + " out of range")
+    for p in range(len(prompt) - 1 if prefill else 0, len(prompt) + max_new):
         var ts = now_ms()
-        model.forward(tok, p)
+        if prefill and p == len(prompt) - 1:
+            model.prefill(prompt)
+        else:
+            if p < len(prompt):
+                tok = prompt[p]
+            model.forward(tok, p)
         ctx.enqueue_copy(logits.unsafe_ptr(), model.logits)
         ctx.synchronize()
         if p < len(prompt) - 1:
@@ -67,7 +74,8 @@ def main() raises:
                 next = i
         var ms = now_ms() - ts
         if p == len(prompt) - 1:
-            print("prompt:", len(prompt), "tokens in", Int(now_ms() - t0), "ms")
+            print("prompt:", len(prompt), "tokens in", Int(now_ms() - t0), "ms",
+                  "(batched prefill)" if prefill else "(one token at a time)")
         else:
             tgen += ms
         if ref_path:

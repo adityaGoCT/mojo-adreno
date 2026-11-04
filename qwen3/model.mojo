@@ -2,12 +2,16 @@
 # qwen3_vk.c's forward pass, in Mojo. The projections are the Android port's packed ternary kernels
 # (bonsai/kernels/kernels.mojo, unchanged), the rest qwen3/kernels/qwen3k.mojo. Weights from
 # qwen3/export.py or qwen3/convert.cpp (manifest.txt, weights.bin); the embedding stays in host memory
-# and the CPU dequantizes one row per token. fp32 activations and KV cache.
+# and the CPU dequantizes one row per token. fp32 activations and KV cache. prefill() runs a whole
+# prompt at once: the projections on cooperative matrices (bonsai/kernels/prefill.mojo's p_gemm_t2),
+# the rest qwen3/kernels/qwen3p.mojo's row kernels.
 from std.collections import Dict
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import kernels
+import prefill
 import qwen3k
+import qwen3p
 
 # Qwen3-8B; must match qwen3k.mojo and export.py
 comptime D = 4096
@@ -20,6 +24,16 @@ comptime HEAD0 = 74 * 1024  # vocabulary rows in the first half of the head
 
 def groups(work: Int, per: Int) -> Int:
     return (work + per - 1) // per
+
+
+def dequantize(emb: Dict[String, List[UInt8]], token: Int, row: Pointer[mut=True, Float32, _]) raises:
+    """row = row `token` of the 2-bit embedding: code * scale + bias per group of 128, on the CPU."""
+    var w = emb["emb.w"].unsafe_ptr().unsafe_bitcast[UInt32]() + token * (D // 16)
+    var s = emb["emb.s"].unsafe_ptr().unsafe_bitcast[Float16]() + token * (D // 128)
+    var b = emb["emb.b"].unsafe_ptr().unsafe_bitcast[Float16]() + token * (D // 128)
+    for i in range(D):
+        var code = (w[i // 16] >> UInt32(2 * (i % 16))) & 3
+        row[i] = Float32(code) * Float32(s[i // 128]) + Float32(b[i // 128])
 
 
 struct Qwen3(Movable):
@@ -119,13 +133,8 @@ struct Qwen3(Movable):
                                                          grid_dim=groups(n, 64), block_dim=64)
 
     def embed(mut self, token: Int) raises:
-        """x = row `token` of the 2-bit embedding: code * scale + bias per group of 128, on the CPU."""
-        var w = self.emb["emb.w"].unsafe_ptr().unsafe_bitcast[UInt32]() + token * (D // 16)
-        var s = self.emb["emb.s"].unsafe_ptr().unsafe_bitcast[Float16]() + token * (D // 128)
-        var b = self.emb["emb.b"].unsafe_ptr().unsafe_bitcast[Float16]() + token * (D // 128)
-        for i in range(D):
-            var code = (w[i // 16] >> UInt32(2 * (i % 16))) & 3
-            self.row[i] = Float32(code) * Float32(s[i // 128]) + Float32(b[i // 128])
+        """x = row `token` of the embedding."""
+        dequantize(self.emb, token, self.row.unsafe_ptr())
         self.ctx.enqueue_copy(self.x, self.row.unsafe_ptr())
 
     def forward(mut self, token: Int, pos: Int) raises:
@@ -155,6 +164,11 @@ struct Qwen3(Movable):
             ctx.enqueue_function[qwen3k.swiglu_pack](self.gu, self.gq, Int32(F), grid_dim=F // 2 // 64, block_dim=64)
             self.project(n + "down", self.gq, self.y, D, F)
             ctx.enqueue_function[qwen3k.add](self.x, self.y, Int32(D), grid_dim=D // 64, block_dim=64)
+        self.head()
+
+    def head(self) raises:
+        """The logits of `self.x`: the final norm, then the output head in two halves."""
+        var ctx = self.ctx
         ctx.enqueue_function[qwen3k.rmsnorm_pack](self.x, self.floats["final_norm"], self.xq, Int32(D),
                                                   grid_dim=1, block_dim=64)
         ctx.enqueue_function[kernels.packed_head](self.xq, self.words["head0.w"], self.halves["head0.s"], self.logits0,
@@ -163,3 +177,59 @@ struct Qwen3(Movable):
         ctx.enqueue_function[kernels.packed_head](self.xq, self.words["head1.w"], self.halves["head1.s"], self.logits1,
                                                   self.cand, Int32(V - HEAD0), Int32(D), Int32(0),
                                                   grid_dim=groups(V - HEAD0, 1024), block_dim=128)
+
+    def pproject(self, name: String, input: DeviceBuffer[DType.float32], output: DeviceBuffer[DType.float32],
+                 n: Int, k: Int, rows: Int) raises:
+        """output = input W^T for `rows` fp32 rows and the packed tensor `name` (n outputs, k inputs): 128 x 128
+        tiles on cooperative matrices, 256 threads each."""
+        self.ctx.enqueue_function[prefill.p_gemm_t2](input, self.words[name + ".w"], self.halves[name + ".s"], output,
+                                                     Int32(n), Int32(k), grid_dim=Dim(n // 128, rows // 128),
+                                                     block_dim=256)
+
+    def prefill(mut self, tokens: List[Int]) raises:
+        """Enqueues the whole prompt at once, at positions 0 .. len(tokens) - 1: per layer the decode steps
+        for all rows (the prompt padded to the matmul's 128 rows), then the last row's logits in
+        `self.logits`."""
+        var ctx = self.ctx
+        var count = len(tokens)
+        var rows = (count + 127) // 128 * 128
+        if count > self.capacity:
+            raise Error("prefill: " + String(count) + " prompt tokens > context " + String(self.capacity))
+        var host = List[Float32](length=rows * D, fill=0)  # the embedding rows; the padding rows zero
+        for t in range(count):
+            dequantize(self.emb, tokens[t], host.unsafe_ptr() + t * D)
+        var xr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        ctx.enqueue_copy(xr, host.unsafe_ptr())
+        var xnr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        var qkvr = ctx.enqueue_create_buffer[DType.float32](rows * QKV)
+        var scores = ctx.enqueue_create_buffer[DType.float32](rows * 32 * self.capacity)
+        var attr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        var yr = ctx.enqueue_create_buffer[DType.float32](rows * D)
+        var gur = ctx.enqueue_create_buffer[DType.float32](rows * 2 * F)
+        var actr = ctx.enqueue_create_buffer[DType.float32](rows * F)
+        ctx.enqueue_memset(attr, Float32(0))  # the padding rows' attention, which nothing writes
+        var c = Int32(count)
+        var cap = Int32(self.capacity)
+        var rope = self.floats["rope"]
+        for l in range(L):
+            var n = "l" + String(l) + "."
+            ctx.enqueue_function[qwen3p.p_rmsnorm](xr, self.floats[n + "in_norm"], xnr, grid_dim=Dim(1, rows),
+                                                   block_dim=64)
+            self.pproject(n + "qkv", xnr, qkvr, QKV, D, rows)
+            ctx.enqueue_function[qwen3p.p_qk_norm_rope](qkvr, self.floats[n + "q_norm"], self.floats[n + "k_norm"],
+                                                        rope, self.kc[l], self.vc[l], c, grid_dim=Dim(48, rows),
+                                                        block_dim=64)
+            ctx.enqueue_function[qwen3p.p_attn_scores](qkvr, self.kc[l], scores, c, cap,
+                                                       grid_dim=Dim(groups(32 * self.capacity, 64), rows), block_dim=64)
+            ctx.enqueue_function[qwen3p.p_attn_values](scores, self.vc[l], attr, c, cap, grid_dim=Dim(D // 64, rows),
+                                                       block_dim=64)
+            self.pproject(n + "o", attr, yr, D, D, rows)
+            ctx.enqueue_function[qwen3p.p_add](xr, yr, grid_dim=Dim(D // 64, rows), block_dim=64)
+            ctx.enqueue_function[qwen3p.p_rmsnorm](xr, self.floats[n + "post_norm"], xnr, grid_dim=Dim(1, rows),
+                                                   block_dim=64)
+            self.pproject(n + "gu", xnr, gur, 2 * F, D, rows)
+            ctx.enqueue_function[qwen3p.p_swiglu](gur, actr, grid_dim=Dim(F // 64, rows), block_dim=64)
+            self.pproject(n + "down", actr, yr, D, F, rows)
+            ctx.enqueue_function[qwen3p.p_add](xr, yr, grid_dim=Dim(D // 64, rows), block_dim=64)
+        ctx.enqueue_copy(self.x, xr.create_sub_buffer[DType.float32]((count - 1) * D, D))  # the last prompt row
+        self.head()

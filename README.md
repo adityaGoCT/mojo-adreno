@@ -407,7 +407,8 @@ cross-builds for Android. On the phone it launches through the driver plugin, wi
 Every model runs this way:
 - **Llama 3.2 1B:** `llama/model.mojo`, 24.7 tok/s in fp16 and 78.1 in 4-bit, every token as PyTorch. Its
   batched prefill reads a 431-token prompt in 0.65 s (4-bit: 0.59 s), as fast as `llama_vk`.
-- **Ternary Qwen3-8B:** `qwen3/model.mojo`, 25.1 tok/s, every token as MLX.
+- **Ternary Qwen3-8B:** `qwen3/model.mojo`, 25.1 tok/s, every token as MLX. Its batched prefill, new
+  in Mojo, reads a 95-token prompt in 1.0 s instead of 3.7 s.
 
 Both match their C runners' speed. The phone downloads each checkpoint from Hugging Face and
 converts it itself (see [`android/README.md`](android/README.md)).

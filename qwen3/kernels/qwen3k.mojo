@@ -1,7 +1,9 @@
 # Qwen3-8B decode kernels for qwen3_vk: what Qwen3 needs beyond the ternary projections, which are
 # bonsai/kernels/kernels.mojo's packed_linear, packed_reduce and packed_head, unchanged. Hidden 4096,
 # 32 query and 8 KV heads of 128. Projection inputs are fp16 pairs in 32-bit words (as the Hadamard
-# kernel leaves them for Bonsai): the kernels that feed a projection pack their output so.
+# kernel leaves them for Bonsai): the kernels that feed a projection pack their output so. The bodies of
+# qk_norm_rope, attn_scores and attn_values are inline helpers (_qk_norm_rope, ...) that qwen3p.mojo's
+# prefill row kernels share: a kernel that calls another kernel does not compile for the Vulkan target.
 from std.math import exp, rsqrt
 from std.memory import bitcast
 from max.gpu import global_idx, thread_idx
@@ -57,6 +59,11 @@ def swiglu_pack(gu: F32, q: U32, n: Int32):
 
 
 def qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, position: Int32):
+    _qk_norm_rope(qkv, wq, wk, table, kc, vc, position)
+
+
+@always_inline
+def _qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, position: Int32):
     """One 64-lane workgroup per head: q heads 0-31 (RMS norm, RoPE, in place), k heads 32-39 (RMS norm,
     RoPE, into the K cache), v heads 40-47 (into the V cache). Lane d holds d and d + 64 of the head;
     RoPE rotates those pairs (cos | sin rows of 128 per position, YaRN's factor included)."""
@@ -87,6 +94,11 @@ def qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, posit
 
 
 def attn_scores(q: F32, kc: F32, y: F32, position: Int32, capacity: Int32):
+    _attn_scores(q, kc, y, position, capacity)
+
+
+@always_inline
+def _attn_scores(q: F32, kc: F32, y: F32, position: Int32, capacity: Int32):
     var i = global_idx.x
     var length = Int(position) + 1
     if i < 32 * length:
@@ -99,6 +111,11 @@ def attn_scores(q: F32, kc: F32, y: F32, position: Int32, capacity: Int32):
 
 
 def attn_values(scores: F32, vc: F32, y: F32, position: Int32, capacity: Int32):
+    _attn_values(scores, vc, y, position, capacity)
+
+
+@always_inline
+def _attn_values(scores: F32, vc: F32, y: F32, position: Int32, capacity: Int32):
     var i = global_idx.x
     if i < 4096:
         var h = i // 128

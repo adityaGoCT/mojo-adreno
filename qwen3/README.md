@@ -73,6 +73,36 @@ validation: 16 steps, max abs logit error 0.008191 , all greedy ids match
 It is as fast as `qwen3_vk` and its logits are the same to 0.0082. `run.py --runner mojo --weights
 model` runs it.
 
+### Batched prefill
+
+`Qwen3.prefill` (`QWEN3_PREFILL`, `run.py --runner mojo --prefill`) runs the whole prompt at once.
+- **Projections:** Bonsai's `p_gemm_t2` (`bonsai/kernels/prefill.mojo`), which multiplies fp32 rows
+  by the packed ternary weights on cooperative matrices. `export.py` already writes Qwen3's weights
+  in its layout, so it serves q/k/v, o, gate/up and down unchanged.
+- **The rest:** [`kernels/qwen3p.mojo`](kernels/qwen3p.mojo), whose row kernels run every prompt row
+  at once:
+  - RMS norm, SwiGLU and the residual add in fp32;
+  - q/k norm with RoPE into the KV cache, and the attention scores and values, sharing the bodies of
+    `qwen3k`'s decode kernels, with row r at position r.
+- **Embedding and head:** the embedding rows are dequantized on the CPU, as for decode, and the last
+  row's logits come from the decode head.
+
+On the S26 Ultra (stock driver, Android 16), all 16 greedy tokens match MLX. The logits after the
+prompt are within 0.0041, closer than one token at a time (0.0065), because the projections take
+fp32 inputs instead of fp16 pairs.
+
+| Prompt | Batched prefill | One token at a time |
+|---|---|---|
+| 19 tokens (the reference prompt) | 0.98 s | 0.94 s |
+| 95 tokens | 1.00 s | 3.74 s (3.7×) |
+
+The matrix kernel works on 128-row tiles, so any prompt of up to 128 tokens (the export's context)
+costs about 1 s, 1.8 TFLOP at about 1.8 TFLOP/s. A 64-row tile would halve that for short prompts.
+
+A kernel that calls another kernel does not compile for the Vulkan target: the kernel ABI pass
+rewrites both into entry points. So `qk_norm_rope`, `attn_scores` and `attn_values` keep their
+bodies in inline helpers, and the decode kernels and the prefill row kernels both call those.
+
 The weights came from Hugging Face to the phone directly. [`convert.cpp`](convert.cpp) is
 `export.py`'s export in C++ and writes `weights.bin` and `manifest.txt` from the downloaded
 checkpoint (SHA-256 `f43270cb…`) in seconds, byte for byte `export.py`'s. The exception is the 64 KB
