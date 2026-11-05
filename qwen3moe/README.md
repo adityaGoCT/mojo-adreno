@@ -8,6 +8,12 @@ Windows 11 on Arm, 33.6 GB of RAM) in Qualcomm Device Cloud. The forward pass is
 [SmolVLA and π0 on the same laptop](../vla/x2): the program runs on the Mac and drives the laptop's `vk_server`
 through the remote driver plugin.
 
+Presentation: **[A 30B mixture of experts on a Snapdragon laptop](../docs/presentation-qwen3moe/qwen3moe-on-the-x2-elite.pdf)**
+(6 slides, PDF): fitting it into the GPU, a token without the host, prefill for an MoE, and the Hexagon NPU.
+[View it online](https://claude.ai/artifact/THLm8oGyVrqYs6X2d9P2iq), or as an
+[HTML slide viewer](../docs/presentation-qwen3moe/qwen3moe-on-the-x2-elite.html) (←/→, N for notes) with
+[speaker notes](../docs/presentation-qwen3moe/qwen3moe-on-the-x2-elite-speaker-notes.md).
+
 ```
 $ build/vla/venv/bin/python qwen3moe/run.py --prompt "Explain in two sentences why the sky is blue." --tokens 96 --check
 prompt: 'Explain in two sentences why the sky is blue.', 19 tokens

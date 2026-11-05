@@ -1,0 +1,38 @@
+<section id="token" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">A token, decoded without asking the host</h2>
+<div style="display:flex;gap:12px;align-items:stretch">
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border:2px solid #D5DAE1;border-radius:12px;padding:20px">
+<h3 style="font-size:26px;font-weight:600">Embedding row</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">copied from disk by the server (OP_GATHER)</p>
+</div>
+<x-shape kind="arrow-right" style="width:40px;height:24px;background:#9AA8BC;align-self:center"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border:2px solid #D5DAE1;border-radius:12px;padding:20px">
+<h3 style="font-size:26px;font-weight:600">Attention</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">int4 q k v o, QK norm, RoPE, 4 KV heads</p>
+</div>
+<x-shape kind="arrow-right" style="width:40px;height:24px;background:#9AA8BC;align-self:center"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border:2px solid #2563C9;border-radius:12px;padding:20px">
+<h3 style="font-size:26px;font-weight:600;color:#2563C9">Router</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">top 8 of 128 ids and weights, left on the GPU</p>
+</div>
+<x-shape kind="arrow-right" style="width:40px;height:24px;background:#9AA8BC;align-self:center"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border:2px solid #2563C9;border-radius:12px;padding:20px">
+<h3 style="font-size:26px;font-weight:600;color:#2563C9">8 experts</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">int4 gate, up, down, rows found by id</p>
+</div>
+<x-shape kind="arrow-right" style="width:40px;height:24px;background:#9AA8BC;align-self:center"></x-shape>
+<div style="flex:1;display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border:2px solid #D5DAE1;border-radius:12px;padding:20px">
+<h3 style="font-size:26px;font-weight:600">Argmax</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.35">the next token, into the GPU’s token list</p>
+</div>
+</div>
+<table style="font-size:26px;color:#18212F">
+<tr><th style="width:28%">Commands a submission</th><th style="width:36%">Streamed from the Mac</th><th style="width:36%">Replayed on the laptop</th></tr>
+<tr><td>1</td><td>46.9–49.4 ms a token</td><td><b>27.2 ms</b> · 36.7 tokens/s</td></tr>
+<tr style="background:#EEF1F5"><td>8</td><td><b>28.2–32.1 ms</b> · 31–35 tokens/s</td><td>31.4–31.5 ms</td></tr>
+<tr><td>64</td><td>35.2–38.1 ms</td><td>29.6–31.8 ms</td></tr>
+</table>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">531 launches and 1.63 GB of active weights a token: 55–60 GB/s. The server can replay a step on its own clock (OP_RECORD / OP_REPLAY), which times the GPU without the tunnel.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Real weights only: zero-filled ones replayed in 22.5 ms, probably because Windows maps zero pages to shared memory</p>
+<aside>A token runs entirely on the GPU, and the host never waits for it. Its first request has the Vulkan server copy the token’s embedding row from the file on disk, the token being one the GPU itself wrote: the prompt’s, or the previous step’s argmax. Then 48 layers: attention with int4 projections, QK norm, RoPE and four KV heads shared by 32 query heads; then the router, whose top 8 of 128 experts and their weights stay in GPU memory; the expert kernels read those ids and find their int4 rows by them; and at the end the output head and an argmax that writes the next token into the GPU’s token list. So a whole generation is enqueued at once. It is 531 launches and 1.63 gigabytes of active weights a token. The table is the time of a step, by how many commands the server submits to Vulkan at once. Streamed from the Mac, 8 commands a submission is best: 28 to 32 milliseconds, 31 to 35 tokens a second. Replayed on the laptop itself, with nothing crossing the tunnel, one command a submission is best: 27.2 milliseconds, 36.7 tokens a second, since the GPU runs each launch while the server records the next. That is 55 to 60 gigabytes a second of weights.</aside>
+</section>

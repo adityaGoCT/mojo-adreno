@@ -1,0 +1,33 @@
+<section id="fit" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Fitting it into the GPU’s half of the RAM</h2>
+<div style="display:flex;gap:48px">
+<div style="flex:1.25;display:flex;flex-direction:column;gap:16px">
+<table style="font-size:26px;color:#18212F">
+<tr><th style="width:48%">Weights</th><th style="width:30%">Format</th><th style="width:22%">On the GPU</th></tr>
+<tr><td>Experts: 48 × 128 × gate, up, down</td><td>int4, a scale per 128</td><td><b>14.95 GB</b></td></tr>
+<tr style="background:#EEF1F5"><td>Attention q, k, v, o</td><td>int4, a scale per 64</td><td>0.48 GB</td></tr>
+<tr><td>Output head, 151936 rows</td><td>int4, a scale per 64</td><td>0.17 GB</td></tr>
+<tr style="background:#EEF1F5"><td>Routers and norms</td><td>fp32</td><td>0.05 GB</td></tr>
+<tr><td>KV cache, 512 positions</td><td>fp32</td><td>0.10 GB</td></tr>
+<tr style="background:#EEF1F5"><td>Token embedding</td><td>fp32, on the laptop’s disk</td><td>none</td></tr>
+<tr><td><b>Total</b></td><td></td><td><b>15.75 GB</b></td></tr>
+</table>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:26px">
+<h3 style="font-size:30px;font-weight:600">One 16.82 GB heap</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Half the laptop’s RAM, about 16.0 GB of it free. A first layout of 16.7 GB failed to allocate its last 0.95 GB.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:26px">
+<h3 style="font-size:30px;font-weight:600">Scales searched, not max / 7</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Per 128 weights with the least-error scale: 10.7% error on an expert, against 11.2% per 64 with max / 7.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:26px">
+<h3 style="font-size:30px;font-weight:600">Weights stay on the laptop</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">vk_server reads them from its own disk: 15.65 GB in 4–6 s (OP_FILE). The tunnel would take 90 minutes.</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">The laptop downloads the 61 GB bf16 checkpoint and converts it to int4 in 4 minutes · a second heap of 4.29 GB is protected memory</p>
+<aside>The first problem was memory. The X2-90 has one Vulkan heap for compute, 16.82 gigabytes, which is half of the laptop’s RAM; the other heap is protected memory and unusable for this. About 16.0 gigabytes of it was free, and a first layout of 16.7 gigabytes, with a scale per 64 weights everywhere and the embedding on the GPU, failed to allocate its last 0.95 gigabytes. So three changes. The experts, which are 14.5 gigabytes of int4, take one fp16 scale per 128 weights instead of 64. Each group’s scale is the one, between max over 6.5 and max over 9, with the least squared error, rather than max over 7, and that more than pays for the bigger groups: 10.7 percent error on an expert against 11.2 at 64 with max over 7. The 1.24 gigabyte embedding never goes to the GPU: the server copies the row of each token from the file. And the KV cache holds 512 positions. That is 15.75 gigabytes. The weights never cross the network either: the laptop downloads the checkpoint, converts it in four minutes, and the Vulkan server reads it into the GPU from its own disk, 15.65 gigabytes in 4 to 6 seconds, through a new driver request. Through the SSH tunnel to the Mac it would take an hour and a half.</aside>
+</section>

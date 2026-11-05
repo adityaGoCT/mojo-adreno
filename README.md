@@ -37,7 +37,11 @@ ternary kernels plus seven small Mojo kernels: 25 tokens/s, all 16 checked steps
 **[Qwen3-30B-A3B (mixture of experts) on a Snapdragon X2 Elite laptop](qwen3moe/README.md)**: 30.5B parameters,
 128 experts with 8 per token, in int4 (15.75 GB, inside the X2-90's 16.8 GB heap). It decodes at 31–37 tokens/s,
 with the GPU's logits within 1e-4 of transformers' layers on the same weights. The laptop reads its own weights
-into the GPU (new `OP_FILE` / `OP_GATHER` driver requests), so nothing crosses the tunnel but launches.
+into the GPU (new `OP_FILE` / `OP_GATHER` driver requests), so nothing crosses the tunnel but launches. A prompt is
+read in batches with the experts grouped by token: 404 tokens in 4.31 s, 2.8× a token at a time. One of its layers on
+the laptop's Hexagon NPU, for comparison: accurate in fp16, but its static graphs compute all 128 experts. Slides:
+**[A 30B mixture of experts on a Snapdragon laptop](docs/presentation-qwen3moe/qwen3moe-on-the-x2-elite.pdf)**
+(6 slides, PDF). [View it online](https://claude.ai/artifact/THLm8oGyVrqYs6X2d9P2iq).
 
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in

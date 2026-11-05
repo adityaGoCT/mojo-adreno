@@ -1,0 +1,30 @@
+<section id="checks" data-transition="fade" style="background:#18212F;color:#F6F5F1;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15;color:#F6F5F1">Checked, and what comes next</h2>
+<div style="display:flex;gap:48px">
+<div style="flex:1;display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#222D3E;border-left:6px solid #5B8DEF;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600;color:#F6F5F1">Exact on its weights</h3>
+<p style="font-size:26px;color:#C9D3E0;line-height:1.4">Logits within 1e-4 of transformers’ Qwen3-MoE layers on the same int4 weights; greedy tokens 31 of 31 and 95 of 95.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#222D3E;border-left:6px solid #5B8DEF;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600;color:#F6F5F1">Close to the bf16 model</h3>
+<p style="font-size:26px;color:#C9D3E0;line-height:1.4">31 of 32 greedy choices agree; the one difference comes after the answer ends.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#222D3E;border-left:6px solid #E0864F;border-radius:12px;padding:24px">
+<p style="font-size:26px;color:#F6F5F1;line-height:1.45"><i>“The sky appears blue because molecules in Earth’s atmosphere scatter shorter wavelengths of light, like blue, more effectively than longer wavelengths like red.”</i></p>
+<p style="font-size:24px;color:#9AA8BC">The GPU’s first sentence, asked why the sky is blue</p>
+</div>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px">
+<h3 style="font-size:30px;font-weight:600;color:#E0864F">Next</h3>
+<ul style="font-size:28px;color:#F6F5F1;line-height:1.45;display:flex;flex-direction:column;gap:14px">
+<li>Prefill on the matrix units: cooperative-matrix tiles instead of 8-token rows.</li>
+<li>Fuse the norms, router and top 8: a quarter of a step in 192 launches.</li>
+<li>The NPU reading only the chosen experts, or taking attention while the GPU takes the experts.</li>
+<li>Better int4 rounding (GPTQ, AWQ) on the same storage.</li>
+</ul>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#9AA8BC">github.com/adityaGoCT/mojo-adreno · qwen3moe/ · the reference runs transformers’ layers a layer at a time on the laptop</p>
+<aside>Everything is checked. The reference is transformers’ own Qwen3-MoE layers, run a layer at a time on the laptop, since the bf16 model fits neither the laptop nor the Mac at once. On the same int4 weights the GPU’s logits are within 1e-4 at every position, and every greedy token matches, 31 of 31 and 95 of 95 on two prompts. Against the original bf16 model, 31 of 32 greedy choices agree, and the one difference comes after the answer has ended. Asked why the sky is blue, it answers in two correct sentences. What comes next: the prefill’s products still run on the plain ALUs, eight tokens a row, and the cooperative-matrix units would read a prompt several times faster. The RMSNorms, router and top-8 are a quarter of a decode step as 192 small launches, waiting to be fused. The NPU would become worthwhile if its graphs could read only the chosen experts, or if it took the dense attention while the GPU takes the experts. And better int4 rounding, GPTQ or AWQ style, would fit the same storage and kernels.</aside>
+</section>

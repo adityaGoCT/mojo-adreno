@@ -1,0 +1,46 @@
+{
+  "v": 4,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-06T06:15:00Z"
+  },
+  "lists": "css",
+  "title": "Qwen3-30B-A3B on a Snapdragon laptop",
+  "order": [
+    "cover",
+    "fit",
+    "token",
+    "prefill",
+    "npu",
+    "checks"
+  ],
+  "sections": {
+    "intro": {
+      "description": "Qwen3-30B-A3B in int4 on the X2 Elite laptop’s GPU, from Mojo",
+      "start": "cover"
+    },
+    "how": {
+      "description": "How it fits in memory, decodes a token and prefills a prompt",
+      "start": "fit"
+    },
+    "npu": {
+      "description": "One of its layers on the Hexagon NPU",
+      "start": "npu"
+    },
+    "end": {
+      "description": "The checks against transformers, and what comes next",
+      "start": "checks"
+    }
+  },
+  "faces": {
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    },
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    }
+  },
+  "designSystems": []
+}
