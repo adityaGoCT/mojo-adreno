@@ -15,6 +15,7 @@ checked against PyTorch and timed against the all-GPU path (llama/llama.mojo wit
    of the handoff and GPU decode that the fp16 prefill's error cannot blur at a near-tie).
 4. hybrid: NPU prefill, handoff, GPU decode; tokens and logits against the reference.
 5. --baseline: the same prompt through llama.mojo's all-GPU batched prefill, then decode.
+6. --all-npu: prefill and decode both on the NPU (npu_decode; npu/export_decode.py's graphs, compiled once).
 Before each timed run the phone cools to SKIN < --cool C (dumpsys thermalservice).
 """
 
@@ -175,6 +176,30 @@ def replay(model, kv, first, max_new, eos):
     return toks
 
 
+def all_npu(a, ids, eos, ref, tok):
+    """Prefill and decode both on the NPU: npu_decode, with the decode parts compiled once, a part a process."""
+    have = sh("adb", "shell", f"ls {GRAPHS}").stdout.split()
+    parts = int((a.decode_graphs / "decode.txt").read_text().split()[4])
+    if a.push_graphs or "decode.txt" not in have:
+        sh("adb", "shell", f"rm -f {GRAPHS}/decode*")
+        sh("adb", "push", a.decode_graphs / "decode.txt", *sorted(a.decode_graphs.glob("decode*.onnx")), f"{GRAPHS}/")
+        have = sh("adb", "shell", f"ls {GRAPHS}").stdout.split()
+    for i in range(parts):
+        if f"decode{i}_ctx.onnx" not in have:
+            out = adb_run(f"cd {DEV}; {LD} ./npu_decode compile {GRAPHS} {i}", f"{DEV}/dcompile{i}.txt")
+            print("\n".join("  " + l for l in out.splitlines() if not l.startswith("[ort")))
+    print(f"\nall-NPU: prefill and decode on the HTP, fp16 (SKIN {cool(a.cool):.1f} C):", flush=True)
+    out = adb_run(f"cd {DEV}; {LD} LLAMA_EOS={','.join(map(str, eos))} ./npu_decode {GRAPHS} {a.max_new} "
+                  f"{' '.join(map(str, ids))}", f"{DEV}/allnpu.txt")
+    print("\n".join("  " + l for l in out.splitlines() if not l.startswith(("tok ", "[ort"))))
+    got = parse(out)
+    match = next((i for i, (x, y) in enumerate(zip(got, ref)) if x != y), min(len(got), len(ref)))
+    print(f"  tokens: phone {len(got)}, PyTorch {len(ref)}, identical for the first {match}")
+    if match < min(len(got), len(ref)):
+        print("  phone:  ", repr(tok.decode(got, skip_special_tokens=True)))
+        print("  PyTorch:", repr(tok.decode(ref, skip_special_tokens=True)))
+
+
 def parse(out):
     toks = [int(l.split()[1]) for l in out.splitlines() if l.startswith("tok ")]
     return toks
@@ -194,6 +219,10 @@ def main():
     ap.add_argument("--cool", type=float, default=40.0)
     ap.add_argument("--setup", action="store_true", help="a wiped phone: download, convert and push everything")
     ap.add_argument("--compile-only", action="store_true", help="compile the graphs on the phone and stop")
+    ap.add_argument("--all-npu", action="store_true",
+                    help="also run prefill and decode both on the NPU (npu_decode, npu/export_decode.py's graphs)")
+    ap.add_argument("--decode-graphs", type=pathlib.Path, default=ROOT / "build/npu/decode")
+    ap.add_argument("--no-hybrid", action="store_true", help="skip the NPU prefill + GPU decode run")
     a = ap.parse_args()
     from transformers import AutoTokenizer
 
@@ -242,6 +271,13 @@ def main():
         lg = np.fromfile(build / "logits.f32", np.float32)
         print(f"  K/V relative error (Frobenius) at most {worst:.1e}; logits max |err| "
               f"{np.abs(lg - ref_logits).max():.3f}, argmax {lg.argmax()} (PyTorch {ref_logits.argmax()})")
+
+    if a.all_npu:
+        if a.quant != "fp16":
+            sys.exit("--all-npu: the NPU decode graphs are fp16")
+        all_npu(a, ids, eos, ref, tok)
+    if a.no_hybrid:
+        return
 
     print(f"\nhybrid: NPU prefill + GPU decode, {a.quant} decode weights (SKIN {cool(a.cool):.1f} C):", flush=True)
     out = adb_run(f"cd {DEV}; {LD} MODULAR_DRIVER_PLUGINS=vulkan@{DEV}/libM_driver_vulkan.so NPU_RUNS={a.runs} "

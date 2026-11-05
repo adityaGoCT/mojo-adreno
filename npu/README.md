@@ -3,7 +3,7 @@
 An experiment on the Galaxy S26 Ultra (Snapdragon 8 Elite Gen 5, SM8850). The prompt of Llama 3.2 1B Instruct is
 prefilled on the Hexagon NPU's HTP. Its KV cache and first-token logits are handed to the Adreno 840, which
 decodes with our Mojo `DeviceContext` program (`llama/model.mojo`). This is compared against prefill and decode both
-on the GPU.
+on the GPU, and both on the NPU.
 
 ## Results
 
@@ -13,16 +13,27 @@ Vulkan pipeline cache and starts with SKIN below 40 °C. Decode is the 79 tokens
 
 | Llama 3.2 1B | Prompt: prefill + handoff left after it | Prefill rate | Decode after the prompt | Tokens vs PyTorch |
 |---|---|---|---|---|
+| All-NPU, fp16 (`npu_decode`) | 168 ms + 6.8 ms = 174 ms | 2,570 tokens/s | 39.0 ms, 25.6 tokens/s | 80 of 80 |
 | **NPU prefill (fp16) + GPU decode, fp16** | **169 ms + 1.4 ms = 170 ms** | **2,550 tokens/s** | 40.0 ms, 25.0 tokens/s | 80 of 80 |
 | All-GPU, fp16 (`llama.mojo`, `LLAMA_PREFILL`) | 685 ms | 629 tokens/s | 39.8 ms, 25.2 tokens/s | 80 of 80 |
 | **NPU prefill (fp16) + GPU decode, 4-bit** | **169 ms + 0.8 ms = 170 ms** | **2,550 tokens/s** | 13.2 ms, 76.0 tokens/s | 38 of 80 (a near-tie, below); 80 of 80 from the NPU's K/V |
 | All-GPU, 4-bit | 641 ms | 672 tokens/s | 13.2 ms, 75.7 tokens/s | 80 of 80 (int4 throughout) |
 
+There is no 4-bit all-NPU row: the NPU's graphs are fp16, and 4-bit weights on the HTP need quantized
+activations (w4a16).
+
 - **Prefill:** the HTP prefills the prompt **4.1× faster** than the Adreno in fp16 (168 ms against 685 ms) and
   **3.8× faster** than the Adreno's 4-bit prefill (641 ms). The NPU graph is the same fp16 one in both rows. The
   Adreno's time uses `p_attention_scalar`, because this phone's driver cannot create the fused attention kernel's
   pipeline. The graphs run 448 rows (the prompt padded to a multiple of 32); `Llama.prefill` runs 512.
-- **Decode:** the same with either prefill, since both decode with the same Mojo program on the GPU.
+- **Decode on the GPU:** the same with either prefill, since both decode with the same Mojo program.
+- **Decode on the NPU:** 39.0 ms a token in fp16, against 39.8–40.0 ms on the GPU. Each token reads the 2.47 GB of
+  fp16 weights, so both run near the same memory speed: about 63 GB/s, where `android/README.md`'s `vecadd`
+  measured 66 GB/s. With 4-bit weights the GPU decodes 3× faster (13.2 ms), which the NPU could match only with
+  quantized graphs.
+- **All-NPU handoff:** in `npu_decode` the prompt's K/V go from the prefill's outputs into the decode graphs' fp16
+  cache in 6.8 ms, through `npu_kv`'s fp32 and back; binding one buffer to both would remove that. The process
+  then releases the prefill contexts and loads the decode ones (2.1 s), since both sets together are 5 GB.
 - **Time to the first token:** 170 ms against 641–685 ms.
 - **Handoff:** 8–15 ms when it follows the whole prefill. It is overlapped with the NPU instead: each part's 4
   layers are converted and copied to the GPU while the NPU runs the next parts. That leaves 0.8–2.0 ms after the
@@ -46,6 +57,8 @@ One-time and per-process costs of the NPU path:
 | Load the 4 compiled contexts (2.5 GB of context binaries), at each process start | 1.9–2.4 s |
 | First prefill in a process | 175–195 ms |
 | Later prefills | 167–172 ms |
+| Compile the 4 decode graphs (all-NPU), once | 78 s (12.6 + 12.4 + 12.5 + 40.7 s) |
+| Load the 4 decode contexts (2.5 GB), at each process start | 2.1 s |
 
 The GPU's own weight load is the same in both paths: 1.5 s in fp16, 0.5–0.8 s in 4-bit.
 
@@ -162,8 +175,10 @@ The existing paths (`Llama.forward`, `Llama.prefill`, `llama.mojo`) are unchange
 | `export.py` | the prefill graphs (`--fp32` for checking on the Mac, `--parts`, `--rows`) |
 | `npu_prefill.cpp` | ONNX Runtime + QNN HTP (C interface): compile a part (`npu_compile`), load the compiled parts, prefill, K/V and logits out; `-DNPU_TOOL` builds `npu_tool` |
 | `hybrid.mojo` | NPU prefill, handoff (timed one after the other and overlapped with the NPU's parts), GPU decode: the new entry point |
-| `build.py` | `tool` and `hybrid` for the phone, with the ORT and QNN libraries staged next to them |
-| `run.py` | reference in PyTorch, push, NPU K/V check (`--kv`), hybrid run, all-GPU baseline (`--baseline`) |
+| `export_decode.py` | the decode graphs (one token against an fp16 KV cache of 512 positions; `--fp32` for the Mac) |
+| `npu_decode.cpp` | all-NPU: `npu_prefill.cpp`'s prefill, then greedy decode through the decode graphs; `compile <dir> <i>` compiles one decode part |
+| `build.py` | `tool`, `hybrid` and `decode` for the phone, with the ORT and QNN libraries staged next to them |
+| `run.py` | reference in PyTorch, push, NPU K/V check (`--kv`), hybrid run, all-GPU baseline (`--baseline`), all-NPU run (`--all-npu`) |
 
 ## Run
 
@@ -176,6 +191,10 @@ python3 npu/build.py tool hybrid                               # build/npu/phone
 # Missing contexts are compiled first, one part per process (npu_tool compile).
 PYTHONPATH=build/npu/pydeps $PY npu/run.py --model $SNAP --setup --push-graphs --kv --baseline
 PYTHONPATH=build/npu/pydeps $PY npu/run.py --model $SNAP --quant q4 --kv --baseline
+# all on the NPU: the decode graphs, compiled once a part a process, then prefill and decode on the HTP
+PYTHONPATH=build/npu/pydeps $PY npu/export_decode.py          # build/npu/decode
+python3 npu/build.py decode                                    # build/npu/phone/npu_decode
+PYTHONPATH=build/npu/pydeps $PY npu/run.py --model $SNAP --all-npu --no-hybrid
 ```
 
 On the phone, by hand (`D=/data/local/tmp/npu`, `M=/data/local/tmp/llama/model`):

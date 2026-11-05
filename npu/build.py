@@ -2,6 +2,7 @@
 
   python3 npu/build.py tool      # npu_tool: npu_prefill.cpp on its own (compile, time, dump)
   python3 npu/build.py hybrid    # hybrid: npu/hybrid.mojo (NPU prefill, then llama/model.mojo's GPU decode)
+  python3 npu/build.py decode    # npu_decode: npu_decode.cpp (prefill and decode both on the NPU)
 
 Both link ONNX Runtime for Android with the QNN execution provider (Maven Central's
 com.microsoft.onnxruntime:onnxruntime-android-qnn) and stage Qualcomm's QNN runtime next to the executable
@@ -52,6 +53,13 @@ def tool():
     sh(*compile_shim(["-DNPU_TOOL"]), "-static-libstdc++", "-o", OUT / "npu_tool")
 
 
+def decode():
+    """npu_decode: Llama entirely on the NPU, npu_decode.cpp with npu_prefill.cpp's prefill."""
+    stage_npu()
+    sh(CXX, "-O2", "-std=c++17", f"-I{ORT / 'headers'}", HERE / "npu_decode.cpp", HERE / "npu_prefill.cpp",
+       f"-L{OUT}", "-lonnxruntime", "-Wl,-rpath,$ORIGIN", "-static-libstdc++", "-o", OUT / "npu_decode")
+
+
 def hybrid():
     """npu/hybrid.mojo, compiled by android/build.py's Mojo for Android (kernels as adreno840 SPIR-V inside),
     linked with npu_prefill.cpp and staged with MAX's runtime and the driver plugin."""
@@ -67,7 +75,7 @@ def hybrid():
 
 
 def main():
-    steps = {"tool": tool, "hybrid": hybrid}
+    steps = {"tool": tool, "hybrid": hybrid, "decode": decode}
     for name in sys.argv[1:] or ["tool"]:
         if name not in steps:
             sys.exit(f"unknown step {name}: one of {' '.join(steps)}")
