@@ -27,6 +27,10 @@ BOS, 13 arbitrary ids and "\\n" (108), right-padded to 48. Saved as raw little-e
   meta.json
 
   build/vla/venv/bin/python pi0/reference.py [--out build/vla/pi0/ref]
+
+--kv <file> instead denoises from another prefix cache, fp32 [18][K, V][816][256] (the NPU's: pi0/pi0npu.mojo's PI0_KV,
+npu/pi0_check.py --save-kv), and reports how far its actions are from the fp32 model's; --actions <file> (the phone's
+PI0_OUT) is then compared with PyTorch's actions from that same cache. Nothing is written.
 """
 
 import argparse
@@ -181,9 +185,31 @@ def load_policy():
     return policy, names
 
 
+def denoise_from(kv_path, actions_path, model, state, prefix_pad, cache, noise, official, steps):
+    """The 10 Euler steps from the prefix cache in kv_path (valid rows; the padded ones are masked)."""
+    kv = np.fromfile(kv_path, np.float32).reshape(len(cache.layers), 2, -1, 256)
+    for l in range(len(cache.layers)):
+        cache.layers[l].keys[0, 0].copy_(torch.from_numpy(kv[l, 0]))
+        cache.layers[l].values[0, 0].copy_(torch.from_numpy(kv[l, 1]))
+    x_t = noise.clone()
+    for s in range(steps):
+        t = torch.tensor(1.0 + s * (-1.0 / steps), dtype=torch.float32).expand(1)
+        x_t = x_t + (-1.0 / steps) * model.denoise_step(state=state, prefix_pad_masks=prefix_pad, past_key_values=cache,
+                                                        x_t=x_t, timestep=t)
+    err = float((x_t - official).abs().max())
+    print(f"PyTorch from {kv_path}'s cache: actions within {err:.2e} of the fp32 model's "
+          f"(largest {float(official.abs().max()):.2f}; mean abs error {float((x_t - official).abs().mean()):.1e})")
+    if actions_path:
+        phone = torch.from_numpy(np.fromfile(actions_path, np.float32).reshape(x_t.shape))
+        print(f"{actions_path}: within {float((phone - x_t).abs().max()):.2e} of PyTorch's from the same cache, "
+              f"{float((phone - official).abs().max()):.2e} of the fp32 model's")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "build/vla/pi0/ref"))
+    ap.add_argument("--kv", help="denoise from this prefix cache (fp32 [18][k, v][816][256]) instead; write nothing")
+    ap.add_argument("--actions", help="with --kv: an action chunk (50 x 32 fp32) to compare with PyTorch's from it")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -240,6 +266,9 @@ def main():
         vts.append(v_t[0])
         xts.append(x_t[0])
     assert torch.equal(x_t, official), (x_t - official).abs().max()
+    if args.kv:
+        denoise_from(args.kv, args.actions, model, state, prefix_pad, cache, noise, official, steps)
+        return
 
     rot = pwe.paligemma.model.language_model.rotary_emb
     cos, sin = rot(torch.zeros(1, 1024, 256), torch.arange(1024)[None])

@@ -134,10 +134,13 @@ struct Pi0(Movable):
     var profiling: Bool
     var last: Float64
 
-    def __init__(out self, ctx: DeviceContext, path: String) raises:
+    def __init__(out self, ctx: DeviceContext, path: String, gemma: Bool = True) raises:
+        """gemma=False: without Gemma 2B's prefix layers and their activations on the GPU (4 GB), for a prefix that
+        runs elsewhere (pi0/pi0npu.mojo: on the NPU) and fills kc / vc itself."""
         self.ctx = ctx
         self.w = Weights[DType.uint16, False](ctx)
-        self.s = Scratch(ctx, XA_SIZE, PART_SIZE, 0, SK_ROWS, SPLIT_TARGET, SPLIT_BELOW, ACT_FIRST)
+        self.s = Scratch(ctx, XA_SIZE if gemma else AROWS * 2 * EF, PART_SIZE, 0, SK_ROWS, SPLIT_TARGET, SPLIT_BELOW,
+                         ACT_FIRST)
         self.path = path
         self.embed_offset = 0
         self.pix = ctx.enqueue_create_buffer[DType.float32](NCAM * 3 * IMG * IMG)
@@ -151,10 +154,11 @@ struct Pi0(Movable):
         self.vatt = ctx.enqueue_create_buffer[DType.float32](VROWS * VD)
         self.vh = ctx.enqueue_create_buffer[DType.float32](VROWS * VFP)
         self.tx = ctx.enqueue_create_buffer[DType.float32](PROWS * D)
-        self.txn = ctx.enqueue_create_buffer[DType.float32](PROWS * D)
-        self.tqkv = ctx.enqueue_create_buffer[DType.float32](PROWS * QKV)
-        self.tatt = ctx.enqueue_create_buffer[DType.float32](PROWS * H * HD)
-        self.tgu = ctx.enqueue_create_buffer[DType.float32](PROWS * 2 * F)
+        var prows = PROWS if gemma else 1
+        self.txn = ctx.enqueue_create_buffer[DType.float32](prows * D)
+        self.tqkv = ctx.enqueue_create_buffer[DType.float32](prows * QKV)
+        self.tatt = ctx.enqueue_create_buffer[DType.float32](prows * H * HD)
+        self.tgu = ctx.enqueue_create_buffer[DType.float32](prows * 2 * F)
         self.kc = List[DeviceBuffer[DType.float32]]()
         self.vc = List[DeviceBuffer[DType.float32]]()
         for l in range(L):
@@ -188,12 +192,12 @@ struct Pi0(Movable):
         self.last = 0
         for buf in [self.st, self.xt, self.at, self.eh, self.xe, self.xen, self.eqkv, self.eatt, self.egu, self.tx]:
             ctx.enqueue_memset(buf, Float32(0))
-        self.load(path)
+        self.load(path, gemma)
         self.time_embedding()
 
     # ---- weights -------------------------------------------------------------------------------------------
 
-    def load(mut self, path: String) raises:
+    def load(mut self, path: String, gemma: Bool = True) raises:
         var ck = Checkpoint(path)
         var f = open(path, "r")
         var pe = VP + "embeddings."
@@ -220,6 +224,8 @@ struct Pi0(Movable):
         self.w.upload(ck, f, "proj.b", one(mm + "bias"), mode=WIDE)
         for l in range(L):
             for which in range(2):  # Gemma 2B, then the expert
+                if which == 0 and not gemma:
+                    continue
                 var p = (GP if which == 0 else EP) + "layers." + String(l) + "."
                 var t = ("g" if which == 0 else "e") + String(l) + "."
                 var width = D if which == 0 else ED

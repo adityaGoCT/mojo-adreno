@@ -22,6 +22,9 @@ check actions (50 x 32) : max abs error 1.1e-05 (largest reference value 1.15)
 run 0 : vision 529.9 ms, projector+embed 2.6 ms, prefix 2560.7 ms, 10 steps 778.8 ms ( 77.9 ms/step ); chunk 3603.7 ms
 ```
 
+With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.1–2.3 s instead of 4.05 s**, with the actions
+within 3.0e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)).
+
 **The action chunk matches PyTorch fp32 within 1.1e-5.** The stated tolerance is 2e-5 absolute on the actions.
 Before the split kernels below it was 7.2e-6: splitting sums over k and over keys reorders fp32 additions.
 Inside the network, every stage is within 1e-4 of its largest value. The prefix's K/V differ most (up to 1.8e-3
@@ -78,6 +81,79 @@ Still true from the per-launch profile (`PI0_PROFILE=1`):
 - **The prefix synchronizes after each layer.** The driver plugin submits 64 launches at a time
   (`VK_SUBMIT_EVERY`), and 64 of these outlast the GPU's watchdog: the device is lost.
 
+## The prefix on the Hexagon NPU
+
+`pi0npu.mojo` runs the same chunk with Gemma 2B's prefix on the phone's Hexagon NPU (HTP). SigLIP, the projector and
+the expert's 10 steps stay on the Adreno, as above. The prefix is fp16 ONNX graphs ([`../npu/export_pi0.py`](../npu))
+that ONNX Runtime's QNN execution provider runs on the HTP ([`../npu/pi0_prefix.cpp`](../npu/pi0_prefix.cpp)), the
+route `npu/` takes for Llama's prefill. The program:
+1. reads the 816 prefix embeddings back from the GPU and converts them to fp16;
+2. runs the six graphs one after another on the NPU;
+3. as each graph finishes, converts its three layers' K and V to fp32 and copies them into the expert's cache
+   (`kc`/`vc`, rows 0–815), while the NPU runs the next graph.
+
+The GPU holds no Gemma 2B weights (`Pi0(gemma=False)`): 1.4 GB instead of 5.4 GB.
+
+Same Galaxy Z Fold, same example, pipelines cached, each program started with SKIN below 33–34 °C, one after the
+other:
+
+| Stage | NPU prefix (`pi0npu`, 4 runs) | All on the GPU (`pi0`, same session, 3 runs) | All on the GPU (above) |
+|---|---|---|---|
+| Vision | 554–557 ms | 553–632 ms | 554–558 ms |
+| Projector + embeddings | 3 ms | 3 ms | 2–3 ms |
+| **Prefix** | **0.80–0.94 s** (NPU 0.80–0.93 s) | 2.86–3.10 s | 2.73–2.75 s |
+| 10 steps | 761–764 ms | 809–844 ms | 761–785 ms |
+| **Action chunk** | **2.12–2.26 s** | 4.48–4.68 s | 4.05–4.06 s |
+
+- **The prefix runs about 3× faster on the NPU:** 0.80–0.94 s against 2.73–3.10 s on the GPU. Its 3.2 TFLOP (832
+  rows) take 0.80 s in some runs and 0.92–0.93 s in others (4.0 and 3.5 TFLOP/s), within one process. A separate run
+  of 5 prefixes (`pi0npu_tool`) took 920–929 ms each.
+- **The chunk is 1.8–1.9× faster:** 2.12–2.26 s against 4.05 s (2.0–2.2× against the same session's 4.48–4.68 s).
+  Vision (0.55 s) and the 10 steps (0.76 s) are now most of it.
+- **Overhead:** reading back the embeddings, converting them, and the handoff left after the last graph add 5–11 ms
+  to the NPU's time. The first 15 layers' K/V reach the GPU while the NPU is still running.
+- The NPU's graphs load in 3.5–6 s per process (3.78 GB of compiled contexts). The GPU's weights load in 3.0 s
+  instead of 8 s.
+- Compiling the graphs for the HTP takes 18.5 minutes once, on the phone (139–220 s a graph, one graph a process).
+
+### Accuracy in fp16
+
+| | NPU (HTP, fp16) | GPU (fp32, above) |
+|---|---|---|
+| Prefix K, worst layer | max abs error 0.079 (layer 16; values up to 17.8), relative 4.8e-3 | 0.00079 |
+| Prefix V, worst layer | max abs error 0.16 (layer 17; values up to 19.8), relative 6.0e-3 | 0.0018 |
+| `v_t` of the 10 steps | 2.6e-3 … 4.3e-3 (values up to 4.1) | 7.6e-6 … 1.0e-5 |
+| **Actions (50 × 32)** | **max abs error 3.0e-3** (values up to 1.15; mean 2.1e-4) | 7.2e-6 |
+
+All of that error comes from the prefix's fp16 arithmetic:
+- **The handoff and the GPU expert are exact.** `pi0/reference.py --kv` runs PyTorch's 10 steps from the very K/V the
+  phone handed to its expert (`PI0_KV`). Its actions are within 2.4e-6 of the phone's.
+- **The fp16 weights cost almost nothing.** The same graphs computing in fp32 on the Mac's CPU, with the
+  fp16-rounded weights (`export_pi0.py --fp32`), give K/V within 4e-4 and actions within 8.9e-6.
+- **The HTP is more accurate than ONNX Runtime's fp16 on the Mac's CPU.** The same fp16 graphs there give K/V within
+  0.145 / 0.32 (relative 8.5e-3 / 1.1e-2) and actions within 4.7e-3.
+
+The relative errors grow with depth, from 4e-4 in layer 0 to 5–6e-3 in layers 16–17.
+
+### The graphs
+
+`npu/export_pi0.py` writes the 18 layers as six graphs of three layers each:
+- **Rows:** each graph runs 832 rows, the 816 prefix rows zero-padded.
+- **Inputs:** `x [832, 2048]`, `cos`/`sin [832, 1, 256]` at each row's position (cumsum of the pad mask, minus 1),
+  and an additive key mask `[1, 832]` (0 or −30000) for the bidirectional attention.
+- **Outputs:** each layer's `k`/`v [832, 256]`, K after RoPE, and the residual stream for the next graph. The last
+  layer computes only its K and V.
+- **Weights:** they are not in the graphs. They live in `gemma.bin`, an fp16 copy of the 18 layers (3.75 GB). The
+  phone writes it from its own checkpoint in 9 s (`npu/pi0_f16.c`, following `recipe.txt`), and its SHA-256 matches
+  the Mac's. Gemma's matrices are bf16-exact, and in fp16 only 0.2% of them (those below 2^-14) lose bits.
+- **fp16 range:** on this example the residual stream peaks at 3,360 entering layer 17, `gelu(gate) · up` at 2,200,
+  and the attention scores at 35. RMSNorm is ONNX's `RMSNormalization` (QNN's `RmsNorm`, which squares in fp32).
+- **GeGLU:** `gelu_tanh(x)` is written as `x · sigmoid(u · (1.5957691 + 0.0713548 u²))` with `u = clip(x, −10, 10)`.
+  That is the same function, but `u³` cannot overflow fp16 when the gate reaches 43.
+- **Attention:** multi-query attention is `[8 · 832, 256] × [256, 832]`, then `Softmax`, then `× V`.
+
+Every node runs on the HTP: CPU fallback is disabled.
+
 ## Also on a Snapdragon X2 Elite laptop
 
 The same program drives the Adreno X2-90 of a Snapdragon X2 Elite laptop (Windows on Arm, 33.6 GB) from the Mac,
@@ -123,7 +199,27 @@ adb shell "cd $D; VK_PIPELINE_CACHE=$D/pipelines.bin MODULAR_DRIVER_PLUGINS=vulk
 adb shell cat $D/run.log
 ```
 
-The phone downloads the 14 GB checkpoint itself (8 minutes in the lab). Its SHA-256 `8229fd9a…` matches the
+The phone downloads the 14 GB checkpoint itself (8 minutes in the lab).
+
+With the prefix on the NPU (`N=/data/local/tmp/vla/pi0npu`; ONNX Runtime 1.29 and QNN 2.42 from Maven Central, as in
+[`../npu`](../npu)):
+
+```bash
+PYTHONPATH=build/npu/pydeps python3 npu/export_pi0.py         # build/npu/pi0: 6 graphs, recipe.txt
+python3 npu/build.py pi0tool pi0                               # build/npu/pi0phone: pi0npu_tool, pi0_f16, pi0npu
+adb push build/npu/pi0phone/. $N/bin/
+adb push build/npu/pi0/npu.txt build/npu/pi0/recipe.txt build/npu/pi0/part*.onnx $N/model/
+adb shell "cd $N; bin/pi0_f16 $D/model.safetensors model/recipe.txt model/gemma.bin"     # 9 s
+L="LD_LIBRARY_PATH=$N/bin:/system/lib64:/vendor/lib64"
+adb shell "cd $N/bin; $L ./pi0npu_tool compile $N/model 0 > $N/compile0.log 2>&1"   # once per graph, 0..5
+adb shell "cd $N/bin; $L ./pi0npu_tool $N/model $D/ref 5 $N/dump"                     # NPU alone: time, K/V dump
+adb shell "cd $N/bin; $L VK_PIPELINE_CACHE=$N/pipelines.bin MODULAR_DRIVER_PLUGINS=vulkan@$N/bin/libM_driver_vulkan.so PI0_KV=$N/kv.f32 PI0_OUT=$N/actions.f32 ./pi0npu $D/model.safetensors $D/ref $N/model 4"
+build/vla/venv/bin/python pi0/reference.py --kv kv.f32 --actions actions.f32   # PyTorch's steps from the phone's K/V
+```
+
+Send each compile in its own `adb shell` line. On the lab's bridge, a `for` loop, `nohup`, `setsid` or `sh script.sh`
+dropped the connection before the command ran. `npu/pi0_check.py` checks the graphs on the Mac's CPU
+(`--graphs`) or the phone's K/V dump (`--dump`) against PyTorch. Its SHA-256 `8229fd9a…` matches the
 Mac's copy and Hugging Face's.
 
 **The reference** builds lerobot's `PI0Policy` on the meta device. It hands it the bf16-exact tensors in bf16 and

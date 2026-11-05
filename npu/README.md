@@ -186,8 +186,12 @@ token's logits.
 | `hybrid.mojo` | NPU prefill, handoff (timed one after the other and overlapped with the NPU's parts), GPU decode: the new entry point |
 | `export_decode.py` | the decode graphs (one token against an fp16 KV cache of 512 positions; `--fp32` for the Mac) |
 | `npu_decode.cpp` | all-NPU: `npu_prefill.cpp`'s prefill, then greedy decode through the decode graphs; `compile <dir> <i>` compiles one decode part |
-| `build.py` | `tool`, `hybrid` and `decode` for the phone, with the ORT and QNN libraries staged next to them |
+| `build.py` | `tool`, `hybrid`, `decode`, `pi0tool` and `pi0` for the phone, with the ORT and QNN libraries staged next to them |
 | `run.py` | reference in PyTorch, push, NPU K/V check (`--kv`), hybrid run, all-GPU baseline (`--baseline`), all-NPU run (`--all-npu`) |
+| `export_pi0.py` | π0's Gemma 2B prefix as fp16 graphs in 6 parts, and the recipe for their `gemma.bin` ([`../pi0`](../pi0/README.md#the-prefix-on-the-hexagon-npu)) |
+| `pi0_f16.c` | `gemma.bin` from π0's fp32 checkpoint (fp16), on the phone |
+| `pi0_prefix.cpp` | π0's prefix through ONNX Runtime + QNN HTP (C interface for `pi0/pi0npu.mojo`); `-DNPU_TOOL` builds `pi0npu_tool` (compile a part, time, dump K/V) |
+| `pi0_check.py` | π0's prefix graphs on the Mac's CPU, or the phone's K/V dump, against PyTorch's cache |
 
 ## Run
 
