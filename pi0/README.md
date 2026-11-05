@@ -22,7 +22,7 @@ check actions (50 x 32) : max abs error 1.1e-05 (largest reference value 1.15)
 run 0 : vision 529.9 ms, projector+embed 2.6 ms, prefix 2560.7 ms, 10 steps 778.8 ms ( 77.9 ms/step ); chunk 3603.7 ms
 ```
 
-With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.05–2.18 s instead of 3.6 s**, with the
+With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.05–2.16 s instead of 3.6 s**, with the
 actions within 3.2e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)).
 
 **The action chunk matches PyTorch fp32 within 1.1e-5.** The stated tolerance is 2e-5 absolute on the actions.
@@ -95,25 +95,28 @@ route `npu/` takes for Llama's prefill. The program:
 The GPU holds no Gemma 2B weights (`Pi0(gemma=False)`): 1.4 GB instead of 5.4 GB.
 
 Both programs use the GPU kernels above (split keys, split-k, Gemma's activation first). Same Galaxy Z Fold, same
-example, pipelines cached, one after the other, each started with SKIN below 33 °C (31.9 and 32.3 °C):
+example, pipelines cached, nothing else running on the phone: the GPU's program first, then `pi0npu`, each started
+with SKIN at 30 °C:
 
 | Stage | NPU prefix (`pi0npu`, 4 runs) | All on the GPU (`pi0`, same session, 3 runs) | All on the GPU (above) |
 |---|---|---|---|
-| Vision | 493–494 ms | 493–543 ms | 530 ms |
-| Projector + embeddings | 3 ms | 2–4 ms | 3 ms |
-| **Prefix** | **0.81–0.93 s** (NPU 0.80–0.92 s) | 2.35–2.56 s | 2.56 s |
-| 10 steps | 745–793 ms | 750–825 ms | 779 ms |
-| **Action chunk** | **2.05–2.18 s** | 3.58–3.89 s | 3.60 s |
+| Vision | 494–496 ms | 494–514 ms | 530 ms |
+| Projector + embeddings | 2–3 ms | 3 ms | 3 ms |
+| **Prefix** | **0.80 s** (NPU 0.79 s) | 2.34–2.35 s | 2.56 s |
+| 10 steps | 745–748 ms | 749–784 ms | 779 ms |
+| **Action chunk** | **2.05–2.16 s** | 3.59–3.61 s | 3.60 s |
 
-- **The prefix runs 2.5–3.2× faster on the NPU:** 0.81–0.93 s against 2.35–2.56 s on the GPU. Its 3.2 TFLOP (832
-  rows) take 0.80 s in some runs and 0.92 s in others (4.0 and 3.5 TFLOP/s), within one process. A separate run of
-  5 prefixes (`pi0npu_tool`) took 920–929 ms each.
-- **The chunk is 1.6–1.9× faster:** 2.05–2.18 s against 3.58–3.89 s in the same session (3.60 s above). Vision
-  (0.49 s) and the 10 steps (0.75 s) are now most of it.
-- **Overhead:** reading back the embeddings, converting them, and the handoff left after the last graph add 10–12 ms
+- **The prefix runs 2.9× faster on the NPU:** 0.80 s against 2.34–2.35 s on the GPU. Its 3.2 TFLOP (832 rows) take
+  0.79 s in most runs (4.0 TFLOP/s) and 0.92 s in some (3.5 TFLOP/s), within one process: here one of the four
+  chunks (2.16 s). A separate run of 5 prefixes (`pi0npu_tool`) took 920–929 ms each.
+- **The chunk is 1.7× faster:** 2.05–2.16 s against 3.59–3.61 s. Vision (0.49 s) and the 10 steps (0.75 s) are now
+  most of it.
+- **Overhead:** reading back the embeddings, converting them, and the handoff left after the last graph add 4–12 ms
   to the NPU's time. The first 15 layers' K/V reach the GPU while the NPU is still running.
-- The NPU's graphs load in 3.5–6 s per process (3.78 GB of compiled contexts). The GPU's weights load in 2.6–3.0 s
+- The NPU's graphs load in 3.3–6 s per process (3.78 GB of compiled contexts). The GPU's weights load in 2–3 s
   instead of 8–9 s.
+- Two sessions once timed π0 on the phone at the same time: GPU chunks then drifted to 3.9–4.2 s. The numbers here
+  come from runs with the phone to themselves.
 - Before the GPU kernels above, the same comparison gave a 2.12–2.26 s chunk with the NPU (prefix 0.80–0.94 s)
   against 4.05 s all on the GPU (prefix 2.73–2.75 s).
 - Compiling the graphs for the HTP takes 18.5 minutes once, on the phone (139–220 s a graph, one graph a process).
