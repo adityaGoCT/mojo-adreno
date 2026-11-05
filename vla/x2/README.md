@@ -52,3 +52,17 @@ SmolVLA (bf16 weights, fp32 matrix units), four runs:
 | **Action chunk** | **531–550 ms** | **776–778 ms** |
 
 On a laptop that holds its clocks, the chunk takes 70% of the phone's time.
+
+π0, three runs: same checks as the phone, bit for bit (actions within 7.2e-6). Its 5.4 GB of weights took
+20 minutes through the tunnel.
+
+| Stage | X2-90 | Adreno 840 (Galaxy Z Fold) |
+|---|---|---|
+| Vision (SigLIP So400m) | 378–389 ms | 554–558 ms |
+| Prefix (Gemma 2B, 18 layers) | 2.13–2.15 s (about 120 ms a layer) | 2.73–2.75 s |
+| 10 steps | 0.70–0.74 s (70–74 ms/step) | 0.76–0.79 s |
+| **Action chunk** | **3.1–3.9 s** | **4.05–4.06 s** |
+
+The laptop's π0 chunk includes 0.1–0.2 s for the 48 language rows (393 KB, gathered on the Mac) to cross the
+tunnel, and π0 synchronizes after each prefix layer. Its stages add up to 3.2–3.3 s. The expert's steps gain
+least: 2,840 small launches a chunk, streamed at the tunnel's rate.

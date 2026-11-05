@@ -64,6 +64,13 @@ From a run synchronized after every launch (`PI0_PROFILE=1`):
 - **The prefix synchronizes after each layer.** The driver plugin submits 64 launches at a time
   (`VK_SUBMIT_EVERY`), and 64 of these outlast the GPU's watchdog: the device is lost.
 
+## Also on a Snapdragon X2 Elite laptop
+
+The same program drives the Adreno X2-90 of a Snapdragon X2 Elite laptop (Windows on Arm, 33.6 GB) from the Mac,
+through the remote driver plugin ([`../vla/x2`](../vla/x2)), with the phone's checks bit for bit. On the laptop's
+clock: vision 378–389 ms, prefix 2.13–2.15 s, 70–74 ms a step; 3.1–3.9 s a chunk, including 0.1–0.2 s of
+tunnel transfer.
+
 ## How it is computed
 
 `model.mojo` follows lerobot 0.6.1's `PI0Pytorch.sample_actions`:
