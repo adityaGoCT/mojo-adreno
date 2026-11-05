@@ -34,6 +34,11 @@ instead of 5.2 s.
 **[Ternary Qwen3-8B on the Adreno 840](qwen3/README.md)**: PrismML's Ternary-Bonsai-8B on the same
 ternary kernels plus seven small Mojo kernels: 25 tokens/s, all 16 checked steps matching MLX's greedy tokens.
 
+**[Qwen3-30B-A3B (mixture of experts) on a Snapdragon X2 Elite laptop](qwen3moe/README.md)**: 30.5B parameters,
+128 experts with 8 per token, in int4 (15.75 GB, inside the X2-90's 16.8 GB heap). It decodes at 31–37 tokens/s,
+with the GPU's logits within 1e-4 of transformers' layers on the same weights. The laptop reads its own weights
+into the GPU (new `OP_FILE` / `OP_GATHER` driver requests), so nothing crosses the tunnel but launches.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -552,6 +557,8 @@ runner/            vk_run.c, cl_run.c, check.h (result check), cpu_main.c (phone
                    vk_launch.c (generic launcher for kernels with a launch description)
 llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime), run.py (see its README)
 qwen3/             Ternary Qwen3-8B on the Adreno 840: qwen3k.mojo, qwen3_vk.c, export.py, run.py
+qwen3moe/          Qwen3-30B-A3B (MoE, int4) on the X2 Elite laptop's GPU: moek.mojo, model.mojo, convert.c,
+                   reference.py (transformers' layers, a layer at a time), run.py
 qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLSL; runners load them
                    when a driver has the extension; see its README)
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,

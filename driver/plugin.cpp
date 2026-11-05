@@ -46,7 +46,8 @@ const char *env(const char *name) {
   return value ? value : getenv(remote.c_str());
 }
 
-const char *opNames[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync"};
+const char *opNames[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync",
+                         "file", "gather", "record", "replay"};
 
 // VK_DRIVER_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
 // received, printed at exit.
@@ -58,7 +59,7 @@ struct Profile {
     if (!on)
       return;
     fprintf(stderr, "vulkan driver profile (%s):\n", transportKind());
-    for (int op = 1; op <= OP_SYNC; ++op)
+    for (int op = 1; op <= OP_REPLAY; ++op)
       if (ops[op].count)
         fprintf(stderr, "  %-7s %6llu requests %9.3f s  sent %8.2f MB  received %8.2f MB\n", opNames[op],
                 static_cast<unsigned long long>(ops[op].count), ops[op].seconds, ops[op].sent / 1e6,
@@ -74,7 +75,7 @@ bool call(uint32_t op, const void *a, size_t na, const void *b = nullptr, size_t
   std::lock_guard<std::mutex> guard(lock);
   auto start = std::chrono::steady_clock::now();
   if (env("DEBUG") && op != OP_LAUNCH) {  // every request but launches (logged in full)
-    fprintf(stderr, "vulkan driver: %s", op <= OP_SYNC ? opNames[op] : "?");
+    fprintf(stderr, "vulkan driver: %s", op <= OP_REPLAY ? opNames[op] : "?");
     for (size_t i = 0; i < std::min<size_t>(na / 8, 5); ++i)
       fprintf(stderr, " %llx", static_cast<unsigned long long>(static_cast<const uint64_t *>(a)[i]));
     fprintf(stderr, " (+%zu bytes)\n", nb);
@@ -973,6 +974,57 @@ M_driver_status_t M_driver_tensor_map_encode_im2col(M_driver_context_t, void *, 
                                                     const int32_t *, int32_t, int32_t, const uint32_t *,
                                                     int32_t, int32_t, int32_t, int32_t) {
   return M_DRIVER_STATUS_INCOMPATIBLE;
+}
+
+// The executor reads `size` bytes of the file `path`, from `file_offset`, into the device memory at `address` (an
+// address this plugin handed out). The file is on the executor's side: for the remote plugin, the device running
+// vk_server, so weights already there need not cross the transport. Programs reach this with dlopen/dlsym of the
+// plugin (Mojo: OwnedDLHandle(path).call["M_driver_remote_file", Int32](...)). Returns 0, or -1; a read error is
+// reported at the next synchronize.
+__attribute__((visibility("default"))) int M_driver_remote_file(uint64_t address, uint64_t size, const char *path,
+                                                                 uint64_t file_offset) {
+  uint64_t offset = 0;
+  Memory *m = memoryAt(address, offset);
+  if (!m || m->host || !path || offset + size > m->size) {
+    fprintf(stderr, "vulkan driver: file read into unknown device memory %llx (+%llu bytes)\n",
+            static_cast<unsigned long long>(address), static_cast<unsigned long long>(size));
+    return -1;
+  }
+  uint64_t header[4] = {m->buffer, m->base + offset, file_offset, size};
+  return call(OP_FILE, header, 32, path, strlen(path)) ? 0 : -1;
+}
+
+// When the work before it is done, the executor copies row t of a table in the file `path` (rows of `row_bytes` from
+// `file_offset`) into the device memory at `address`, t being the int32 at device address `token`: an embedding row
+// for a token the GPU chose (its argmax), without a round trip to the host. Returns 0, or -1.
+__attribute__((visibility("default"))) int M_driver_remote_gather(uint64_t address, uint64_t token, const char *path,
+                                                                   uint64_t file_offset, uint64_t row_bytes) {
+  uint64_t offset = 0, toffset = 0;
+  Memory *m = memoryAt(address, offset), *tm = memoryAt(token, toffset);
+  if (!m || m->host || !tm || tm->host || !path || offset + row_bytes > m->size || toffset + 4 > tm->size) {
+    fprintf(stderr, "vulkan driver: gather into or from unknown device memory\n");
+    return -1;
+  }
+  uint64_t header[6] = {m->buffer, m->base + offset, tm->buffer, tm->base + toffset, file_offset, row_bytes};
+  return call(OP_GATHER, header, 48, path, strlen(path)) ? 0 : -1;
+}
+
+// Timing without the transport (vla/x2's vk_server): M_driver_remote_record(1) has the server keep a copy of the
+// requests that follow, (0) stops; M_driver_remote_replay(n) runs them n more times there and returns the server's
+// milliseconds for it (through a final wait), or a negative number.
+__attribute__((visibility("default"))) int M_driver_remote_record(int on) {
+  uint32_t v = on ? 1 : 0;
+  return call(OP_RECORD, &v, 4) ? 0 : -1;
+}
+
+__attribute__((visibility("default"))) double M_driver_remote_replay(int count) {
+  uint32_t v = static_cast<uint32_t>(count);
+  std::string out;
+  if (!call(OP_REPLAY, &v, 4, nullptr, 0, &out) || out.size() != 8)
+    return -1;
+  double ms;
+  memcpy(&ms, out.data(), 8);
+  return ms;
 }
 
 }  // extern "C"

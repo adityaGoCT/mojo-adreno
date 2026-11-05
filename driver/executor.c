@@ -31,6 +31,12 @@
 
 #include "protocol.h"
 
+#ifdef _WIN32
+#define file_seek _fseeki64
+#else
+#define file_seek fseeko
+#endif
+
 #define VK_FUNCS(X)                                                                              \
   X(vkCreateInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties)             \
   X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceQueueFamilyProperties)                  \
@@ -404,6 +410,27 @@ static void launch(const char* p, uint32_t n) {
 
 // --- requests --------------------------------------------------------------------------------
 
+// The file named by n bytes at p, kept open from one request to the next (a model's tensors come from one file).
+static FILE* open_file(const char* p, uint32_t n) {
+  static FILE* file;
+  static char file_path[1024];
+  char path[1024];
+  uint32_t len = n < sizeof path - 1 ? n : (uint32_t)sizeof path - 1;
+  memcpy(path, p, len);
+  path[len] = 0;
+  if (!file || strcmp(path, file_path)) {
+    if (file) fclose(file);
+    file = fopen(path, "rb");
+    if (!file) {
+      file_path[0] = 0;
+      fail("cannot open %s", path);
+      return NULL;
+    }
+    strcpy(file_path, path);
+  }
+  return file;
+}
+
 void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64_t ntail, vkx_answer_fn answer,
                 void* ctx) {
   const uint64_t* w = (const uint64_t*)p;
@@ -505,6 +532,30 @@ void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64
   case OP_SYNC:
     flush();
     return reply(answer, ctx, NULL, 0);
+  case OP_FILE: {  // buffer, offset, file offset, size, path
+    buffer_t* b = n > 32 ? buffer(w[0]) : NULL;
+    if (!in_range(b, w[1], w[3])) return fail("file read out of range");
+    FILE* f = open_file(p + 32, n - 32);
+    if (!f) return;
+    flush();  // the batch may still use the buffer
+    if (file_seek(f, (long long)w[2], SEEK_SET) || fread(b->map + w[1], 1, w[3], f) != w[3])
+      return fail("cannot read %llu bytes at %llu", (unsigned long long)w[3], (unsigned long long)w[2]);
+    return;
+  }
+  case OP_GATHER: {  // buffer, offset, token buffer, token offset, file offset, row bytes, path
+    buffer_t* b = n > 48 ? buffer(w[0]) : NULL;
+    buffer_t* tb = n > 48 ? buffer(w[2]) : NULL;
+    if (!in_range(b, w[1], w[5]) || !in_range(tb, w[3], 4)) return fail("gather out of range");
+    FILE* f = open_file(p + 48, n - 48);
+    if (!f) return;
+    flush();  // the token is the GPU's, and the batch may still use the buffer
+    int32_t t;
+    memcpy(&t, tb->map + w[3], 4);
+    if (t < 0 || file_seek(f, (long long)(w[4] + (uint64_t)t * w[5]), SEEK_SET) ||
+        fread(b->map + w[1], 1, w[5], f) != w[5])
+      return fail("cannot gather row %d", (int)t);
+    return;
+  }
   default:
     return fail("unknown request %u", op);
   }

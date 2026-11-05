@@ -29,6 +29,19 @@ end of this page).
 `../remote/` builds the same `plugin.cpp` for the Mac with a TCP transport (`remote/transport.cpp`).
 There, `remote/vk_server.c` runs the same `executor.c` on the phone.
 
+**Requests beyond MAX's.** `protocol.h` also has requests that `M_driver_*` has no call for. Programs reach them
+through functions the plugin exports (`dlopen`/`dlsym` of the plugin; Mojo: `OwnedDLHandle(path).call[...]`):
+- `M_driver_remote_file` (`OP_FILE`): the executor reads a range of a file on its own side into a buffer. With the
+  remote plugin, weights already on the device running `vk_server` need not cross the transport.
+- `M_driver_remote_gather` (`OP_GATHER`): when the GPU's work so far is done, the executor copies row t of a table in a
+  file into a buffer, t being an int32 the GPU left in memory. This is an embedding row for a token the GPU chose,
+  without asking the host.
+- `M_driver_remote_record` / `M_driver_remote_replay` (`OP_RECORD`, `OP_REPLAY`, `vla/x2/vk_server_win.c` only): the
+  server keeps a copy of the requests that follow, then runs them n more times and answers with its own clock's time.
+  That times GPU work without the transport.
+
+[`../qwen3moe`](../qwen3moe) uses all four on the X2 Elite laptop.
+
 **Launch arguments.** Each module carries a launch description, `OpModuleProcessed
 "mojo.vulkan.abi {json}"`. It says which argument and byte offset each storage buffer's pointer
 comes from, and the same for each params slot. A launch passes CUDA-style arguments: a pointer to

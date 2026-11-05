@@ -23,6 +23,14 @@ enum {
   OP_LOAD,      // u64 module, SPIR-V
   OP_LAUNCH,    // launch_t, nbind binding_t, params_len bytes of params
   OP_SYNC,      // waits for everything before it
+  OP_FILE,      // u64 buffer, u64 offset, u64 file offset, u64 size, path: a file's bytes into the buffer, read on the
+                // executor's side (weights already on the device running it, not sent through the transport)
+  OP_GATHER,    // u64 buffer, u64 offset, u64 token buffer, u64 token offset, u64 file offset, u64 row bytes, path:
+                // when the GPU is done, row t of a table in the file, t the int32 the GPU left at the token offset
+                // (an embedding row for a token the GPU chose, without asking the host)
+  OP_RECORD,    // u32 1: keep a copy of the requests that follow (still running them); 0: stop (vla/x2's vk_server)
+  OP_REPLAY,    // u32 count: run the kept requests `count` times more -> f64 milliseconds on the server's clock,
+                // through a final wait: the GPU's time for them without the transport (vla/x2's vk_server)
 };
 
 // A kernel launch: storage buffers at bindings 0..nbind-1, then the params buffer (if any).

@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../../driver/executor.h"
 #include "../../driver/protocol.h"
@@ -45,6 +46,15 @@ static int recv_all(void* data, size_t n) {
     n -= (size_t)k;
   }
   return 0;
+}
+
+static int kept_status;  // the replay's waits: their status and error, not sent
+static char kept_error[512];
+
+static void keep_answer(void* ctx, int status, const void* data, uint32_t n) {
+  (void)ctx;
+  kept_status = status;
+  if (status) snprintf(kept_error, sizeof kept_error, "%.*s", (int)n, (const char*)data);
 }
 
 static void answer(void* ctx, int status, const void* data, uint32_t n) {
@@ -89,10 +99,44 @@ int main(int argc, char** argv) {
     int segments = env && *env && *env != '0';
     double first = -1;
     int launches = 0;
+    char* kept = NULL;  // OP_RECORD's copy of the requests: {u32 op, u32 n, n bytes} each
+    size_t nkept = 0, capkept = 0;
+    int recording = 0;
     while (!recv_all(header, sizeof header)) {
       if (first < 0) first = now_ms();
       payload = realloc(payload, header[1] ? header[1] : 1);
       if (recv_all(payload, header[1])) break;
+      if (header[0] == OP_RECORD) {
+        recording = header[1] == 4 && *(uint32_t*)payload;
+        if (recording) nkept = 0;
+        continue;
+      }
+      if (header[0] == OP_REPLAY) {  // the kept requests, `count` times, then a wait: the server's time for them
+        uint32_t count = header[1] == 4 ? *(uint32_t*)payload : 0;
+        vkx_handle(OP_SYNC, NULL, 0, NULL, 0, keep_answer, NULL);
+        int failed = kept_status;
+        double t0 = now_ms();
+        for (uint32_t k = 0; k < count && !failed; ++k)
+          for (size_t at = 0; at < nkept;) {
+            uint32_t* h = (uint32_t*)(kept + at);
+            vkx_handle(h[0], kept + at + 8, h[1], NULL, 0, keep_answer, NULL);
+            at += 8 + ((h[1] + 7) & ~7u);
+          }
+        vkx_handle(OP_SYNC, NULL, 0, NULL, 0, keep_answer, NULL);
+        double ms = now_ms() - t0;
+        if (failed || kept_status)
+          answer(NULL, 1, kept_error, (uint32_t)strlen(kept_error));
+        else
+          answer(NULL, 0, &ms, 8);
+        continue;
+      }
+      if (recording && header[0] != OP_SYNC && header[0] != OP_READ && header[0] != OP_INFO) {
+        size_t need = nkept + 8 + ((header[1] + 7) & ~7u);
+        if (need > capkept) kept = realloc(kept, capkept = need * 2);
+        memcpy(kept + nkept, header, 8);
+        memcpy(kept + nkept + 8, payload, header[1]);
+        nkept = need;
+      }
       if (header[0] == OP_LAUNCH) launches++;
       vkx_handle(header[0], payload, header[1], NULL, 0, answer, NULL);
       if (header[0] == OP_SYNC || header[0] == OP_READ) {
@@ -102,6 +146,7 @@ int main(int argc, char** argv) {
       }
     }
     vkx_reset();
+    free(kept);
     free(payload);
     closesocket(client);
     client = INVALID_SOCKET;
