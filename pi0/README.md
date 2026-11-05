@@ -22,8 +22,8 @@ check actions (50 x 32) : max abs error 1.1e-05 (largest reference value 1.15)
 run 0 : vision 529.9 ms, projector+embed 2.6 ms, prefix 2560.7 ms, 10 steps 778.8 ms ( 77.9 ms/step ); chunk 3603.7 ms
 ```
 
-With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.1–2.3 s instead of 4.05 s**, with the actions
-within 3.0e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)).
+With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.05–2.18 s instead of 3.6 s**, with the
+actions within 3.2e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)).
 
 **The action chunk matches PyTorch fp32 within 1.1e-5.** The stated tolerance is 2e-5 absolute on the actions.
 Before the split kernels below it was 7.2e-6: splitting sums over k and over keys reorders fp32 additions.
@@ -94,40 +94,43 @@ route `npu/` takes for Llama's prefill. The program:
 
 The GPU holds no Gemma 2B weights (`Pi0(gemma=False)`): 1.4 GB instead of 5.4 GB.
 
-Same Galaxy Z Fold, same example, pipelines cached, each program started with SKIN below 33–34 °C, one after the
-other:
+Both programs use the GPU kernels above (split keys, split-k, Gemma's activation first). Same Galaxy Z Fold, same
+example, pipelines cached, one after the other, each started with SKIN below 33 °C (31.9 and 32.3 °C):
 
 | Stage | NPU prefix (`pi0npu`, 4 runs) | All on the GPU (`pi0`, same session, 3 runs) | All on the GPU (above) |
 |---|---|---|---|
-| Vision | 554–557 ms | 553–632 ms | 554–558 ms |
-| Projector + embeddings | 3 ms | 3 ms | 2–3 ms |
-| **Prefix** | **0.80–0.94 s** (NPU 0.80–0.93 s) | 2.86–3.10 s | 2.73–2.75 s |
-| 10 steps | 761–764 ms | 809–844 ms | 761–785 ms |
-| **Action chunk** | **2.12–2.26 s** | 4.48–4.68 s | 4.05–4.06 s |
+| Vision | 493–494 ms | 493–543 ms | 530 ms |
+| Projector + embeddings | 3 ms | 2–4 ms | 3 ms |
+| **Prefix** | **0.81–0.93 s** (NPU 0.80–0.92 s) | 2.35–2.56 s | 2.56 s |
+| 10 steps | 745–793 ms | 750–825 ms | 779 ms |
+| **Action chunk** | **2.05–2.18 s** | 3.58–3.89 s | 3.60 s |
 
-- **The prefix runs about 3× faster on the NPU:** 0.80–0.94 s against 2.73–3.10 s on the GPU. Its 3.2 TFLOP (832
-  rows) take 0.80 s in some runs and 0.92–0.93 s in others (4.0 and 3.5 TFLOP/s), within one process. A separate run
-  of 5 prefixes (`pi0npu_tool`) took 920–929 ms each.
-- **The chunk is 1.8–1.9× faster:** 2.12–2.26 s against 4.05 s (2.0–2.2× against the same session's 4.48–4.68 s).
-  Vision (0.55 s) and the 10 steps (0.76 s) are now most of it.
-- **Overhead:** reading back the embeddings, converting them, and the handoff left after the last graph add 5–11 ms
+- **The prefix runs 2.5–3.2× faster on the NPU:** 0.81–0.93 s against 2.35–2.56 s on the GPU. Its 3.2 TFLOP (832
+  rows) take 0.80 s in some runs and 0.92 s in others (4.0 and 3.5 TFLOP/s), within one process. A separate run of
+  5 prefixes (`pi0npu_tool`) took 920–929 ms each.
+- **The chunk is 1.6–1.9× faster:** 2.05–2.18 s against 3.58–3.89 s in the same session (3.60 s above). Vision
+  (0.49 s) and the 10 steps (0.75 s) are now most of it.
+- **Overhead:** reading back the embeddings, converting them, and the handoff left after the last graph add 10–12 ms
   to the NPU's time. The first 15 layers' K/V reach the GPU while the NPU is still running.
-- The NPU's graphs load in 3.5–6 s per process (3.78 GB of compiled contexts). The GPU's weights load in 3.0 s
-  instead of 8 s.
+- The NPU's graphs load in 3.5–6 s per process (3.78 GB of compiled contexts). The GPU's weights load in 2.6–3.0 s
+  instead of 8–9 s.
+- Before the GPU kernels above, the same comparison gave a 2.12–2.26 s chunk with the NPU (prefix 0.80–0.94 s)
+  against 4.05 s all on the GPU (prefix 2.73–2.75 s).
 - Compiling the graphs for the HTP takes 18.5 minutes once, on the phone (139–220 s a graph, one graph a process).
 
 ### Accuracy in fp16
 
 | | NPU (HTP, fp16) | GPU (fp32, above) |
 |---|---|---|
-| Prefix K, worst layer | max abs error 0.079 (layer 16; values up to 17.8), relative 4.8e-3 | 0.00079 |
-| Prefix V, worst layer | max abs error 0.16 (layer 17; values up to 19.8), relative 6.0e-3 | 0.0018 |
-| `v_t` of the 10 steps | 2.6e-3 … 4.3e-3 (values up to 4.1) | 7.6e-6 … 1.0e-5 |
-| **Actions (50 × 32)** | **max abs error 3.0e-3** (values up to 1.15; mean 2.1e-4) | 7.2e-6 |
+| Prefix K, worst layer | max abs error 0.078 (layer 17; values up to 13.1), relative 4.9e-3 | 0.00078 |
+| Prefix V, worst layer | max abs error 0.17 (layer 17; values up to 19.8), relative 6.2e-3 | 0.0018 |
+| `v_t` of the 10 steps | 2.5e-3 … 4.6e-3 (values up to 4.1) | 1.1e-5 … 1.5e-5 |
+| **Actions (50 × 32)** | **max abs error 3.2e-3** (values up to 1.15; mean 1.6e-4) | 1.1e-5 |
 
 All of that error comes from the prefix's fp16 arithmetic:
 - **The handoff and the GPU expert are exact.** `pi0/reference.py --kv` runs PyTorch's 10 steps from the very K/V the
-  phone handed to its expert (`PI0_KV`). Its actions are within 2.4e-6 of the phone's.
+  phone handed to its expert (`PI0_KV`). Its actions are within 1.4e-6 of the phone's (2.4e-6 with the expert's
+  kernels before the split keys).
 - **The fp16 weights cost almost nothing.** The same graphs computing in fp32 on the Mac's CPU, with the
   fp16-rounded weights (`export_pi0.py --fp32`), give K/V within 4e-4 and actions within 8.9e-6.
 - **The HTP is more accurate than ONNX Runtime's fp16 on the Mac's CPU.** The same fp16 graphs there give K/V within
