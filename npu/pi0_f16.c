@@ -9,7 +9,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32  // Windows on ARM (npu/build_win.sh): positioned reads and writes through the CRT
+#include <io.h>
+#undef O_RDONLY
+#undef O_RDWR
+#define O_RDONLY (_O_RDONLY | _O_BINARY)
+#define O_RDWR (_O_RDWR | _O_BINARY)
+static long long pio(int fd, void* p, long long n, long long off, int w) {
+  if (_lseeki64(fd, off, SEEK_SET) != off) return -1;
+  long long done = 0;
+  while (done < n) {
+    unsigned k = n - done > (1u << 30) ? (1u << 30) : (unsigned)(n - done);
+    int r = w ? _write(fd, (char*)p + done, k) : _read(fd, (char*)p + done, k);
+    if (r <= 0) return -1;
+    done += r;
+  }
+  return done;
+}
+#define pread(fd, p, n, off) pio(fd, p, n, off, 0)
+#define pwrite(fd, p, n, off) pio(fd, (void*)(p), n, off, 1)
+#define ftruncate(fd, n) _chsize_s(fd, n)
+#define close _close
+#else
 #include <unistd.h>
+#endif
 
 int main(int argc, char** argv) {
   if (argc != 4) {

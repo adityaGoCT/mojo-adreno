@@ -10,10 +10,17 @@
 //   NPU_FALLBACK=1      allow nodes on the CPU (otherwise every node must run on the HTP)
 //   NPU_OPT=<0..3>      QNN's graph finalization optimization mode (default 3, the slowest compile)
 //   NPU_UDMA=1          QNN's extended UDMA mode
+//
+// It also builds for Windows on ARM (a Snapdragon X2 Elite laptop's Hexagon NPU, the same V81 HTP), with Zig's clang
+// for aarch64-windows-gnu against ONNX Runtime's QNN NuGet package: npu/build_win.sh.
 #include <onnxruntime_cxx_api.h>
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <chrono>
 #include <condition_variable>
@@ -41,6 +48,20 @@ bool exists(const std::string& p) {
   return stat(p.c_str(), &st) == 0;
 }
 
+#ifdef _WIN32
+constexpr const char* QNN_HTP = "QnnHtp.dll";
+
+std::string exe_dir() {
+  char buf[4096];
+  DWORD n = GetModuleFileNameA(nullptr, buf, sizeof buf);
+  std::string s(buf, n);
+  return s.substr(0, s.find_last_of("\\/"));
+}
+
+std::wstring ort_path(const std::string& p) { return std::wstring(p.begin(), p.end()); }  // ASCII paths
+#else
+constexpr const char* QNN_HTP = "libQnnHtp.so";
+
 std::string exe_dir() {
   char buf[4096];
   ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
@@ -50,10 +71,15 @@ std::string exe_dir() {
   return s.substr(0, s.rfind('/'));
 }
 
-void dsp_path() {  // where the DSP side looks for libQnnHtpV81Skel.so
+const std::string& ort_path(const std::string& p) { return p; }
+#endif
+
+void dsp_path() {  // where the DSP side looks for libQnnHtpV81Skel.so (on Windows: next to the stub DLL)
+#ifndef _WIN32
   if (getenv("ADSP_LIBRARY_PATH")) return;
   std::string p = exe_dir() + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/dsp";
   setenv("ADSP_LIBRARY_PATH", p.c_str(), 1);
+#endif
 }
 
 struct Npu {
@@ -93,7 +119,7 @@ Ort::SessionOptions options(const std::string& ctx_out) {
   so.SetIntraOpNumThreads(1);
   const char* opt = getenv("NPU_OPT");
   std::unordered_map<std::string, std::string> qnn = {
-      {"backend_path", exe_dir() + "/libQnnHtp.so"},
+      {"backend_path", exe_dir() + "/" + QNN_HTP},
       {"htp_performance_mode", "burst"},
       {"htp_graph_finalization_optimization_mode", opt ? opt : "3"},
   };
@@ -147,7 +173,7 @@ int pi0npu_open(const char* dir, double* ms) {
       std::string ctx = d + "/part" + std::to_string(i) + "_ctx.onnx";
       if (!exists(ctx)) return fail(ctx + " missing: run pi0npu_tool compile " + d + " " + std::to_string(i) + " first");
       double ts = now_ms();
-      g->parts.emplace_back(g->env, ctx.c_str(), options(""));
+      g->parts.emplace_back(g->env, ort_path(ctx).c_str(), options(""));
       fprintf(stderr, "pi0npu: part %d (layers %d..%d) loaded in %.2f s\n", i, g->bounds[i], g->bounds[i + 1] - 1,
               (now_ms() - ts) / 1e3);
       Ort::Session& s = g->parts.back();
@@ -283,7 +309,7 @@ int pi0npu_compile(const char* dir, int part, double* ms) {
   Ort::Env env = make_env();
   std::string d(dir), i = std::to_string(part);
   try {
-    Ort::Session s(env, (d + "/part" + i + ".onnx").c_str(), options(d + "/part" + i + "_ctx.onnx"));
+    Ort::Session s(env, ort_path(d + "/part" + i + ".onnx").c_str(), options(d + "/part" + i + "_ctx.onnx"));
   } catch (const Ort::Exception& e) {
     fprintf(stderr, "pi0npu: %s\n", e.what());
     return -1;

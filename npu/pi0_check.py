@@ -84,15 +84,17 @@ def main():
     ap.add_argument("--graphs", type=pathlib.Path)
     ap.add_argument("--dump", type=pathlib.Path, help="pi0npu_tool's kv.f16: [layer][k, v][rows][256]")
     ap.add_argument("--rows", type=int, default=832)
-    ap.add_argument("--save-kv", type=pathlib.Path, help="with --graphs: their K/V as fp32 [layer][k, v][816][256]")
+    ap.add_argument("--save-kv", type=pathlib.Path, help="the K/V (--graphs' or --dump's) as fp32 [layer][k, v][816][256], for reference.py --kv")
     a = ap.parse_args()
     if a.graphs:
         run_graphs(a.graphs, a.ref, a.save_kv)
     if a.dump:
         _, pad = inputs(a.ref, a.rows, np.float32)
         d = np.fromfile(a.dump, np.float16).reshape(L, 2, -1, HD)
-        print(f"the phone's K/V ({a.dump}):")
+        print(f"the NPU's K/V ({a.dump}):")
         compare(a.ref, {l: (d[l, 0], d[l, 1]) for l in range(L)}, pad)
+        if a.save_kv:
+            d[:, :, :PLEN].astype(np.float32).tofile(a.save_kv)
 
 
 if __name__ == "__main__":

@@ -161,6 +161,14 @@ through the remote driver plugin ([`../vla/x2`](../vla/x2)), with the phone's ch
 clock: vision 378–389 ms, prefix 2.13–2.15 s, 70–74 ms a step; 3.1–3.9 s a chunk, including 0.1–0.2 s of
 tunnel transfer.
 
+The laptop's Hexagon NPU is the same V81 HTP as the phone's. [`../npu/build_win.sh`](../npu/build_win.sh) builds
+`pi0npu_tool` and `pi0_f16` for Windows on ARM (Zig) against ONNX Runtime's QNN NuGet package (1.24.4). There:
+- `gemma.bin` came from the checkpoint's 7.9 GB Gemma byte range (an HTTP range request), SHA-256 identical to the
+  phone's;
+- the tool compiled the first of the six graphs for the HTP in 97 s.
+
+The QDC session ended before the other five were compiled, so the laptop's NPU prefix is not timed yet.
+
 ## How it is computed
 
 `model.mojo` follows lerobot 0.6.1's `PI0Pytorch.sample_actions`:
