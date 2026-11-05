@@ -8,6 +8,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py qwen3       # build/android/qwen3/: qwen3/qwen3.mojo (ternary Qwen3-8B), qwen3_convert
   python3 android/build.py bonsai      # build/android/bonsai/: the Android port's Bonsai model.mojo,
                                        # and bonsai_convert for its weights
+  python3 android/build.py vla         # build/android/smolvla/ and pi0/: the robot models (SmolVLA, pi0) on vla/
 
 Each program's directory holds everything it needs on the phone: the executable, MAX's runtime
 libraries, NDK libc++ and the driver plugin. Its DeviceContext loads the plugin named in
@@ -152,6 +153,20 @@ def qwen3():
        out / "qwen3_convert", ROOT / "qwen3/convert.cpp")
 
 
+def vla():
+    """The vision-language-action models: smolvla/smolvla.mojo (SmolVLA) and pi0/pi0.mojo (pi0), each its
+    model.mojo's forward pass on the kernels of vla/kernels, reading the checkpoint's model.safetensors itself
+    (vla/safetensors.mojo). VLA_ONLY=smolvla or pi0 builds one."""
+    for name in ("smolvla", "pi0"):
+        if os.environ.get("VLA_ONLY", name) != name:
+            continue
+        out = BUILD / name
+        out.mkdir(parents=True, exist_ok=True)
+        mojo_object(ROOT / name / f"{name}.mojo", out / f"{name}.o",
+                    includes=[ROOT / name, ROOT / "vla", ROOT / "vla/kernels"])
+        link(out, name, [out / f"{name}.o"])
+
+
 def bonsai():
     out = BUILD / "bonsai"
     src = out / "src"
@@ -174,7 +189,8 @@ def bonsai():
 
 
 def main():
-    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai}
+    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
+             "vla": vla}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
         if name not in steps:
