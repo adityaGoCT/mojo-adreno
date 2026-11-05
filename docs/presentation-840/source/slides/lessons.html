@@ -7,7 +7,7 @@
 </div>
 <div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
 <p style="font-size:30px;font-weight:600;color:#F08A3C;width:560px">Matrix units are for prompts</p>
-<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Generating is matrix-vector work, set by bandwidth; prompts gain 6 to 28 times.</p>
+<p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">Generating is matrix-vector work, set by bandwidth; prompts gain 4 to 28 times.</p>
 </div>
 <div style="display:flex;gap:28px;border-top:1px solid #34445E;padding-top:20px">
 <p style="font-size:30px;font-weight:600;color:#7FA8F0;width:560px">fp16-only sums set the ceiling</p>
@@ -22,6 +22,6 @@
 <p style="flex:1;font-size:28px;color:#C9D4E3;line-height:1.4">With MAX’s runtime on Android and a Vulkan plugin, models run as Mojo host code.</p>
 </div>
 </div>
-<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 13</p>
-<aside>Five things to take away. First, on a phone the driver is the platform. The same chip with a driver reporting the same version number rejected our matrix code on Android 17 and failed to link our attention kernel on Android 16, and some quirks gave wrong numbers silently; every run checks every output. Second, the matrix units are for prompts. Generating one token is matrix-vector work, set by how many bytes the weights take, while a batched prompt is matrix work and runs six to 28 times faster. Third, the driver’s fp16-only sums set the ceiling: for accurate prompts we use fp32 tiles at two thirds of the fp16 speed, which is exactly what Qualcomm’s conversion extension would lift. Fourth, Mojo kernels carry over: a kernel file written for another developer’s OpenCL target ran unchanged through our Vulkan target, and its ternary projections then served a second model, Qwen3-8B. Fifth, the runtime was the gap: each model had a hand-written C runner around its kernels. With MAX’s runtime built for Android and our Vulkan driver plugin, every model now also runs as Mojo host code, as fast as its runner.</aside>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#A9B8CC">Mojo on the Adreno 840 · 14</p>
+<aside>Five things to take away. First, on a phone the driver is the platform. The same chip with a driver reporting the same version number rejected our matrix code on Android 17 and failed to link our attention kernel on Android 16, and some quirks gave wrong numbers silently; every run checks every output. Second, the matrix units are for prompts. Generating one token is matrix-vector work, set by how many bytes the weights take, while a batched prompt is matrix work and runs four to 28 times faster. Third, the driver’s fp16-only sums set the ceiling: for accurate prompts we use fp32 tiles at two thirds of the fp16 speed, which is exactly what Qualcomm’s conversion extension would lift. Fourth, Mojo kernels carry over: a kernel file written for another developer’s OpenCL target ran unchanged through our Vulkan target, and its ternary projections then served a second model, Qwen3-8B. Fifth, the runtime was the gap: each model had a hand-written C runner around its kernels. With MAX’s runtime built for Android and our Vulkan driver plugin, every model now also runs as Mojo host code, as fast as its runner.</aside>
 </section>

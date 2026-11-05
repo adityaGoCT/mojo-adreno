@@ -120,22 +120,30 @@ Llama's batched prefill runs from Mojo too (`Llama.prefill`, `LLAMA_PREFILL`). O
 
 #### Long prompts: prefill and decode rates
 
-On the Galaxy S26 Ultra, each model with the longest prompt its context holds. Each run is warm
-(pipelines cached); decode is the generated tokens after the prompt.
+On one Galaxy S26 Ultra (SM-S948U, Android 16), each model with a long prompt. Each run is warm
+(pipelines cached) and starts with the phone under 40 °C; decode is the generated tokens after the
+prompt. For a fair comparison, Qwen3 also reads Llama's 431-token passage
+(`llama/prompts/long.txt`), which its tokenizer makes 408 tokens. Llama's 431 include a system
+header its chat template adds, and both prompts pad to the same 512 rows.
 
 | Model | Prompt | Prefill | Decode after it | Check |
 |---|---|---|---|---|
-| Qwen3-8B, ternary | 1000 tokens (context 1024) | 8.4 s, **119 tokens/s** | 57.5 ms, **17.4 tokens/s** | the same 24 tokens one token at a time and in `qwen3_vk` |
-| Llama 3.2 1B, fp16 | 431 tokens (context 512) | 0.69 s, **622 tokens/s** | 39.7 ms, **25.2 tokens/s** | 80 of 80 tokens as PyTorch; logits within 6.4e-5 |
-| Llama 3.2 1B, 4-bit | 431 tokens | 0.65 s, **664 tokens/s** | 13.1 ms, **76.4 tokens/s** | 80 of 80 tokens as PyTorch (same int4 weights); 7.3e-5 |
+| Llama 3.2 1B, fp16 | 431 tokens (context 512) | 0.70 s, **620 tokens/s** | 40.8 ms, **24.5 tokens/s** | 80 of 80 tokens as PyTorch; logits within 6.4e-5 |
+| Llama 3.2 1B, 4-bit | 431 tokens | 0.64 s, **670 tokens/s** | 13.3 ms, **75.3 tokens/s** | 80 of 80 tokens as PyTorch (same int4 weights); 7.3e-5 |
+| Qwen3-8B, ternary | the same passage: 408 tokens | 3.95 s, **103 tokens/s** | 47.3 ms, **21.1 tokens/s** | the same 80 tokens one token at a time |
+| Qwen3-8B, ternary | 1000 tokens (context 1024) | 9.4 s, **106 tokens/s** | 58.8 ms, **17.0 tokens/s** | the same 24 tokens one token at a time and in `qwen3_vk` |
 
-- **Qwen3:** one token at a time, the same 1000 tokens take 53.3 s, so batched prefill is 6.3×
-  faster. The ternary projections are 6.9 s of the 8.4 s. At position 1000, decode reads 8 MB of
-  fp32 KV cache a layer, which adds 14 ms to the 43 ms a token after a short prompt. The details are in
-  [`qwen3/README.md`](../qwen3/README.md#a-1000-token-prompt).
+- **Qwen3:** one token at a time, the passage takes 17.4 s, so batched prefill is 4.4× faster. Its
+  ternary projections are 3.6 of the 3.95 s. [`tuner/`](../tuner)'s table for this phone takes the
+  passage to 3.66 s and the 1000 tokens to 8.5 s, with the same tokens. Decode slows as the cache
+  grows: every layer reads 8 KB of fp32 K and V per position, so a token takes 41 ms after a short
+  prompt, 47 ms after the passage and 59 ms after 1000 tokens. The details are in
+  [`qwen3/README.md`](../qwen3/README.md#a-1000-token-prompt), measured on another S26 Ultra, which
+  read the 1000 tokens in 8.4 s; the two phones differ by about 10%.
 - **Llama:** Llama's kernels hold 512 positions, so the prompt is 431 tokens and 80 are generated.
   This S26's driver cannot create the fused attention kernel's pipeline, so `Llama.prefill` falls
-  back to `p_attention_scalar`. The Fold's driver builds it, in 39 s.
+  back to `p_attention_scalar`. The Fold's driver builds it, in 39 s. On the Hexagon NPU, the same
+  prompt takes 0.17 s ([`npu/`](../npu)).
 
 Decode moves weights from memory, so launching each kernel as it comes costs nothing measurable for
 Llama and Qwen3. The runners record a token's dispatches once and resubmit them, so the batching

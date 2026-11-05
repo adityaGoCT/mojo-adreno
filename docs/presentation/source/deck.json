@@ -35,6 +35,7 @@
     "qcom",
     "runtime-path",
     "mojo-host",
+    "long-prompts",
     "lessons",
     "next"
   ],

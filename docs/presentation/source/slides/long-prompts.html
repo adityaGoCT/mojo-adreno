@@ -1,0 +1,22 @@
+<section id="long-prompts" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:64px;font-weight:600;line-height:1.15">Long prompts: prefill and decode rates</h2>
+<table style="font-size:25px;color:#18212F">
+<tr><th style="width:23%">Model</th><th style="width:20%">Prompt</th><th style="width:21%">Prefill, batched</th><th style="width:16%">Decode after it</th><th style="width:20%">Checked</th></tr>
+<tr><td>Llama 3.2 1B, fp16</td><td>431 tokens</td><td><b>620 tok/s</b> · 0.70 s</td><td><b>24.5 tok/s</b></td><td>PyTorch 80/80</td></tr>
+<tr style="background:#EEF1F5"><td>Llama 3.2 1B, 4-bit</td><td>431 tokens</td><td><b>670 tok/s</b> · 0.64 s</td><td><b>75.3 tok/s</b></td><td>PyTorch 80/80</td></tr>
+<tr><td>Qwen3-8B, ternary</td><td>the same passage: 408</td><td><b>103 tok/s</b> · 3.95 s</td><td><b>21.1 tok/s</b></td><td>token by token: 80/80</td></tr>
+<tr style="background:#EEF1F5"><td>Qwen3-8B, ternary</td><td>1000 tokens</td><td><b>106 tok/s</b> · 9.4 s</td><td><b>17.0 tok/s</b></td><td>token by token: 24/24</td></tr>
+</table>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Qwen3’s prompt: attention on the matrix units</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Q·Kᵀ for 1000 tokens took 12.2 s with a score a thread; on cooperative matrices, 0.44 s. Of the passage’s 3.95 s, the ternary projections are now 3.6.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:10px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:28px">
+<h3 style="font-size:30px;font-weight:600">Decode slows as the cache grows</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Every layer reads 8 KB of fp32 KV cache per position: 47.3 ms a token after the passage, 58.8 after 1000 tokens, 41 after a short prompt.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Mojo and MAX on Adreno · 29 · Mojo DeviceContext programs, warm runs · Galaxy S26 Ultra, Adreno 840, Android 16 · Llama’s attention: the per-row fallback</p>
+<aside>How do the models handle long prompts? Here are prefill and decode rates, all on one Galaxy S26 Ultra, every model run as Mojo DeviceContext code with its pipelines already cached. Llama 3.2 1B reads its 431-token prompt at 620 tokens a second with fp16 weights and 670 with 4-bit weights, then generates at 24.5 and 75.3 tokens a second; all 80 generated tokens match PyTorch. On this phone’s Android 16 driver its fused attention kernel does not build, so attention falls back to the per-row kernel. For a fair comparison the ternary Qwen3-8B reads the same passage, which its tokenizer makes 408 tokens: Llama’s 431 include a system header its chat template adds, and both pad to the same 512 rows. Qwen3 reads it in 3.95 seconds, 103 tokens a second, 4.4 times faster than one token at a time, and then generates 21.1 tokens a second, with the same 80 tokens either way. An 8-billion-parameter model reads the prompt about six times slower than a 1-billion one: its projections, 3.6 of the 3.95 seconds, are fp32 matrix products on ternary weights. With a 1000-token prompt Qwen3 reads 106 tokens a second. That prompt first took over 20 seconds, and the attention scores alone 12.2: computing Q times K transposed on cooperative matrices brought them to 0.44, and softmax with P times V moved there too. The plugin now also submits large launches on their own, because 64 of them in one submission outlast the driver’s GPU watchdog. Decode slows as the cache grows: each layer reads 8 kilobytes of fp32 keys and values per position, so a token takes 41 milliseconds after a short prompt, 47.3 after the passage and 58.8 after 1000 tokens. Rewriting the two decode attention kernels, so each cached key is read once for its four query heads and each probability is computed once, halved what that cache costs.</aside>
+</section>

@@ -153,6 +153,24 @@ Decode's attention kernels changed too, and `qwen3_vk` uses the same ones, with 
 Together they take decode at position 1000 from 72 ms to 57.5 ms a token. `qwen3_vk` still matches
 MLX on all 16 steps.
 
+#### Llama's passage, and the tuned table
+
+For a comparison with Llama at the same length, Qwen3 also reads Llama's 431-token passage
+(`llama/prompts/long.txt`), 408 tokens with Qwen3's tokenizer (`build/qwen3/long_llama.txt`). On a
+second S26 Ultra (SM-S948U):
+
+| | Prompt (408 tokens) | Decode after it |
+|---|---|---|
+| Batched prefill | 3.95 s, 103 tokens/s | 47.3 ms, 21.1 tokens/s |
+| Batched prefill, [`tuner/`](../tuner)'s table for this phone | 3.66 s (1.08×) | the same |
+| One token at a time | 17.4 s, 23.4 tokens/s | 46.4 ms |
+
+All 80 generated tokens are the same three ways. The ternary projections are 3.6 of the 3.95 s.
+`qwen3/gemm_table.mojo` picks each projection's tile shape per prompt length. The tuner's search
+found those choices on the phone: X loaded straight from memory, prefetch, two shared buffers, and
+blocks of 64 × 128 or 128 × 128. They make the projections 1.04–1.30× faster, and the whole 1000-token
+prefill on that phone goes from 9.1 s to 8.5 s.
+
 A kernel that calls another kernel does not compile for the Vulkan target: the kernel ABI pass
 rewrites both into entry points. So `qk_norm_rope` keeps its body in an inline helper, and the
 decode kernel and the prefill row kernel both call it.
