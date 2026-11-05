@@ -13,7 +13,7 @@ Vulkan pipeline cache and starts with SKIN below 40 °C. Decode is the 79 tokens
 
 | Llama 3.2 1B | Prompt: prefill + handoff left after it | Prefill rate | Decode after the prompt | Tokens vs PyTorch |
 |---|---|---|---|---|
-| All-NPU, fp16 (`npu_decode`) | 168 ms + 6.8 ms = 174 ms | 2,570 tokens/s | 39.0 ms, 25.6 tokens/s | 80 of 80 |
+| All-NPU, fp16 (`npu_decode`) | 169 ms + 0.4 ms = 169 ms | 2,550 tokens/s | 38.8 ms, 25.7 tokens/s | 80 of 80 |
 | **NPU prefill (fp16) + GPU decode, fp16** | **169 ms + 1.4 ms = 170 ms** | **2,550 tokens/s** | 40.0 ms, 25.0 tokens/s | 80 of 80 |
 | All-GPU, fp16 (`llama.mojo`, `LLAMA_PREFILL`) | 685 ms | 629 tokens/s | 39.8 ms, 25.2 tokens/s | 80 of 80 |
 | **NPU prefill (fp16) + GPU decode, 4-bit** | **169 ms + 0.8 ms = 170 ms** | **2,550 tokens/s** | 13.2 ms, 76.0 tokens/s | 38 of 80 (a near-tie, below); 80 of 80 from the NPU's K/V |
@@ -27,13 +27,14 @@ activations (w4a16).
   Adreno's time uses `p_attention_scalar`, because this phone's driver cannot create the fused attention kernel's
   pipeline. The graphs run 448 rows (the prompt padded to a multiple of 32); `Llama.prefill` runs 512.
 - **Decode on the GPU:** the same with either prefill, since both decode with the same Mojo program.
-- **Decode on the NPU:** 39.0 ms a token in fp16, against 39.8–40.0 ms on the GPU. Each token reads the 2.47 GB of
+- **Decode on the NPU:** 38.8–39.0 ms a token in fp16 (two runs), against 39.8–40.0 ms on the GPU. Each token reads the 2.47 GB of
   fp16 weights, so both run near the same memory speed: about 63 GB/s, where `android/README.md`'s `vecadd`
   measured 66 GB/s. With 4-bit weights the GPU decodes 3× faster (13.2 ms), which the NPU could match only with
   quantized graphs.
-- **All-NPU handoff:** in `npu_decode` the prompt's K/V go from the prefill's outputs into the decode graphs' fp16
-  cache in 6.8 ms, through `npu_kv`'s fp32 and back; binding one buffer to both would remove that. The process
-  then releases the prefill contexts and loads the decode ones (2.1 s), since both sets together are 5 GB.
+- **All-NPU handoff:** 0.4 ms, only the first token's logits. The prefill writes the prompt's K/V directly into
+  the decode graphs' fp16 cache, bound as its outputs (below). Copying them through `npu_kv`'s fp32 and back took
+  6.8 ms. The process then releases the prefill contexts and loads the decode ones (2.1–2.4 s), since both sets
+  together are 5 GB.
 - **Time to the first token:** 170 ms against 641–685 ms.
 - **Handoff:** 8–15 ms when it follows the whole prefill. It is overlapped with the NPU instead: each part's 4
   layers are converted and copied to the GPU while the NPU runs the next parts. That leaves 0.8–2.0 ms after the
@@ -53,12 +54,12 @@ One-time and per-process costs of the NPU path:
 
 | Step | Time |
 |---|---|
-| Compile the 4 graphs for the HTP (`libQnnHtpPrepare.so` on the phone, finalization mode 3), once | 229 s (34 + 49 + 45 + 101 s; part 3 holds the lm_head) |
+| Compile the 4 graphs for the HTP (`libQnnHtpPrepare.so` on the phone, finalization mode 3), once | 201 s (28 + 46 + 45 + 82 s; part 3 holds the lm_head) |
 | Load the 4 compiled contexts (2.5 GB of context binaries), at each process start | 1.9–2.4 s |
 | First prefill in a process | 175–195 ms |
 | Later prefills | 167–172 ms |
 | Compile the 4 decode graphs (all-NPU), once | 78 s (12.6 + 12.4 + 12.5 + 40.7 s) |
-| Load the 4 decode contexts (2.5 GB), at each process start | 2.1 s |
+| Load the 4 decode contexts (2.5 GB), at each process start | 2.1–2.4 s |
 
 The GPU's own weight load is the same in both paths: 1.5 s in fp16, 0.5–0.8 s in 4-bit.
 
@@ -132,8 +133,10 @@ through a symlink, and one lab phone refused a hard link.
 - **Parts:** 4, each with 4 layers. A part runs `rows = 448` prompt positions at once. A shorter prompt is
   zero-padded at the end, and the causal mask keeps the padding out of the real rows.
   - Inputs: `x [448, 2048]`, the embedding rows, gathered on the CPU from `weights.bin`.
-  - Outputs: `k<l>`, `v<l>` (fp16 `[8, 448, 64]`, RoPE applied), and `x_out` for the next part. The last part
-    instead outputs `logits [1, 128256]` of row `last`, an input.
+  - Outputs: `k<l>`, `v<l>` (fp16, RoPE applied), and `x_out` for the next part. The last part instead outputs
+    `logits [1, 128256]` of row `last`, an input.
+  - K/V layout: `[8, 512, 64]`, the KV cache's own layout. The 448 rows are zero-padded by a `Pad` on each
+    output (`--kv-slots 512`), so a decode cache can be bound as the output buffer itself.
 - **Precision:** all fp16, the HTP's float type.
 - **RMSNorm:** ONNX's `RMSNormalization`, which the QNN EP maps to QNN's `RmsNorm`. The residual stream
   reaches 410 on this prompt, the massive-activation dimensions after layer 1, and 410² overflows fp16. So
@@ -159,6 +162,12 @@ on a worker thread: `npu_prefill_start` starts them, `npu_part_wait(i)` returns 
 4. continues with `Llama.forward(token, position)` from position `n`.
 
 The existing paths (`Llama.forward`, `Llama.prefill`, `llama.mojo`) are unchanged.
+
+All on the NPU (`npu_decode.cpp`), there is nothing to convert. The decode graphs read an fp16 cache
+`[8][512][64]` per layer, the same layout as the prefill's padded outputs. So `npu_bind_kv` binds each layer's
+K/V output to that cache before the prefill runs: ONNX Runtime's `IoBinding` replaces an output's buffer when it is
+bound again. The prefill then writes the prompt's K/V into the decode cache, and the handoff is just the first
+token's logits.
 
 ## Follow-ups
 

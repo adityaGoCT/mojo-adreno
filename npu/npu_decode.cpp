@@ -6,7 +6,8 @@
 //   npu_decode <dir> <max new> <token ids...>    prefill, then greedy decode; prints llama.mojo's "tok <id> <ms>"
 //
 // <dir> holds the prefill parts (part<i>_ctx.onnx), the decode parts (decode<i>_ctx.onnx), weights.bin and
-// manifest.txt. The prefill contexts are released before the decode contexts load: both together are 5 GB.
+// manifest.txt. The prefill graphs' K/V outputs are bound to the decode cache, so the prefill writes it directly.
+// The prefill contexts are released before the decode contexts load: both together are 5 GB.
 //   NPU_RUNS=<k>   prefills before the one decode starts from (default 2)
 //   LLAMA_EOS      stop tokens, as llama.mojo
 #include <onnxruntime_cxx_api.h>
@@ -29,7 +30,8 @@ extern "C" {  // npu_prefill.cpp
 int npu_open(const char* dir, const char* model_dir, double* ms, int* compiled);
 int npu_rows();
 int npu_prefill(const int32_t* tokens, int n, double* ms);
-void npu_kv(int layer, int which, float* dst, int maxpos, int n);
+int npu_kv_slots();
+int npu_bind_kv(int layer, int which, void* buf);
 void npu_logits(float* dst);
 void npu_close();
 }
@@ -130,27 +132,31 @@ int main(int argc, char** argv) {
   }
   int runs = getenv("NPU_RUNS") ? atoi(getenv("NPU_RUNS")) : 2;
 
-  // Prefill on the NPU, as hybrid does.
+  // Prefill on the NPU, as hybrid does, with each layer's K/V output bound to the decode graphs' cache: the
+  // prefill graphs write [8][512][64] fp16 (export.py --kv-slots 512), the cache's own layout, so the prompt's
+  // K/V need no copy.
   double ms = 0;
   int compiled = 0;
   if (npu_open(dir.c_str(), dir.c_str(), &ms, &compiled)) return 1;
   printf("npu: prefill graphs loaded in %.2f s\n", ms / 1e3);
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "npu", log_line, nullptr);  // holds ORT's environment past npu_close
+  std::vector<std::vector<__fp16>> cache(2 * L, std::vector<__fp16>(size_t(KVH) * CTX * HD, 0));  // [l][k, v]
+  if (npu_kv_slots() != CTX) {
+    fprintf(stderr, "the prefill graphs' K/V hold %d positions, the decode cache %d: export.py --kv-slots %d\n",
+            npu_kv_slots(), CTX, CTX);
+    return 1;
+  }
+  for (int l = 0; l < L; l++)
+    for (int w = 0; w < 2; w++)
+      if (npu_bind_kv(l, w, cache[2 * l + w].data())) return 1;
   for (int r = 0; r <= runs; r++) {
     if (npu_prefill(prompt.data(), n, &ms)) return 1;
     printf("npu prefill %d: %d tokens in %.1f ms (%.0f tokens/s)%s\n", r, n, ms, n * 1e3 / ms, r ? "" : " cold");
   }
-  double t_cache = now_ms();
-  std::vector<std::vector<__fp16>> cache(2 * L, std::vector<__fp16>(size_t(KVH) * CTX * HD, 0));  // [l][k, v]
-  std::vector<float> tmp(size_t(KVH) * CTX * HD);
-  for (int l = 0; l < L; l++)
-    for (int w = 0; w < 2; w++) {
-      npu_kv(l, w, tmp.data(), CTX, n);
-      for (size_t i = 0; i < tmp.size(); i++) cache[2 * l + w][i] = __fp16(tmp[i]);
-    }
+  double t_hand = now_ms();
   std::vector<float> logits32(V);
   npu_logits(logits32.data());
-  printf("prompt's K/V into the decode cache in %.1f ms\n", now_ms() - t_cache);
+  printf("handoff: the prompt's K/V already in the decode cache; the logits in %.2f ms\n", now_ms() - t_hand);
   npu_close();
 
   // The decode parts, each bound once to the cache and the step's buffers.

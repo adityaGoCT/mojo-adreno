@@ -9,11 +9,13 @@ exports and llama/st2bin.c writes on the phone, at manifest.txt's offset, so the
 Every part runs `rows` prompt rows at once (positions 0 .. rows-1; a shorter prompt is zero-padded at the
 end, and the causal mask keeps the padding out of the real rows):
 
-  part i:    x [rows, 2048] fp16  ->  k<l>, v<l> [8, rows, 64] fp16 for its layers, x_out [rows, 2048]
+  part i:    x [rows, 2048] fp16  ->  k<l>, v<l> [8, 512, 64] fp16 for its layers, x_out [rows, 2048]
   last part: x, last int32 [1]    ->  k<l>, v<l> for its layers, logits [1, 128256] fp16 of row `last`
 
-k<l> is RoPE'd, so k<l> and v<l> are llama/model.mojo's KV cache of layer l ([kv head][position][64], the
-first `rows` of MAXPOS positions) in fp16. The embedding rows (x of part 0) are gathered on the CPU.
+k<l> is RoPE'd, so k<l> and v<l> are llama/model.mojo's KV cache of layer l in fp16: [kv head][position][64] with
+all 512 (MAXPOS) positions, the first `rows` written and the rest zero (--kv-slots 512, a Pad on each output).
+npu_decode binds the decode graphs' own fp16 cache as these outputs, so the prefill writes the cache directly. The
+embedding rows (x of part 0) are gathered on the CPU.
 
 All math is fp16, the HTP's float type. RMSNorm is ONNX's RMSNormalization (QNN's RmsNorm): the residual
 stream reaches 410, whose square overflows fp16, so x * x / D cannot be written out in fp16 ops.
@@ -49,6 +51,7 @@ class Graph:
         self.nodes, self.inits, self.n = [], [], 0
         self.weights, self.consts = {}, set()
         self.leaf_kv = False
+        self.kv_slots = 0  # > rows: K/V outputs zero-padded to [8, kv_slots, 64], a KV cache's layout
 
     def op(self, op, *inputs, **attrs):
         self.n += 1
@@ -128,6 +131,10 @@ def layer(g, l, x, rows, cos, sin, mask, scale):
         flat = g.const("shape_kv_out", np.array([KVH, rows * HD], np.int64))
         g.output(f"k{l}", g.op("Reshape", k, flat))
         g.output(f"v{l}", g.op("Reshape", v, flat))
+    elif g.kv_slots > rows:  # outputs [8, kv_slots, 64]: the decode cache itself can be the output buffer
+        pads = g.const("pads_kv", np.array([0, 0, 0, 0, g.kv_slots - rows, 0], np.int64))
+        g.output(f"k{l}", g.op("Pad", k, pads))
+        g.output(f"v{l}", g.op("Pad", v, pads))
     else:
         k = g.output(f"k{l}", k)
         v = g.output(f"v{l}", v)
@@ -146,9 +153,10 @@ def layer(g, l, x, rows, cos, sin, mask, scale):
     return g.op("Add", x, g.op("Gemm", act, g.weight(p + "wdown", [D, F]), transB=1))
 
 
-def part(model_dir, man, first, last, rows, head, fp32, leaf_kv):
+def part(model_dir, man, first, last, rows, head, fp32, leaf_kv, kv_slots=0):
     g = Graph(man, fp32)
     g.leaf_kv = leaf_kv
+    g.kv_slots = kv_slots
     cos, sin = rope_tables(model_dir, man, rows)
     cos, sin = g.const("rope_cos", cos.astype(g.np)), g.const("rope_sin", sin.astype(g.np))
     mask = np.where(np.tril(np.ones((rows, rows), bool)), 0, -30000).astype(g.np)  # [rows, rows], tiled 4 times
@@ -159,7 +167,7 @@ def part(model_dir, man, first, last, rows, head, fp32, leaf_kv):
     outputs = []
     for l in range(first, last):
         x = layer(g, l, x, rows, cos, sin, mask, scale)
-        kv_shape = [KVH, rows * HD] if leaf_kv else [KVH, rows, HD]
+        kv_shape = [KVH, rows * HD] if leaf_kv else [KVH, max(rows, kv_slots), HD]
         outputs += [helper.make_tensor_value_info(f"{kv}{l}", g.f, kv_shape) for kv in "kv"]
     if head:
         inputs.append(helper.make_tensor_value_info("last", TensorProto.INT32, [1]))
@@ -185,6 +193,9 @@ def main():
     ap.add_argument("--rows", type=int, default=448, help="prompt rows a prefill runs (the prompt is padded)")
     ap.add_argument("--parts", type=int, default=4, help="graphs, each a contiguous range of layers")
     ap.add_argument("--fp32", action="store_true", help="fp32 math, for checking on the Mac's CPU")
+    ap.add_argument("--kv-slots", type=int, default=512,
+                    help="pad the K/V outputs to [8, kv_slots, 64], the decode cache's layout (npu_decode binds its "
+                         "cache as the output); 0: [8, rows, 64]")
     ap.add_argument("--leaf-kv", action="store_true",
                     help="K/V outputs through a Reshape of their own ([8, rows * 64]), not tensors the graph reads")
     a = ap.parse_args()
@@ -197,7 +208,7 @@ def main():
         os.link(a.model / "weights.bin", link)
     bounds = [round(i * L / a.parts) for i in range(a.parts + 1)]
     for i in range(a.parts):
-        m = part(a.model, man, bounds[i], bounds[i + 1], a.rows, i == a.parts - 1, a.fp32, a.leaf_kv)
+        m = part(a.model, man, bounds[i], bounds[i + 1], a.rows, i == a.parts - 1, a.fp32, a.leaf_kv, a.kv_slots)
         onnx.save(m, a.out / f"part{i}.onnx")
         print(f"part{i}.onnx: layers {bounds[i]} .. {bounds[i + 1] - 1}, {len(m.graph.node)} nodes, "
               f"{(a.out / f'part{i}.onnx').stat().st_size / 1e3:.0f} KB")

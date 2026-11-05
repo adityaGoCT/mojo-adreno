@@ -29,6 +29,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -62,7 +63,11 @@ struct Npu {
   int rows = 0, nparts = 0;
   std::vector<int> bounds;                      // part i: layers bounds[i] .. bounds[i+1]-1
   std::vector<std::vector<__fp16>> x;           // x[i]: part i's input
-  std::vector<std::vector<__fp16>> k, v;        // [layer][8 * rows * 64]
+  std::vector<std::vector<__fp16>> k, v;        // [layer][8 * slots * 64]: the K/V outputs, unless npu_bind_kv
+  std::vector<__fp16*> kp, vp;                  // [layer]: where each layer's K/V output is bound
+  std::vector<int64_t> kv_shape;                // a K/V output's shape: [8, slots, 64] (or export.py --leaf-kv's)
+  size_t kv_elems = 0;                          // its elements
+  int slots = 0;                                // positions a KV head (512 with export.py --kv-slots 512)
   std::vector<__fp16> logits;                   // [V]
   int32_t last = 0;
   int wfd = -1;
@@ -155,8 +160,10 @@ int npu_open(const char* dir, const char* model_dir, double* ms, int* compiled) 
 
   int R = g->rows;
   g->x.assign(g->nparts, std::vector<__fp16>(size_t(R) * D));
-  g->k.assign(L, std::vector<__fp16>(size_t(KVH) * R * HD));
-  g->v.assign(L, std::vector<__fp16>(size_t(KVH) * R * HD));
+  g->k.resize(L);
+  g->v.resize(L);
+  g->kp.assign(L, nullptr);
+  g->vp.assign(L, nullptr);
   g->logits.assign(V, 0);
   Ort::MemoryInfo cpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
   auto f16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
@@ -177,16 +184,27 @@ int npu_open(const char* dir, const char* model_dir, double* ms, int* compiled) 
       Ort::IoBinding b(s);
       std::vector<Ort::Value> vals;
       int64_t xs[2] = {R, D}, ls[2] = {1, V}, one[1] = {1};
-      std::vector<int64_t> kvs = {KVH, R, HD};  // or [8, rows * 64] (export.py --leaf-kv): the session's shape
+      std::vector<int64_t> kvs;  // the K/V outputs' shape, from the session: [8, slots, 64]
       for (size_t o = 0; o < s.GetOutputCount(); o++) {
         Ort::AllocatedStringPtr name = s.GetOutputNameAllocated(o, Ort::AllocatorWithDefaultOptions());
         if (name.get()[0] == 'k') kvs = s.GetOutputTypeInfo(o).GetTensorTypeAndShapeInfo().GetShape();
       }
+      size_t elems = 1;
+      for (int64_t e : kvs) elems *= e;
+      if (i == 0) {
+        g->kv_shape = kvs;
+        g->kv_elems = elems;
+        g->slots = elems / (KVH * HD);
+      } else if (kvs != g->kv_shape) {
+        return fail("part " + std::to_string(i) + ": K/V outputs of another shape than part 0's");
+      }
       vals.push_back(Ort::Value::CreateTensor(cpu, g->x[i].data(), g->x[i].size() * 2, xs, 2, f16));
       b.BindInput("x", vals.back());
       for (int l = g->bounds[i]; l < g->bounds[i + 1]; l++) {
-        for (auto [kv, buf] : {std::pair{'k', &g->k[l]}, std::pair{'v', &g->v[l]}}) {
-          vals.push_back(Ort::Value::CreateTensor(cpu, buf->data(), buf->size() * 2, kvs.data(), kvs.size(), f16));
+        for (auto [kv, buf, ptr] : {std::tuple{'k', &g->k[l], &g->kp[l]}, std::tuple{'v', &g->v[l], &g->vp[l]}}) {
+          buf->assign(elems, 0);
+          *ptr = buf->data();
+          vals.push_back(Ort::Value::CreateTensor(cpu, *ptr, elems * 2, kvs.data(), kvs.size(), f16));
           b.BindOutput((kv + std::to_string(l)).c_str(), vals.back());
         }
       }
@@ -280,9 +298,26 @@ int npu_part_first(int part) { return g->bounds[part]; }
 // Layer `layer`'s K (which 0) or V (which 1), positions 0 .. n-1, into dst as fp32 [8][maxpos][64]: the GPU
 // model's KV cache layout.
 void npu_kv(int layer, int which, float* dst, int maxpos, int n) {
-  const __fp16* src = (which ? g->v : g->k)[layer].data();
+  const __fp16* src = (which ? g->vp : g->kp)[layer];
   for (int h = 0; h < KVH; h++)
-    for (size_t i = 0; i < size_t(n) * HD; i++) dst[size_t(h) * maxpos * HD + i] = src[size_t(h) * g->rows * HD + i];
+    for (size_t i = 0; i < size_t(n) * HD; i++) dst[size_t(h) * maxpos * HD + i] = src[size_t(h) * g->slots * HD + i];
+}
+
+// Positions a K/V output holds per KV head: its layout is [8][npu_kv_slots()][64] fp16.
+int npu_kv_slots() { return g ? g->slots : 0; }
+
+// Binds layer `layer`'s K (which 0) or V (which 1) output to `buf`: fp16 [8][npu_kv_slots()][64], which the
+// prefill then writes directly (npu_decode's decode cache). Not while a prefill runs.
+int npu_bind_kv(int layer, int which, void* buf) {
+  if (!g || layer < 0 || layer >= L || g->worker.joinable()) return fail("npu_bind_kv: no open graphs, or busy");
+  int i = 0;
+  while (g->bounds[i + 1] <= layer) i++;
+  Ort::MemoryInfo cpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  g->values[i].push_back(Ort::Value::CreateTensor(cpu, buf, g->kv_elems * 2, g->kv_shape.data(), g->kv_shape.size(),
+                                                  ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+  g->bindings[i].BindOutput(((which ? "v" : "k") + std::to_string(layer)).c_str(), g->values[i].back());
+  (which ? g->vp : g->kp)[layer] = static_cast<__fp16*>(buf);
+  return 0;
 }
 
 void npu_logits(float* dst) {
@@ -369,8 +404,8 @@ int main(int argc, char** argv) {
   if (dump != "-") {
     FILE* f = fopen((dump + "/kv.f16").c_str(), "wb");
     for (int l = 0; l < L; l++)
-      for (auto* kv : {&g->k[l], &g->v[l]})
-        for (int h = 0; h < KVH; h++) fwrite(kv->data() + size_t(h) * g->rows * HD, 2, size_t(n) * HD, f);
+      for (const __fp16* kv : {g->kp[l], g->vp[l]})
+        for (int h = 0; h < KVH; h++) fwrite(kv + size_t(h) * g->slots * HD, 2, size_t(n) * HD, f);
     fclose(f);
     std::vector<float> lg(V);
     npu_logits(lg.data());
