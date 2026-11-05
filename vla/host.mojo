@@ -145,8 +145,12 @@ struct Scratch(Movable):
     var xa_size: Int
     var part_size: Int
     var sk_rows: Int  # projections of at most this many rows take the split-k path
+    var staged_target: Int  # split-k on the staged path: the workgroups to aim for (0: never)
+    var split_below: Int  # ... for projections of fewer blocks than this (and k >= 2048)
+    var act_first: Int  # staged projections with an activation and k >= this activate X once first (0: never)
 
-    def __init__(out self, ctx: DeviceContext, xa_size: Int, part_size: Int, half_size: Int, sk_rows: Int) raises:
+    def __init__(out self, ctx: DeviceContext, xa_size: Int, part_size: Int, half_size: Int, sk_rows: Int,
+                 staged_target: Int = 0, split_below: Int = 0, act_first: Int = 0) raises:
         self.xa = ctx.enqueue_create_buffer[DType.float32](xa_size)
         self.part = ctx.enqueue_create_buffer[DType.float32](part_size)
         self.xh = ctx.enqueue_create_buffer[DType.float16](max(half_size, 64))
@@ -154,6 +158,9 @@ struct Scratch(Movable):
         self.xa_size = xa_size
         self.part_size = part_size
         self.sk_rows = sk_rows
+        self.staged_target = staged_target
+        self.split_below = split_below
+        self.act_first = act_first
 
 
 def lin[W16: DType, MMA16: Bool, ACT: Int, BIAS: Bool, RES: Bool](
@@ -190,14 +197,47 @@ def _lin[WT: DType, ACT: Int, BIAS: Bool, RES: Bool](
     y: DeviceBuffer[DType.float32], rows: Int, n: Int, k: Int, ldx: Int, ldy: Int, xoff: Int, alpha: Float32,
 ) raises:
     if rows > s.sk_rows:  # staged: 128 x 128 blocks, or 64 x 128 for narrow projections and odd rows
-        if rows % 128 == 0 and n > NARROW:
+        comptime if ACT != NONE:
+            # A long k with an activation (Gemma's GeGLU down projection: k = 16384): every column block would
+            # re-read both of X's halves and recompute the activation; activate X once instead.
+            if s.act_first > 0 and k >= s.act_first and rows * k <= s.xa_size:
+                ctx.enqueue_function[vgemm.act_rows[ACT]](x, s.xa, Int32(k), Int32(ldx), Int32(xoff),
+                                                          Int32(rows * k), grid_dim=groups(rows * k, 256),
+                                                          block_dim=256)
+                _lin[WT, NONE, BIAS, RES](ctx, s, w, b, s.xa, y, rows, n, k, k, ldy, 0, alpha)
+                return
+        var wide = rows % 128 == 0 and n > NARROW
+        var tiles = groups(n, 128) * rows // (128 if wide else 64)
+        var splits = 1
+        if tiles < s.split_below and k >= 2048:  # long k, very few blocks: split k, then reduce_sk
+            splits = min(groups(s.staged_target, tiles), k // 1024)
+        if splits > 1:
+            var kc = groups(groups(k, 16), splits) * 16
+            splits = groups(k, kc)
+            var ldp = groups(n, 64) * 64
+            var plane = rows * ldp
+            if splits * plane > s.part_size:
+                raise Error("lin: partial sums too large")
+            if wide:
+                ctx.enqueue_function[vgemm.gemm[WT, 2, 2, ACT, False, False, True]](
+                    x, w, b, s.part, Int32(n), Int32(k), Int32(ldx), Int32(k), Int32(ldp), Int32(xoff), Float32(1),
+                    Int32(kc), Int32(plane), grid_dim=Dim(groups(n, 128), rows // 128, splits), block_dim=256)
+            else:
+                ctx.enqueue_function[vgemm.gemm[WT, 1, 2, ACT, False, False, True]](
+                    x, w, b, s.part, Int32(n), Int32(k), Int32(ldx), Int32(k), Int32(ldp), Int32(xoff), Float32(1),
+                    Int32(kc), Int32(plane), grid_dim=Dim(groups(n, 128), rows // 64, splits), block_dim=128)
+            ctx.enqueue_function[vgemm.reduce_sk[BIAS, RES]](s.part, b, y, Int32(splits), Int32(n), Int32(ldp),
+                                                             Int32(plane), Int32(ldy), alpha, Int32(rows * n),
+                                                             grid_dim=groups(rows * n, 256), block_dim=256)
+            return
+        if wide:
             ctx.enqueue_function[vgemm.gemm[WT, 2, 2, ACT, BIAS, RES]](
-                x, w, b, y, Int32(n), Int32(k), Int32(ldx), Int32(k), Int32(ldy), Int32(xoff), alpha,
-                grid_dim=Dim(groups(n, 128), rows // 128), block_dim=256)
+                x, w, b, y, Int32(n), Int32(k), Int32(ldx), Int32(k), Int32(ldy), Int32(xoff), alpha, Int32(0),
+                Int32(0), grid_dim=Dim(groups(n, 128), rows // 128), block_dim=256)
         else:
             ctx.enqueue_function[vgemm.gemm[WT, 1, 2, ACT, BIAS, RES]](
-                x, w, b, y, Int32(n), Int32(k), Int32(ldx), Int32(k), Int32(ldy), Int32(xoff), alpha,
-                grid_dim=Dim(groups(n, 128), rows // 64), block_dim=128)
+                x, w, b, y, Int32(n), Int32(k), Int32(ldx), Int32(k), Int32(ldy), Int32(xoff), alpha, Int32(0),
+                Int32(0), grid_dim=Dim(groups(n, 128), rows // 64), block_dim=128)
         return
     var xin = x
     var lx = ldx
@@ -236,19 +276,41 @@ def attend[MASK: Bool, HD: Int](
         ctx.enqueue_function[vattn.attention[MASK, 64, 64, True]](
             q, k, v, o, klev, qlev, Int32(ldq), Int32(ldk), Int32(ldk), Int32(ldo), Int32(0), Int32(kcol), Int32(vcol),
             Int32(0), Int32(nk), Int32(group), scale, Int32(batch_rows), Int32(batch_rows), Int32(0), Int32(1),
-            grid_dim=Dim(heads, qrows // 64, batches), block_dim=64)
+            Int32(1), o, o, grid_dim=Dim(heads, qrows // 64, batches), block_dim=64)
     elif HD == 72:
         ctx.enqueue_function[vattn.attention[MASK, 72, 64, False]](
             q, k, v, o, klev, qlev, Int32(ldq), Int32(ldk), Int32(ldk), Int32(ldo), Int32(0), Int32(kcol), Int32(vcol),
             Int32(0), Int32(nk), Int32(group), scale, Int32(batch_rows), Int32(batch_rows), Int32(0), Int32(1),
-            grid_dim=Dim(heads, qrows // 64, batches), block_dim=64)
+            Int32(1), o, o, grid_dim=Dim(heads, qrows // 64, batches), block_dim=64)
         ctx.enqueue_function[vattn.attention[MASK, 72, 16, False]](
             q, k, v, o, klev, qlev, Int32(ldq), Int32(ldk), Int32(ldk), Int32(ldo), Int32(0), Int32(kcol), Int32(vcol),
             Int32(0), Int32(nk), Int32(group), scale, Int32(batch_rows), Int32(batch_rows), Int32(64), Int32(1),
-            grid_dim=Dim(heads, qrows // 64, batches), block_dim=64)
+            Int32(1), o, o, grid_dim=Dim(heads, qrows // 64, batches), block_dim=64)
     else:
         comptime assert HD % 64 == 0, "heads of 64, 72 or a multiple of 64"
         ctx.enqueue_function[vattn.attention[MASK, HD, 64, False]](
             q, k, v, o, klev, qlev, Int32(ldq), Int32(ldk), Int32(ldk), Int32(ldo), Int32(0), Int32(kcol), Int32(vcol),
             Int32(0), Int32(nk), Int32(group), scale, Int32(batch_rows), Int32(batch_rows), Int32(0), Int32(HD // 64),
-            grid_dim=Dim(heads, qrows // 64, batches * (HD // 64)), block_dim=64)
+            Int32(1), o, o, grid_dim=Dim(heads, qrows // 64, batches * (HD // 64)), block_dim=64)
+
+
+def attend_split[MASK: Bool, HD: Int](
+    ctx: DeviceContext, q: DeviceBuffer[DType.float32], k: DeviceBuffer[DType.float32], v: DeviceBuffer[DType.float32],
+    o: DeviceBuffer[DType.float32], klev: DeviceBuffer[DType.float32], qlev: DeviceBuffer[DType.float32],
+    part: DeviceBuffer[DType.float32], ml: DeviceBuffer[DType.float32], ldq: Int, ldk: Int, ldo: Int, kcol: Int,
+    vcol: Int, nk: Int, heads: Int, group: Int, nsplit: Int, scale: Float32,
+) raises:
+    """attend for one block of 64 query rows against many keys (the action expert's), the keys split nsplit ways
+    (vattn.attention[SPLIT]) and merged (vattn.attention_combine): heads x HD / 64 x nsplit workgroups instead of
+    heads x HD / 64. part: heads x HD x 64 x nsplit floats; ml: heads x HD / 64 x nsplit x 128."""
+    comptime assert HD % 64 == 0, "heads of a multiple of 64"
+    comptime CH = HD // 64
+    if heads * CH * nsplit * 64 * 64 > len(part) or heads * CH * nsplit * 128 > len(ml):
+        raise Error("attend_split: scratch too small")
+    ctx.enqueue_function[vattn.attention[MASK, HD, 64, False, True]](
+        q, k, v, o, klev, qlev, Int32(ldq), Int32(ldk), Int32(ldk), Int32(ldo), Int32(0), Int32(kcol), Int32(vcol),
+        Int32(0), Int32(nk), Int32(group), scale, Int32(0), Int32(0), Int32(0), Int32(CH), Int32(nsplit), part, ml,
+        grid_dim=Dim(heads, 1, CH * nsplit), block_dim=64)
+    ctx.enqueue_function[vattn.attention_combine[64]](part, ml, o, Int32(ldo), Int32(0), Int32(HD), Int32(0),
+                                                      Int32(CH), Int32(nsplit), grid_dim=Dim(heads * CH, 64),
+                                                      block_dim=64)

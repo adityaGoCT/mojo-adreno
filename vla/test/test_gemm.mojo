@@ -57,7 +57,7 @@ def main() raises:
                                                                           block_dim=256)
     else:
         ctx.enqueue_function[vgemm.gemm[DType.uint16, 1, 2, vgemm.NONE, False, False]](
-            xd, wd, pd, yd, Int32(n), Int32(k), Int32(k), Int32(k), Int32(256), Int32(0), Float32(1),
+            xd, wd, pd, yd, Int32(n), Int32(k), Int32(k), Int32(k), Int32(256), Int32(0), Float32(1), Int32(0), Int32(0),
             grid_dim=Dim(2, 1), block_dim=128)
     var y = List[Float32](length=rows * 256, fill=0)
     ctx.enqueue_copy(y.unsafe_ptr(), yd)

@@ -29,26 +29,45 @@ comptime F32P = UnsafePointer[Float32, MutAnyOrigin]
 comptime KC = 8
 
 
-def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False](
+def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False, SPLIT: Bool = False, KB: Int = 64](
     q: F32P, k: F32P, v: F32P, o: F32P, klev: F32P, qlev: F32P,
     ldq: Int32, ldk: Int32, ldv: Int32, ldo: Int32, qcol: Int32, kcol: Int32, vcol: Int32, ocol: Int32,
     nk: Int32, group: Int32, scale: Float32, qbatch: Int32, kbatch: Int32, c0: Int32, nchunks: Int32,
+    nsplit: Int32, part: F32P, ml: F32P,
 ):
     """Launch with grid (heads, query rows / 64, batches x nchunks) and block 64: block_idx.z is the batch times
     nchunks plus the chunk, whose CW columns start at c0 + chunk CW. HOISTQ (HD = 64): Q's eight 64 x 8 tiles are
-    loaded once instead of for every key block."""
+    loaded once instead of for every key block.
+
+    SPLIT (flash-decoding, for few query rows against many keys: one batch of 64 rows): the keys' blocks are split
+    nsplit ways too, grid (heads, 1, nchunks x nsplit), block_idx.z = chunk nsplit + split. Each workgroup leaves
+    its unnormalized O (64 x CW) in `part` and its rows' running max and sum in `ml` (64 each), at slot
+    (head nchunks + chunk) nsplit + split; attention_combine merges them."""
     comptime assert HD % KC == 0, "heads of a multiple of 8"
     comptime assert CW == 64 or CW == 32 or CW == 16, "the 840's N: 64, 32 or 16"
+    comptime assert KB == 64 or KB == 32, "key blocks of 64 or 32"
     comptime assert not HOISTQ or HD == 64, "hoisting Q for heads of 64"
     var s = stack_allocation[64 * 64, Float32, address_space=AddressSpace.SHARED]()
     var rs = stack_allocation[128, Float32, address_space=AddressSpace.SHARED]()  # per row: factor, then 1 / l
     var h = Int(block_idx.x)
-    var b = Int(block_idx.z) // Int(nchunks)
+    var zz = Int(block_idx.z)
+    var split = 0
+    comptime if SPLIT:
+        split = zz % Int(nsplit)
+        zz = zz // Int(nsplit)
+    var b = zz // Int(nchunks)
+    var chunk = zz % Int(nchunks)
     var t = Int(thread_idx.x)
     var lq = Int(ldq)
     var lk = Int(ldk)
     var lv = Int(ldv)
-    var cc = Int(c0) + (Int(block_idx.z) % Int(nchunks)) * CW
+    var cc = Int(c0) + chunk * CW
+    var jb = 0
+    var je = Int(nk) // KB
+    comptime if SPLIT:
+        var per = (je + Int(nsplit) - 1) // Int(nsplit)
+        jb = split * per
+        je = min(je, jb + per)
     var qrow0 = b * Int(qbatch) + Int(block_idx.y) * 64
     var krow0 = b * Int(kbatch)
     var kvh = h // Int(group)
@@ -77,9 +96,9 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False](
         q5 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(qbase.unsafe_offset(40), lq)
         q6 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(qbase.unsafe_offset(48), lq)
         q7 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(qbase.unsafe_offset(56), lq)
-    for j in range(Int(nk) // 64):
-        var kr = krow0 + j * 64
-        var sacc = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
+    for j in range(jb, je):
+        var kr = krow0 + j * KB
+        var sacc = CoopMatrix[DType.float32, 64, KB, ACCUMULATOR].zero()
         comptime for d in range(0, HD, KC):
             var qa: CoopMatrix[DType.float32, 64, KC, MATRIX_A]
             comptime if HOISTQ:
@@ -87,31 +106,31 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False](
                       q5 if d == 40 else q6 if d == 48 else q7)
             else:
                 qa = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(qbase.unsafe_offset(d), lq)
-            var kb = CoopMatrix[DType.float32, KC, 64, MATRIX_B].load[row_major=False](
+            var kb = CoopMatrix[DType.float32, KC, KB, MATRIX_B].load[row_major=False](
                 kbase.unsafe_offset(kr * lk + d), lk)
             sacc = qa.multiply_add(kb, sacc)
         barrier()  # the previous block's P V has been read
-        sacc.store(s, 64)
+        sacc.store(s, KB)
         barrier()
         var bm = Float32(-1e30)
-        for i in range(64):  # threads start at their own column: different banks
-            var c = (i + t) % 64
+        for i in range(KB):  # threads start at their own column: different banks
+            var c = (i + t) % KB
             var visible = True
             comptime if MASK:
                 visible = klev[kr + c] <= level
             if visible:
-                bm = max(bm, s[t * 64 + c] * scale)
+                bm = max(bm, s[t * KB + c] * scale)
         var mn = max(m, bm)
         var total = Float32(0)
-        for i in range(64):
-            var c = (i + t) % 64
+        for i in range(KB):
+            var c = (i + t) % KB
             var visible = True
             comptime if MASK:
                 visible = klev[kr + c] <= level
             var p = Float32(0)
             if visible:
-                p = exp(s[t * 64 + c] * scale - mn)
-            s[t * 64 + c] = p
+                p = exp(s[t * KB + c] * scale - mn)
+            s[t * KB + c] = p
             total += p
         var factor = exp(m - mn)
         l = l * factor + total
@@ -119,8 +138,8 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False](
         rs[t] = factor
         barrier()
         var pacc = CoopMatrix[DType.float32, 64, CW, ACCUMULATOR].zero()
-        comptime for kk in range(0, 64, KC):
-            var pa = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(s.unsafe_offset(kk), 64)
+        comptime for kk in range(0, KB, KC):
+            var pa = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(s.unsafe_offset(kk), KB)
             var vb = CoopMatrix[DType.float32, KC, CW, MATRIX_B].load(vbase.unsafe_offset((kr + kk) * lv), lv)
             pacc = pa.multiply_add(vb, pacc)
         barrier()  # P has been read
@@ -129,6 +148,15 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False](
         if t < CW:
             comptime for i in range(64):
                 oc[i] = oc[i] * rs[i] + s[i * CW + t]
+    comptime if SPLIT:  # unnormalized, for attention_combine
+        var slot = (h * Int(nchunks) + chunk) * Int(nsplit) + split
+        ml[slot * 128 + t] = m
+        ml[slot * 128 + 64 + t] = l
+        if t < CW:
+            var dst = part.unsafe_offset(slot * 64 * CW + t)
+            comptime for i in range(64):
+                dst[i * CW] = oc[i]
+        return
     var inv = Float32(0)
     if l > 0:
         inv = 1 / l
@@ -138,3 +166,31 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False](
         var out = o.unsafe_offset(qrow0 * Int(ldo) + Int(ocol) + h * HD + cc + t)
         comptime for i in range(64):
             out[i * Int(ldo)] = oc[i] * rs[64 + i]
+
+
+def attention_combine[CW: Int](part: F32P, ml: F32P, o: F32P, ldo: Int32, ocol: Int32, hd: Int32, c0: Int32,
+                               nchunks: Int32, nsplit: Int32):
+    """O for attention[SPLIT]: row block_idx.y of head block_idx.x / nchunks, chunk block_idx.x % nchunks, column
+    thread_idx.x: the splits' O scaled by exp(m_s - M), over the sum of their l_s exp(m_s - M) (M the largest m_s).
+    Rows that see no key get zeros. Launch with grid (heads x nchunks, 64) and block CW."""
+    var t = Int(thread_idx.x)
+    var i = Int(block_idx.y)
+    var hc = Int(block_idx.x)
+    var ns = Int(nsplit)
+    var slot0 = hc * ns
+    var mx = Float32(-1e30)
+    for sp in range(ns):
+        mx = max(mx, ml[(slot0 + sp) * 128 + i])
+    var total = Float32(0)
+    var acc = Float32(0)
+    for sp in range(ns):
+        var f = exp(ml[(slot0 + sp) * 128 + i] - mx)
+        total += ml[(slot0 + sp) * 128 + 64 + i] * f
+        acc += part[(slot0 + sp) * 64 * CW + i * CW + t] * f
+    var h = hc // Int(nchunks)
+    var cc = Int(c0) + (hc % Int(nchunks)) * CW
+    if t < min(CW, Int(hd) - cc):
+        var v = Float32(0)
+        if total > 0:
+            v = acc / total
+        o[i * Int(ldo) + Int(ocol) + h * Int(hd) + cc + t] = v

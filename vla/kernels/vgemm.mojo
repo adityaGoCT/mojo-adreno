@@ -58,11 +58,14 @@ def silu[width: SIMDLength](x: SIMD[DType.float32, width]) -> SIMD[DType.float32
     return x / (1 + exp(-x))
 
 
-def gemm[WT: DType, WM: Int, WN: Int, ACT: Int, BIAS: Bool, RES: Bool](
+def gemm[WT: DType, WM: Int, WN: Int, ACT: Int, BIAS: Bool, RES: Bool, SPLIT: Bool = False](
     x: F32P, w: UnsafePointer[Scalar[WT], MutAnyOrigin], bias: F32P, y: F32P,
-    n: Int32, k: Int32, ldx: Int32, ldw: Int32, ldy: Int32, xoff: Int32, alpha: Float32,
+    n: Int32, k: Int32, ldx: Int32, ldw: Int32, ldy: Int32, xoff: Int32, alpha: Float32, kc: Int32, plane: Int32,
 ):
-    """Launch with grid (ceil(n / (64 WN)), rows / (64 WM)) and block 64 WM WN."""
+    """Launch with grid (ceil(n / (64 WN)), rows / (64 WM)) and block 64 WM WN. SPLIT (split-k, for long k and
+    few blocks): grid z splits k into ranges of kc (a multiple of 16), and workgroup z writes its partial product
+    to plane z of y (plane floats apart), for reduce_sk to sum with the bias and the residual."""
+    comptime assert not SPLIT or (not BIAS and not RES), "split-k: reduce_sk adds the bias and the residual"
     comptime BM = WM * 64
     comptime BN = WN * 64
     comptime THREADS = WM * WN * 64
@@ -82,8 +85,12 @@ def gemm[WT: DType, WM: Int, WN: Int, ACT: Int, BIAS: Bool, RES: Bool](
     var lw = Int(ldw)
     var ly = Int(ldy)
     var live = col0 + sc < (nn + 63) // 64 * 64  # the same for the whole subgroup
+    var kb = 0
+    comptime if SPLIT:
+        kb = Int(block_idx.z) * Int(kc)
+        kk_ = min(kk_, kb + Int(kc))
     var acc = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
-    for k0 in range(0, kk_, BK):
+    for k0 in range(kb, kk_, BK):
         comptime for i in range(BM * BK // 4 // THREADS):
             var v = i * THREADS + t
             var r = v // (BK // 4)
@@ -147,6 +154,8 @@ def gemm[WT: DType, WM: Int, WN: Int, ACT: Int, BIAS: Bool, RES: Bool](
         barrier()
     if live:
         var out = y.unsafe_offset((row0 + sr) * ly + col0 + sc)
+        comptime if SPLIT:
+            out = out.unsafe_offset(Int(block_idx.z) * Int(plane))
         comptime if RES:
             comptime for kk in range(0, 64, KC):
                 var at = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(sh.unsafe_offset(kk), 64)

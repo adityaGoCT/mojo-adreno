@@ -23,7 +23,7 @@ from std.math import cos, sin, sqrt
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
-from host import AUTO, WIDE, Scratch, Weights, attend, groups, lin, one
+from host import AUTO, WIDE, Scratch, Weights, attend, attend_split, groups, lin, one
 from safetensors import Checkpoint
 import vrow
 from vgemm import GELU, GELU_MUL, NONE, SILU
@@ -62,8 +62,13 @@ comptime MAXPOS = 1024
 comptime EPS_V: Float32 = 1e-6
 comptime EPS_G: Float32 = 1e-6
 comptime INF: Float32 = 1e30
-comptime XA_SIZE = AROWS * 2 * EF
-comptime PART_SIZE = 1 << 21
+comptime XA_SIZE = PROWS * F  # the activated input of Gemma's down projection
+comptime PART_SIZE = 4 * PROWS * D  # split-k's partial sums: Gemma's down projection in 4 splits
+comptime SPLIT_TARGET = 448  # split-k on the staged path: aim for this many workgroups...
+comptime SPLIT_BELOW = 64  # ... for projections of fewer blocks (SigLIP's fc2: 54 -> 4 splits; Gemma's 112+ stay whole)
+comptime ACT_FIRST = 8192  # Gemma's down projection (k = 16384): gelu(gate) * up computed once, not per column block
+comptime KSPLIT = 5  # the expert's attention: its 15 key blocks split 5 ways (vattn.attention[SPLIT])
+comptime MAXSPLIT = 15
 comptime SK_ROWS = 256
 
 comptime VP = "paligemma_with_expert.paligemma.model.vision_tower.vision_model."
@@ -122,6 +127,9 @@ struct Pi0(Movable):
     var ppos: DeviceBuffer[DType.int32]
     var epos: DeviceBuffer[DType.int32]
     var prefix_valid: Int
+    var ksplit: Int  # the expert's attention: key splits (0: one workgroup a head and chunk)
+    var apart: DeviceBuffer[DType.float32]  # its partial O, row maxima and sums
+    var aml: DeviceBuffer[DType.float32]
     var prof: Dict[String, Float64]
     var profiling: Bool
     var last: Float64
@@ -129,7 +137,7 @@ struct Pi0(Movable):
     def __init__(out self, ctx: DeviceContext, path: String) raises:
         self.ctx = ctx
         self.w = Weights[DType.uint16, False](ctx)
-        self.s = Scratch(ctx, XA_SIZE, PART_SIZE, 0, SK_ROWS)
+        self.s = Scratch(ctx, XA_SIZE, PART_SIZE, 0, SK_ROWS, SPLIT_TARGET, SPLIT_BELOW, ACT_FIRST)
         self.path = path
         self.embed_offset = 0
         self.pix = ctx.enqueue_create_buffer[DType.float32](NCAM * 3 * IMG * IMG)
@@ -172,6 +180,9 @@ struct Pi0(Movable):
         self.ppos = ctx.enqueue_create_buffer[DType.int32](PROWS)
         self.epos = ctx.enqueue_create_buffer[DType.int32](AROWS)
         self.prefix_valid = 0
+        self.ksplit = KSPLIT
+        self.apart = ctx.enqueue_create_buffer[DType.float32](H * (HD // 64) * MAXSPLIT * 64 * 64)
+        self.aml = ctx.enqueue_create_buffer[DType.float32](H * (HD // 64) * MAXSPLIT * 128)
         self.prof = Dict[String, Float64]()
         self.profiling = False
         self.last = 0
@@ -426,8 +437,13 @@ struct Pi0(Movable):
                                                Int32(QKV), Int32(H), Int32(1), Int32(HD), Int32(PROWS), Int32(HD),
                                                grid_dim=AROWS, block_dim=64)
             self.tick("e.rope")
-            attend[True, HD](ctx, self.eqkv, self.kc[l], self.vc[l], self.eatt, self.klev, self.eqlev, QKV, HD,
-                             H * HD, 0, 0, KVROWS, H, H, AROWS, 1, 0, Float32(0.0625))
+            if self.ksplit > 0:  # 64 query rows against 960 keys: split the keys across workgroups
+                attend_split[True, HD](ctx, self.eqkv, self.kc[l], self.vc[l], self.eatt, self.klev, self.eqlev,
+                                       self.apart, self.aml, QKV, HD, H * HD, 0, 0, KVROWS, H, H, self.ksplit,
+                                       Float32(0.0625))
+            else:
+                attend[True, HD](ctx, self.eqkv, self.kc[l], self.vc[l], self.eatt, self.klev, self.eqlev, QKV, HD,
+                                 H * HD, 0, 0, KVROWS, H, H, AROWS, 1, 0, Float32(0.0625))
             self.tick("e.attention")
             self.lin[NONE, False, True](e + "o", "", self.eatt, self.xe, AROWS, ED, H * HD, H * HD, ED)
             self.tick("e.o")

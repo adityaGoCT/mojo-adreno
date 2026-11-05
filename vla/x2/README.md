@@ -63,6 +63,10 @@ On a laptop that holds its clocks, the chunk takes 70% of the phone's time.
 | 10 steps | 0.70–0.74 s (70–74 ms/step) | 0.76–0.79 s |
 | **Action chunk** | **3.1–3.9 s** | **4.05–4.06 s** |
 
+The split kernels (`pi0/README.md`) on the laptop, old and new alternating in one process: the expert's split
+keys save about 10% a step (77–79 → 69 ms), while splitting Gemma's projections over k made the prefix 1–12%
+slower here too (the version without that is what `pi0` now does).
+
 The laptop's π0 chunk includes 0.1–0.2 s for the 48 language rows (393 KB, gathered on the Mac) to cross the
 tunnel, and π0 synchronizes after each prefix layer. Its stages add up to 3.2–3.3 s. The expert's steps gain
 least: 2,840 small launches a chunk, streamed at the tunnel's rate.

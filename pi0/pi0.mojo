@@ -6,6 +6,11 @@
 #   MODULAR_DRIVER_PLUGINS=vulkan@<dir>/libM_driver_vulkan.so pi0 <model.safetensors> <ref dir> [runs]
 #     PI0_PROFILE=1   one more run, synchronized after every launch: the time of each kind of launch
 #     PI0_OUT=<f>     the action chunk (50 x 32 fp32) to a file
+#     PI0_KSPLIT=n    the expert attention's key splits (0: none; default 5)
+#     PI0_SPLIT_BELOW=n    staged projections with fewer blocks split k (0: never; default 64)
+#     PI0_ACT_FIRST=k      staged projections with an activation and k >= this activate X first (0: never; 8192)
+#     PI0_AB=1        time the old kernels (no splits, no activation first) and the new ones alternately
+#     PI0_NOCHECK=1   skip the check (timing only, with the pipelines already cached)
 from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
@@ -17,6 +22,17 @@ from model import ADIM, CHUNK, D, HD, L, NLANG, PLEN, STEPS, VD, VROWS, Pi0
 def run(ctx: DeviceContext, path: String, refdir: String, runs: Int) raises:
     var t0 = now_ms()
     var model = Pi0(ctx, path)
+    var ks = getenv("PI0_KSPLIT")
+    if ks:
+        model.ksplit = min(Int(ks), 15)
+    var sb = getenv("PI0_SPLIT_BELOW")
+    if sb:
+        model.s.split_below = Int(sb)
+    var af = getenv("PI0_ACT_FIRST")
+    if af:
+        model.s.act_first = Int(af)
+    print("expert attention key splits:", model.ksplit, "; staged split-k below", model.s.split_below,
+          "blocks; activation first for k >=", model.s.act_first)
     print("weights:", Float64(model.w.bytes) / 1e9, "GB read from the checkpoint;", model.w.narrowed,
           "tensors stored as bf16 (exactly),", model.w.kept, "kept in fp32; loaded in",
           round((now_ms() - t0) / 1e3, 1), "s")
@@ -33,6 +49,13 @@ def run(ctx: DeviceContext, path: String, refdir: String, runs: Int) raises:
             valid.append(r)
     print("prefix:", PLEN, "rows,", len(valid), "valid; chunk", CHUNK, "x", ADIM, ",", STEPS, "steps")
 
+    if getenv("PI0_NOCHECK") == "":
+        check(ctx, model, refdir, valid)
+    time_runs(ctx, model, pixels, tokens, mask, state, noise, rope, runs)
+
+
+def check(ctx: DeviceContext, mut model: Pi0, refdir: String, valid: List[Int]) raises:
+    """Every stage against reference.py's tensors (the first run also creates the pipelines)."""
     var tc = now_ms()
     model.vision()
     show("vision (SigLIP So400m, 3 x 256 x 1152)", compare(fetch(ctx, model.vxn, VROWS * VD), VD,
@@ -88,7 +111,21 @@ def run(ctx: DeviceContext, path: String, refdir: String, runs: Int) raises:
                                                        span(CHUNK), ADIM))
     print("checked in", round((now_ms() - tc) / 1e3, 2), "s (first run: pipelines created)")
 
-    for r in range(runs):
+
+def time_runs(ctx: DeviceContext, mut model: Pi0, pixels: List[Float32], tokens: List[Int32], mask: List[Int32],
+              state: List[Float32], noise: List[Float32], rope: List[Float32], runs: Int) raises:
+
+    var ab = getenv("PI0_AB") != ""
+    var new_ksplit = model.ksplit
+    var new_below = model.s.split_below
+    var new_act = model.s.act_first
+    for r in range(runs * (2 if ab else 1)):
+        if ab:  # alternate the kernels without splits and with them, in one process
+            var old = r % 2 == 0
+            model.ksplit = 0 if old else new_ksplit
+            model.s.split_below = 0 if old else new_below
+            model.s.act_first = 0 if old else new_act
+            print("A/B:", "the old kernels" if old else "the new ones")
         model.set_inputs(pixels, tokens, mask, state, noise, rope)
         var a = now_ms()
         model.vision()

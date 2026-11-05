@@ -10,21 +10,20 @@ against lerobot's own PyTorch model:
 ```
 weights: 10.85 GB read from the checkpoint; 289 tensors stored as bf16 (exactly), 6 kept in fp32; loaded in 8.0 s
 prefix: 816 rows, 783 valid; chunk 50 x 32 , 10 steps
-check vision (SigLIP So400m, 3 x 256 x 1152) : max abs error 0.00033 (largest reference value 35.6)
-check image tokens (projector) : max abs error 0.00015 (largest reference value 21.0)
-check prefix embeddings (valid rows) : max abs error 0.00015 (largest reference value 492.1)
-check prefix K cache, worst of 18 layers (layer 16) : max abs error 0.00079 (largest reference value 17.8)
+check vision (SigLIP So400m, 3 x 256 x 1152) : max abs error 0.00049 (largest reference value 35.6)
+check image tokens (projector) : max abs error 0.00012 (largest reference value 21.0)
+check prefix embeddings (valid rows) : max abs error 0.00012 (largest reference value 492.1)
+check prefix K cache, worst of 18 layers (layer 16) : max abs error 0.00078 (largest reference value 17.8)
 check prefix V cache, worst of 18 layers : max abs error 0.0018 (largest reference value 19.8)
-check step 0 v_t : max abs error 7.6e-06 (largest reference value 4.04)
+check step 0 v_t : max abs error 1.1e-05 (largest reference value 4.04)
 ...
-check step 9 v_t : max abs error 1.0e-05 (largest reference value 4.14)
-check actions (50 x 32) : max abs error 7.2e-06 (largest reference value 1.15)
-run 0 : vision 558.2 ms, projector+embed 3.3 ms, prefix 2752.0 ms, 10 steps 785.4 ms ( 78.5 ms/step ); chunk 4053.2 ms
-run 1 : vision 554.1 ms, projector+embed 2.5 ms, prefix 2730.9 ms, 10 steps 768.0 ms ( 76.8 ms/step ); chunk 4058.1 ms
-run 2 : vision 553.6 ms, projector+embed 2.3 ms, prefix 2748.7 ms, 10 steps 761.4 ms ( 76.1 ms/step ); chunk 4055.1 ms
+check step 9 v_t : max abs error 1.5e-05 (largest reference value 4.14)
+check actions (50 x 32) : max abs error 1.1e-05 (largest reference value 1.15)
+run 0 : vision 529.9 ms, projector+embed 2.6 ms, prefix 2560.7 ms, 10 steps 778.8 ms ( 77.9 ms/step ); chunk 3603.7 ms
 ```
 
-**The action chunk matches PyTorch fp32 within 7.2e-6.** The stated tolerance is 1e-5 absolute on the actions.
+**The action chunk matches PyTorch fp32 within 1.1e-5.** The stated tolerance is 2e-5 absolute on the actions.
+Before the split kernels below it was 7.2e-6: splitting sums over k and over keys reorders fp32 additions.
 Inside the network, every stage is within 1e-4 of its largest value. The prefix's K/V differ most (up to 1.8e-3
 on values of 20): they come out of 18 Gemma layers whose MLP sums run over k = 16384.
 
@@ -40,27 +39,42 @@ the driver's 128 MB binding (Gemma's gate and up are kept separate: 64 MB each).
 
 ## Latency on the Adreno 840
 
-The Galaxy Z Fold, three runs after 90 s idle (GPU at 28 °C), pipelines cached. Each stage is synchronized, then
-the whole chunk runs with one synchronize.
+The Galaxy Z Fold, pipelines cached. Each run is its own process after 100 s idle. Each stage is synchronized,
+then the whole chunk runs with one synchronize. "Before" is the same program with the three changes below
+turned off (`PI0_KSPLIT=0 PI0_SPLIT_BELOW=0 PI0_ACT_FIRST=0`), timed right before it (GPU at 31 and 36 °C).
 
-| Stage | Work | Time |
-|---|---|---|
-| Vision | SigLIP So400m, 27 layers of 1152 (heads of 72), 3 images × 256 patches (768 rows) | 554–558 ms |
-| Projector + embeddings | 1152 → 2048 for 768 image rows; 48 language rows × √2048 | 2–3 ms |
-| Prefix | Gemma 2B, 18 layers over 816 rows (896 padded): 3.2 TFLOP | 2.73–2.75 s |
-| Denoising | 10 Euler steps of the expert (Gemma 300M, 18 layers, 51 rows against the 816-row cache) | 761–785 ms (76–79 ms/step) |
-| **Action chunk** | | **4.05–4.06 s** |
+| Stage | Work | Before | Now |
+|---|---|---|---|
+| Vision | SigLIP So400m, 27 layers of 1152 (heads of 72), 3 images × 256 patches (768 rows) | 571 ms | **530 ms** |
+| Projector + embeddings | 1152 → 2048 for 768 image rows; 48 language rows × √2048 | 3 ms | 3 ms |
+| Prefix | Gemma 2B, 18 layers over 816 rows (896 padded): 3.2 TFLOP | 2.75 s | **2.56 s** |
+| Denoising | 10 Euler steps of the expert (Gemma 300M, 18 layers, 51 rows against the 816-row cache) | 800 ms (80.0 ms/step) | **779 ms** (77.9 ms/step) |
+| **Action chunk** | | **4.07 s** | **3.60 s** |
+
+This is one pair of runs: after it, the phone went to other work and heated. The new stages add up to 3.87 s
+(4.13 s before); the chunk timed with one synchronize came out at 3.60 s (4.07 s before).
+Earlier runs of the "before" kernels, three runs after 90 s idle, gave a 4.05–4.06 s chunk (prefix 2.73–2.75 s).
+Back-to-back runs without a rest warm the phone and drift up 10% or more.
 
 Loading takes 8 s: 10.8 GB read from the checkpoint, of which 5.4 GB go to the GPU.
 
-From a run synchronized after every launch (`PI0_PROFILE=1`):
-- **The prefix is the projections.** Gemma's gate/up (1.28 s) and down (1.19 s) run at 1.6 and 0.9 TFLOP/s.
-  `down` has k = 16384 and only 112 workgroups of 128 × 128.
+What the three changes do:
+- **Gemma's `down` projection activates its input once** (`host.Scratch.act_first`). Its k is 16384, and it
+  read both halves of the GeGLU input (gate and up, 117 MB) for each of its 16 column blocks, recomputing
+  `gelu(gate) · up` each time: 1.9 GB a layer. Now `vgemm.act_rows` writes the activation once (59 MB), and the
+  matmul stages it plainly. The prefix: 2.75 → 2.56 s.
+- **Split-k for projections of very few blocks** (`vgemm.gemm[SPLIT]` + `reduce_sk`). SigLIP's fc2 (k = 4304)
+  has only 54 blocks of 128 × 128; in 4 k ranges it fills the GPU. Vision: 571 → 530 ms. Gemma's projections
+  (112 blocks and more) got slower when split (prefix +130 ms), so they stay whole (`SPLIT_BELOW = 64`).
+- **The expert's attention splits its keys** (`vattn.attention[SPLIT]` + `attention_combine`). Its 51 query rows
+  against 960 keys gave only 32 workgroups (8 heads × 4 column chunks of the heads of 256); with the keys split
+  5 ways, 160, merged by their row maxima and sums. That saves about 2 ms a step. The per-launch profile had
+  overstated the attention's share: synchronizing after each launch adds about 0.25 ms to every one.
+
+Still true from the per-launch profile (`PI0_PROFILE=1`):
+- **The prefix is the projections.** Gemma's gate and up run at about 1.6 TFLOP/s.
 - **The prefix rows are padded to 896.** With the 832 rows that 64 suffices for, the projections take
   64 × 128 blocks, and the prefix took 6.5 s.
-- **The expert's attention dominates a step** (2.8 ms a layer). Heads of 256 are computed as four 64-column
-  chunks, each recomputing Q Kᵀ, since the 840's driver allows one fp32 accumulator a subgroup. With 51 query
-  rows that is only 32 workgroups.
 - **The prefix synchronizes after each layer.** The driver plugin submits 64 launches at a time
   (`VK_SUBMIT_EVERY`), and 64 of these outlast the GPU's watchdog: the device is lost.
 
