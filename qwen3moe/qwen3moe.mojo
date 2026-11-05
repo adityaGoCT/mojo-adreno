@@ -6,6 +6,8 @@
 #     qwen3moe <manifest.txt> <qwen3moe.bin on the executor's side> <new tokens> <prompt token ids...>
 #   QWEN3MOE_LOGITS=<file>   each generated position's logits (fp32 [new tokens][151936]) to a file
 #   QWEN3MOE_SYNC=1          synchronize after every token (its time, with the transport's round trip)
+#   QWEN3MOE_PREFILL=0 / 1   the prompt a token at a time (decode steps) / in batches of up to 256 tokens; by
+#                            default batches from 32 tokens on (shorter prompts leave most of the GPU idle)
 #   QWEN3MOE_REPLAY=<k>      then time a decode step on the server's own clock: the server keeps the step's requests
 #                            and runs them k more times (vla/x2's vk_server: OP_RECORD / OP_REPLAY), so the launches
 #                            do not stream through the transport
@@ -14,7 +16,7 @@ from std.sys import argv
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext
 
-from model import CAP, V, Qwen3Moe
+from model import CAP, PMAX, V, Qwen3Moe
 
 
 def now_ms() -> Float64:
@@ -49,8 +51,14 @@ def main() raises:
     model.set_prompt(prompt)
     ctx.synchronize()
     var t1 = now_ms()
-    for p in range(n):  # the prompt, a token at a time; the last one's argmax is the first new token
-        model.step(p, p == n - 1)
+    var mode = getenv("QWEN3MOE_PREFILL")
+    if mode == "0" or (mode != "1" and n < 32):
+        for p in range(n):  # the prompt, a token at a time; the last one's argmax is the first new token
+            model.step(p, p == n - 1)
+    else:
+        for c0 in range(0, n, PMAX):  # in batches: each expert's weights read once a batch
+            var cnt = min(PMAX, n - c0)
+            model.prefill(c0, cnt, c0 + cnt == n)
     if logits_path:
         ctx.enqueue_copy(keep.create_sub_buffer[DType.float32](0, V), model.logits)
     ctx.synchronize()

@@ -28,6 +28,7 @@ comptime TOPK = 8
 comptime FE = 768
 comptime V = 151936
 comptime CAP = 512  # positions a KV cache holds
+comptime PMAX = 256  # prompt tokens a prefill runs at once
 comptime THETA: Float64 = 10000000.0
 
 
@@ -67,6 +68,20 @@ struct Qwen3Moe(Movable):
     var wts: DeviceBuffer[DType.float32]
     var a: DeviceBuffer[DType.float32]
     var logits: DeviceBuffer[DType.float32]
+    # prefill: rows of up to PMAX tokens
+    var px: DeviceBuffer[DType.float32]
+    var pxn: DeviceBuffer[DType.float32]
+    var pqkv: DeviceBuffer[DType.float32]
+    var patt: DeviceBuffer[DType.float32]
+    var prl: DeviceBuffer[DType.float32]
+    var pids: DeviceBuffer[DType.int32]
+    var pwts: DeviceBuffer[DType.float32]
+    var pa: DeviceBuffer[DType.float32]
+    var ppart: DeviceBuffer[DType.float32]
+    var plists: DeviceBuffer[DType.int32]
+    var pcounts: DeviceBuffer[DType.int32]
+    var pitems: DeviceBuffer[DType.int32]
+    var pnitems: DeviceBuffer[DType.int32]
 
     def __init__(out self, ctx: DeviceContext, manifest: String, weights: String) raises:
         """manifest: export.py's manifest.txt (a copy on this side); weights: qwen3moe.bin's path on the executor's
@@ -96,6 +111,19 @@ struct Qwen3Moe(Movable):
         self.wts = ctx.enqueue_create_buffer[DType.float32](TOPK)
         self.a = ctx.enqueue_create_buffer[DType.float32](TOPK * FE)
         self.logits = ctx.enqueue_create_buffer[DType.float32](V)
+        self.px = ctx.enqueue_create_buffer[DType.float32](PMAX * D)
+        self.pxn = ctx.enqueue_create_buffer[DType.float32](PMAX * D)
+        self.pqkv = ctx.enqueue_create_buffer[DType.float32](PMAX * QKV)
+        self.patt = ctx.enqueue_create_buffer[DType.float32](PMAX * H * HD)
+        self.prl = ctx.enqueue_create_buffer[DType.float32](PMAX * E)
+        self.pids = ctx.enqueue_create_buffer[DType.int32](PMAX * TOPK)
+        self.pwts = ctx.enqueue_create_buffer[DType.float32](PMAX * TOPK)
+        self.pa = ctx.enqueue_create_buffer[DType.float32](PMAX * TOPK * FE)
+        self.ppart = ctx.enqueue_create_buffer[DType.float32](PMAX * TOPK * D)
+        self.plists = ctx.enqueue_create_buffer[DType.int32](E * PMAX)
+        self.pcounts = ctx.enqueue_create_buffer[DType.int32](E)
+        self.pitems = ctx.enqueue_create_buffer[DType.int32](2 * (PMAX + E))
+        self.pnitems = ctx.enqueue_create_buffer[DType.int32](1)
         self.load(manifest)
         self.rope_table()
 
@@ -190,3 +218,57 @@ struct Qwen3Moe(Movable):
                                               Int64(D), grid_dim=V, block_dim=64)
         ctx.enqueue_function[moek.argmax](self.logits, Int32(V), self.tokens, p, Int32(1 if write else 0), grid_dim=1,
                                           block_dim=256)
+
+    def prefill(mut self, p0: Int, count: Int, write: Bool) raises:
+        """Tokens p0 .. p0 + count - 1 of the token list at once (count <= PMAX; positions p0 on): each matrix row is
+        read once for all of them, each expert's rows once for the tokens that chose it. The last token's argmax goes
+        into tokens[p0 + count] if `write`."""
+        if count < 1 or count > PMAX or p0 + count > CAP:
+            raise Error("prefill: " + String(count) + " tokens at " + String(p0))
+        var ctx = self.ctx
+        var c = Int32(count)
+        for t in range(count):
+            if self.lib.call["M_driver_remote_gather", Int32](UInt64(Int(self.px.unsafe_ptr()) + 4 * D * t),
+                                                              UInt64(Int(self.tokens.unsafe_ptr()) + 4 * (p0 + t)),
+                                                              self.path.as_c_string_span().unsafe_ptr(),
+                                                              UInt64(self.embed_offset), UInt64(4 * D)) != 0:
+                raise Error("M_driver_remote_gather failed")
+        for l in range(L):
+            var n = "l" + String(l) + "."
+            ctx.enqueue_function[moek.p_rmsnorm](self.px, self.floats[n + "in_norm"], self.pxn, Int32(D),
+                                                 grid_dim=count, block_dim=64)
+            ctx.enqueue_function[moek.t_gemv_q4](self.words[n + "qkv.q"], self.halves[n + "qkv.s"], self.pxn, self.pqkv,
+                                                 Int32(D), Int32(QKV), c, Int32(0),
+                                                 grid_dim=Dim(QKV // 64, groups(count, moek.TT)), block_dim=64)
+            ctx.enqueue_function[moek.p_qk_norm_rope](self.pqkv, self.floats[n + "q_norm"], self.floats[n + "k_norm"],
+                                                      self.table, self.kc[l], self.vc[l], Int32(p0),
+                                                      grid_dim=Dim(H + 2 * KVH, count), block_dim=64)
+            ctx.enqueue_function[moek.p_attention](self.pqkv, self.kc[l], self.vc[l], self.patt, Int32(p0),
+                                                   grid_dim=Dim(H, count), block_dim=64)
+            ctx.enqueue_function[moek.t_gemv_q4](self.words[n + "o.q"], self.halves[n + "o.s"], self.patt, self.px,
+                                                 Int32(H * HD), Int32(D), c, Int32(1),
+                                                 grid_dim=Dim(D // 64, groups(count, moek.TT)), block_dim=64)
+            ctx.enqueue_function[moek.p_rmsnorm](self.px, self.floats[n + "post_norm"], self.pxn, Int32(D),
+                                                 grid_dim=count, block_dim=64)
+            ctx.enqueue_function[moek.p_gemv_f32](self.floats[n + "router"], self.pxn, self.prl, Int32(D), Int32(E), c,
+                                                  grid_dim=E, block_dim=64)
+            ctx.enqueue_function[moek.p_route](self.prl, self.pids, self.pwts, grid_dim=count, block_dim=64)
+            ctx.enqueue_function[moek.p_expert_lists](self.pids, self.plists, self.pcounts, c, grid_dim=E, block_dim=64)
+            ctx.enqueue_function[moek.p_expert_items](self.pcounts, self.pitems, self.pnitems, grid_dim=1,
+                                                      block_dim=64)
+            var items = groups(count * TOPK, moek.TT) + E  # at most: work items of 8 (expert, token) pairs
+            ctx.enqueue_function[moek.t_moe_gate_up](self.words[n + "gu.q"], self.halves[n + "gu.s"], self.pitems,
+                                                     self.pnitems, self.plists, self.pcounts, self.pxn, self.pa,
+                                                     grid_dim=Dim(FE // 64, items), block_dim=64)
+            ctx.enqueue_function[moek.t_moe_down](self.words[n + "down.q"], self.halves[n + "down.s"], self.pitems,
+                                                  self.pnitems, self.plists, self.pcounts, self.pa, self.ppart,
+                                                  grid_dim=Dim(D // 64, items), block_dim=64)
+            ctx.enqueue_function[moek.p_moe_sum](self.ppart, self.pwts, self.px, c, grid_dim=groups(count * D, 64),
+                                                 block_dim=64)
+        var last = self.px.create_sub_buffer[DType.float32]((count - 1) * D, D)
+        ctx.enqueue_function[moek.rmsnorm](last, self.floats["final_norm"], self.xn, Int32(D), grid_dim=1,
+                                           block_dim=64)
+        ctx.enqueue_function[gemv_q4.gemv_q4](self.words["head.q"], self.halves["head.s"], self.xn, self.logits,
+                                              Int64(D), grid_dim=V, block_dim=64)
+        ctx.enqueue_function[moek.argmax](self.logits, Int32(V), self.tokens, Int32(p0 + count - 1),
+                                          Int32(1 if write else 0), grid_dim=1, block_dim=256)

@@ -248,3 +248,361 @@ def argmax(logits: F32, n: Int32, tokens: I32, pos: Int32, write: Int32):
         barrier()
     if t == 0 and write != 0:
         tokens[Int(pos) + 1] = si[0]
+
+
+# ---- prefill: T prompt tokens at once (rows of T) ----------------------------------------------------------------
+# Every matrix row is read once and applied to all T tokens (a workgroup a row, a token at a time), so a prompt reads
+# the attention weights once, and each expert's weights once, for the tokens routed to it. Positions p0 .. p0 + T - 1.
+
+
+def p_rmsnorm(x: F32, w: F32, y: F32, n: Int32):
+    """Row t (workgroup t): y[t] = x[t] / rms(x[t]) * w."""
+    var t = Int(block_idx.x)
+    var lane = Int(thread_idx.x)
+    var xr = x + t * Int(n)
+    var yr = y + t * Int(n)
+    var ss: Float32 = 0
+    for j in range(lane, Int(n), 64):
+        var v = xr[j]
+        ss += v * v
+    var r = rsqrt(warp_sum(ss) / Float32(Int(n)) + Float32(1e-6))
+    for j in range(lane, Int(n), 64):
+        yr[j] = xr[j] * r * w[j]
+
+
+def p_gemv_q4(wq: U32, ws: F16, x: F32, y: F32, cols: Int32, rows: Int32, tokens: Int32, add: Int32):
+    """y[t, r] (+)= W[r] . x[t] for int4 W (a scale per 64), t < tokens: workgroup r reads its row once."""
+    var r = Int(block_idx.x)
+    var lane = Int(thread_idx.x)
+    for t in range(Int(tokens)):
+        var s = warp_sum(dot_q4_row[64](wq, ws, r, Int(cols), x + t * Int(cols), lane))
+        if lane == 0:
+            var i = t * Int(rows) + r
+            y[i] = (y[i] + s) if add != 0 else s
+
+
+def p_gemv_f32(w: F32, x: F32, y: F32, cols: Int32, rows: Int32, tokens: Int32):
+    """y[t, r] = W[r] . x[t] for fp32 W (the router)."""
+    var r = Int(block_idx.x)
+    var lane = Int(thread_idx.x)
+    var n = Int(cols)
+    for t in range(Int(tokens)):
+        var acc = Float32(0)
+        for j in range(lane, n, 64):
+            acc += w[r * n + j] * x[t * n + j]
+        var s = warp_sum(acc)
+        if lane == 0:
+            y[t * Int(rows) + r] = s
+
+
+def p_qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, p0: Int32):
+    """qk_norm_rope for token row t (block y) at position p0 + t, head block x."""
+    var h = Int(block_idx.x)
+    var t = Int(block_idx.y)
+    var d = Int(thread_idx.x)
+    var p = Int(p0) + t
+    var row = qkv + t * (H + 2 * KVH) * HD
+    var base = h * HD
+    var a = row[base + d]
+    var b = row[base + d + 64]
+    if h >= H + KVH:
+        vc[p * KVW + (h - H - KVH) * HD + d] = a
+        vc[p * KVW + (h - H - KVH) * HD + d + 64] = b
+        return
+    var w = wq if h < H else wk
+    var r = rsqrt(warp_sum(a * a + b * b) / Float32(HD) + Float32(1e-6))
+    a *= r * w[d]
+    b *= r * w[d + 64]
+    var c = table[p * HD + d]
+    var s = table[p * HD + 64 + d]
+    var ra = a * c - b * s
+    var rb = b * c + a * s
+    if h < H:
+        row[base + d] = ra
+        row[base + d + 64] = rb
+    else:
+        kc[p * KVW + (h - H) * HD + d] = ra
+        kc[p * KVW + (h - H) * HD + d + 64] = rb
+
+
+def p_attention(qkv: F32, kc: F32, vc: F32, y: F32, p0: Int32):
+    """Causal attention of query head h (block x) of token row t (block y), at position p = p0 + t, over the cached
+    keys 0 .. p (at most 512): scores into shared memory a lane a key, max and sum by shared reductions, then lane d
+    sums dimensions d and d + 64 of V."""
+    var sp = stack_allocation[512, Float32, address_space=AddressSpace.SHARED]()
+    var red = stack_allocation[64, Float32, address_space=AddressSpace.SHARED]()
+    var h = Int(block_idx.x)
+    var t = Int(block_idx.y)
+    var lane = Int(thread_idx.x)
+    var n = Int(p0) + t + 1
+    var g = h // (H // KVH)
+    var q = qkv + (t * (H + 2 * KVH) * HD + h * HD)
+    var highest: Float32 = -3.402823e38
+    for k0 in range(0, n, 64):
+        var k = k0 + lane
+        if k < n:
+            var kr = kc + (k * KVW + g * HD)
+            var acc = SIMD[DType.float32, 4](0)
+            for d in range(0, HD, 4):
+                acc += q.load[width=4](d) * kr.load[width=4](d)
+            var s = acc.reduce_add() * Float32(0.08838834764831845)
+            sp[k] = s
+            highest = max(highest, s)
+    red[lane] = highest
+    barrier()
+    comptime for stage in range(6):
+        if lane < 32 >> stage:
+            red[lane] = max(red[lane], red[lane + (32 >> stage)])
+        barrier()
+    highest = red[0]
+    barrier()
+    var total: Float32 = 0
+    for k0 in range(0, n, 64):
+        var k = k0 + lane
+        if k < n:
+            var e = exp(sp[k] - highest)
+            sp[k] = e
+            total += e
+    red[lane] = total
+    barrier()
+    comptime for stage in range(6):
+        if lane < 32 >> stage:
+            red[lane] = red[lane] + red[lane + (32 >> stage)]
+        barrier()
+    total = red[0]
+    var a: Float32 = 0
+    var b: Float32 = 0
+    var v = vc + g * HD
+    for k in range(n):
+        var pk = sp[k]
+        a += pk * v[k * KVW + lane]
+        b += pk * v[k * KVW + lane + 64]
+    var out = y + (t * H * HD + h * HD)
+    out[lane] = a / total
+    out[lane + 64] = b / total
+
+
+def p_route(logits: F32, ids: I32, weights: F32):
+    """route() for token row t (workgroup t): its top 8 of 128 experts and their weights."""
+    var t = Int(block_idx.x)
+    var sv = stack_allocation[64, Float32, address_space=AddressSpace.SHARED]()
+    var si = stack_allocation[64, Int32, address_space=AddressSpace.SHARED]()
+    var top = stack_allocation[TOPK, Float32, address_space=AddressSpace.SHARED]()
+    var lane = Int(thread_idx.x)
+    var a = logits[t * 128 + lane]
+    var b = logits[t * 128 + lane + 64]
+    for k in range(TOPK):
+        var best = a
+        var bi = Int32(lane)
+        if b > best:
+            best = b
+            bi = Int32(lane + 64)
+        sv[lane] = best
+        si[lane] = bi
+        barrier()
+        comptime for stage in range(6):
+            if lane < 32 >> stage:
+                var o = lane + (32 >> stage)
+                if sv[o] > sv[lane] or (sv[o] == sv[lane] and si[o] < si[lane]):
+                    sv[lane] = sv[o]
+                    si[lane] = si[o]
+            barrier()
+        var win = Int(si[0])
+        if lane == 0:
+            ids[t * TOPK + k] = Int32(win)
+            top[k] = sv[0]
+        if win == lane:
+            a = -3.402823e38
+        if win == lane + 64:
+            b = -3.402823e38
+        barrier()
+    if lane == 0:
+        var m = top[0]
+        var total = Float32(0)
+        for k in range(TOPK):
+            total += exp(top[k] - m)
+        for k in range(TOPK):
+            weights[t * TOPK + k] = exp(top[k] - m) / total
+
+
+comptime RB = 8  # rows a workgroup of the prefill's expert kernels
+comptime PMAX = 256  # tokens a prefill runs at once (model.mojo's)
+
+
+def p_expert_lists(ids: I32, lists: I32, counts: I32, tokens: Int32):
+    """Workgroup e: the (token, slot) pairs, as t * 8 + k, whose choice k was expert e, into lists[e * PMAX ..], and
+    their number into counts[e]. A token chooses an expert at most once, so a list holds at most PMAX."""
+    var e = Int(block_idx.x)
+    if Int(thread_idx.x) == 0:
+        var n = 0
+        for i in range(Int(tokens) * TOPK):
+            if Int(ids[i]) == e:
+                lists[e * PMAX + n] = Int32(i)
+                n += 1
+        counts[e] = Int32(n)
+
+
+def p_moe_gate_up(wq: U32, ws: F16, lists: I32, counts: I32, x: F32, a: F32):
+    """Expert e (block y), rows j = 8 * block x .. + 7: each gate and up row is read once, for the tokens that chose
+    e: a[t, k, j] = silu(gate . x[t]) * (up . x[t]). An expert no token chose costs nothing."""
+    var e = Int(block_idx.y)
+    var lane = Int(thread_idx.x)
+    var n = Int(counts[e])
+    for rr in range(RB):
+        var j = Int(block_idx.x) * RB + rr
+        var row = e * (2 * FE) + j
+        for i in range(n):  # the same for every lane: the subgroup sums stay uniform
+            var tk = Int(lists[e * PMAX + i])
+            var xt = x + (tk // TOPK) * D
+            var g = warp_sum(dot_q4_row[GE](wq, ws, row, D, xt, lane))
+            var u = warp_sum(dot_q4_row[GE](wq, ws, row + FE, D, xt, lane))
+            if lane == 0:
+                a[tk * FE + j] = g / (1 + exp(-g)) * u
+
+
+def p_moe_down(wq: U32, ws: F16, lists: I32, counts: I32, a: F32, part: F32):
+    """Expert e (block y), output rows r = 8 * block x .. + 7: each down row read once, for the tokens that chose e:
+    part[t, k, r] = W_down[e][r] . a[t, k]."""
+    var e = Int(block_idx.y)
+    var lane = Int(thread_idx.x)
+    var n = Int(counts[e])
+    for rr in range(RB):
+        var r = Int(block_idx.x) * RB + rr
+        var row = e * D + r
+        for i in range(n):
+            var tk = Int(lists[e * PMAX + i])
+            var s = warp_sum(dot_q4_row[GE](wq, ws, row, FE, a + tk * FE, lane))
+            if lane == 0:
+                part[tk * D + r] = s
+
+
+def p_moe_sum(part: F32, weights: F32, x: F32, tokens: Int32):
+    """x[t, r] += sum_k weights[t, k] * part[t, k, r]: the experts' outputs into the residual stream."""
+    var i = global_idx.x
+    if i < Int(tokens) * D:
+        var t = i // D
+        var r = i % D
+        var acc = Float32(0)
+        comptime for k in range(TOPK):
+            acc += weights[t * TOPK + k] * part[(t * TOPK + k) * D + r]
+        x[i] = x[i] + acc
+
+
+# ---- prefill, a row a lane: 64 matrix rows x 8 tokens a workgroup ----------------------------------------------
+# Each lane computes whole dot products for its own row, against 8 tokens at once: it decodes each int4 word once for
+# the 8 tokens (two 4-wide accumulators), and the token values it reads are the same for every lane (broadcast
+# loads). No subgroup sums. (64-wide SIMD accumulators, tried first, went to private memory: 10x slower.)
+
+comptime TT = 8  # tokens a workgroup
+
+
+@always_inline
+def word4(word: UInt32, half: Int) -> SIMD[DType.float32, 4]:
+    """Weights 4 * half .. + 3 of an int4 word (two's complement nibbles, low first)."""
+    var w = SIMD[DType.float32, 4]()
+    comptime for j in range(4):
+        w[j] = Float32((Int32((word >> UInt32(4 * (4 * half + j))) & 15) ^ 8) - 8)
+    return w
+
+
+@always_inline
+def row_tokens_q4[G: Int](wq: U32, ws: F16, row: Int, cols: Int, x: F32, xa: SIMD[DType.int32, 4],
+                         xb: SIMD[DType.int32, 4], mut lo: SIMD[DType.float32, 4], mut hi: SIMD[DType.float32, 4]):
+    """lo[t], hi[t - 4] += W[row] . x[o_t ..] for the 8 tokens (offsets o_0..3 in xa, o_4..7 in xb), a whole row in
+    this lane."""
+    var words = cols // 8
+    for wi in range(words):
+        var word = wq[row * words + wi]
+        var sc = ws[row * (cols // G) + wi // (G // 8)].cast[DType.float32]()
+        var w0 = word4(word, 0) * sc
+        var w1 = word4(word, 1) * sc
+        comptime for t in range(TT):
+            var p = x + ((Int(xa[t]) if t < 4 else Int(xb[t - 4])) + wi * 8)
+            var d = (w0 * p.load[width=4]() + w1 * (p + 4).load[width=4]()).reduce_add()
+            comptime if t < 4:
+                lo[t] += d
+            else:
+                hi[t - 4] += d
+
+
+def t_gemv_q4(wq: U32, ws: F16, x: F32, y: F32, cols: Int32, rows: Int32, tokens: Int32, add: Int32):
+    """y[t, r] (+)= W[r] . x[t] (int4, a scale per 64): row r = 64 * block x + lane, tokens 8 * block y .. + 7."""
+    var r = Int(block_idx.x) * 64 + Int(thread_idx.x)
+    var t0 = Int(block_idx.y) * TT
+    var n = Int(tokens)
+    var xa = SIMD[DType.int32, 4]()
+    var xb = SIMD[DType.int32, 4]()
+    comptime for t in range(4):
+        xa[t] = Int32(min(t0 + t, n - 1) * Int(cols))
+        xb[t] = Int32(min(t0 + 4 + t, n - 1) * Int(cols))
+    var lo = SIMD[DType.float32, 4](0)
+    var hi = SIMD[DType.float32, 4](0)
+    row_tokens_q4[64](wq, ws, r, Int(cols), x, xa, xb, lo, hi)
+    comptime for t in range(TT):
+        if t0 + t < n:
+            var i = (t0 + t) * Int(rows) + r
+            var v = lo[t] if t < 4 else hi[t - 4]
+            y[i] = (y[i] + v) if add != 0 else v
+
+
+def p_expert_items(counts: I32, items: I32, nitems: I32):
+    """The experts' (expert, first list entry) work items of 8 tokens each, in order: one lane."""
+    if Int(thread_idx.x) == 0:
+        var n = 0
+        for e in range(128):
+            for c in range(0, Int(counts[e]), TT):
+                items[2 * n] = Int32(e)
+                items[2 * n + 1] = Int32(c)
+                n += 1
+        nitems[0] = Int32(n)
+
+
+def t_moe_gate_up(wq: U32, ws: F16, items: I32, nitems: I32, lists: I32, counts: I32, x: F32, a: F32):
+    """Work item block y (expert e, its list entries c .. c + 7), j = 64 * block x + lane: gate row j and up row j
+    against the 8 tokens' x, then a[t, k, j] = silu(gate) * up."""
+    var it = Int(block_idx.y)
+    if it >= Int(nitems[0]):
+        return
+    var e = Int(items[2 * it])
+    var c = Int(items[2 * it + 1])
+    var n = Int(counts[e])
+    var j = Int(block_idx.x) * 64 + Int(thread_idx.x)
+    var xa = SIMD[DType.int32, 4]()
+    var xb = SIMD[DType.int32, 4]()
+    comptime for t in range(4):
+        xa[t] = Int32((Int(lists[e * PMAX + min(c + t, n - 1)]) // TOPK) * D)
+        xb[t] = Int32((Int(lists[e * PMAX + min(c + 4 + t, n - 1)]) // TOPK) * D)
+    var glo = SIMD[DType.float32, 4](0)
+    var ghi = SIMD[DType.float32, 4](0)
+    var ulo = SIMD[DType.float32, 4](0)
+    var uhi = SIMD[DType.float32, 4](0)
+    row_tokens_q4[GE](wq, ws, e * 2 * FE + j, D, x, xa, xb, glo, ghi)
+    row_tokens_q4[GE](wq, ws, e * 2 * FE + FE + j, D, x, xa, xb, ulo, uhi)
+    comptime for t in range(TT):
+        if c + t < n:
+            var g = glo[t] if t < 4 else ghi[t - 4]
+            var u = ulo[t] if t < 4 else uhi[t - 4]
+            a[Int(lists[e * PMAX + c + t]) * FE + j] = g / (1 + exp(-g)) * u
+
+
+def t_moe_down(wq: U32, ws: F16, items: I32, nitems: I32, lists: I32, counts: I32, a: F32, part: F32):
+    """Work item block y (expert e, list entries c .. c + 7), output row r = 64 * block x + lane:
+    part[t, k, r] = W_down[e][r] . a[t, k]."""
+    var it = Int(block_idx.y)
+    if it >= Int(nitems[0]):
+        return
+    var e = Int(items[2 * it])
+    var c = Int(items[2 * it + 1])
+    var n = Int(counts[e])
+    var r = Int(block_idx.x) * 64 + Int(thread_idx.x)
+    var xa = SIMD[DType.int32, 4]()
+    var xb = SIMD[DType.int32, 4]()
+    comptime for t in range(4):
+        xa[t] = Int32(Int(lists[e * PMAX + min(c + t, n - 1)]) * FE)
+        xb[t] = Int32(Int(lists[e * PMAX + min(c + 4 + t, n - 1)]) * FE)
+    var lo = SIMD[DType.float32, 4](0)
+    var hi = SIMD[DType.float32, 4](0)
+    row_tokens_q4[GE](wq, ws, e * D + r, FE, a, xa, xb, lo, hi)
+    comptime for t in range(TT):
+        if c + t < n:
+            part[Int(lists[e * PMAX + c + t]) * D + r] = lo[t] if t < 4 else hi[t - 4]
