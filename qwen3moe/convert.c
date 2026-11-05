@@ -3,6 +3,7 @@
 //   src <shard>                           the input for the lines that follow (a file in <shard dir>)
 //   f16 <out> <src> <n>                   n bf16 values -> fp16
 //   f32 <out> <src> <n>                   n bf16 values -> fp32 (exact)
+//   f16t <out> <src> <rows> <cols>        a bf16 matrix -> fp16, transposed ([cols, rows]; npu/export_layer.py)
 //   q4 <out q> <out s> <src> <rows> <cols> <group>   a bf16 matrix -> int4: an fp16 scale per `group` weights of a row,
 //                                         q = rint(w / scale) clamped to -8..7, as 4-bit two's complement, 8 a uint32,
 //                                         low nibble first (llama/kernels' gemv_q4 storage). The scale is the fp16 of
@@ -107,6 +108,15 @@ int main(int argc, char **argv) {
         put(out, a + i * (wide ? 4 : 2), dst, m * (wide ? 4 : 2));
       }
       values += n;
+    } else if (!strcmp(kind, "f16t")) {
+      if (fscanf(r, "%lld %lld %lld %lld", &a, &b, &rows, &cols) != 4) return 2;
+      src = grow(src, &cap_src, rows * cols * 2);
+      dst = grow(dst, &cap_dst, rows * cols * 2);
+      get(in, b, src, rows * cols * 2);
+      for (long long i = 0; i < rows; ++i)
+        for (long long j = 0; j < cols; ++j) ((__fp16 *)dst)[j * rows + i] = (__fp16)bf16(src[i * cols + j]);
+      put(out, a, dst, rows * cols * 2);
+      values += rows * cols;
     } else if (!strcmp(kind, "q4")) {
       long long gs;
       if (fscanf(r, "%lld %lld %lld %lld %lld %lld", &a, &c, &b, &rows, &cols, &gs) != 6 || cols % gs || gs % 8 ||

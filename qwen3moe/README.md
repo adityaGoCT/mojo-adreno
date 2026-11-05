@@ -20,6 +20,8 @@ greedy: 95 of 95 given tokens are the reference's argmax
 int4: GPU logits within 0.0001 of the reference's (range -29.1 .. 48.1); same argmax at 96 of 96 positions
 ```
 
+- **Prefill: a 404-token prompt in 4.31 s**, the prompt in batches with experts grouped by token: 2.8× a token
+  at a time.
 - **Decode: 27–32 ms a token (31–37 tokens/s).** Each token reads 1.63 GB of active weights, so that is
   55–60 GB/s.
 - **Exact on its weights.** The GPU's logits are within 1e-4 (relative 7e-6) of a PyTorch reference that runs
@@ -77,8 +79,64 @@ holds now:
 9. `moe_down`: the 8 experts' down projections, weighted and summed into the residual.
 
 Then the final norm, the output head and `argmax`, which writes the next token into the token list. The expert
-kernels read the ids the router left, so the host never sees the routing. The prompt runs a token at a time through
-the same step.
+kernels read the ids the router left, so the host never sees the routing.
+
+## Prefill: the prompt at once, experts grouped by token
+
+A prompt runs in batches of up to 256 tokens (`prefill()`, from 32 tokens on). The weights an MoE uses depend on the
+token, so batching splits a layer in two:
+- **Attention:** the same for every token. q/k/v and o read each row once for all the prompt's tokens, and causal
+  attention runs a workgroup per head and token.
+- **Experts:** after the router, `p_expert_lists` gives each of the 128 experts the list of (token, slot) pairs
+  that chose it. Each expert then runs once over its own tokens, as a small matrix product with fixed weights (a
+  grouped GEMM: on a 404-token prompt, about 25 tokens an expert). Its weights are read once per layer instead of
+  once per token, and an expert no token chose costs nothing. `p_moe_sum` then adds each token's 8 weighted
+  outputs.
+
+The products run a matrix row per lane against 8 tokens at once: a lane decodes each int4 word once for the 8 tokens
+(two 4-wide accumulators), and the token values are the same loads for every lane. Two other layouts were slower:
+- a subgroup reduction per (row, token), as in decode: no faster than a token at a time;
+- 8 rows × 8 tokens per workgroup with 64-wide accumulators: those spill to private memory, 10× slower.
+
+| Prompt | Batched | A token at a time |
+|---|---|---|
+| 20 tokens | 1.17–1.33 s | 0.77–0.87 s |
+| 48 tokens | 1.26 s | 1.78 s |
+| 96 tokens | 1.41 s | 3.61 s |
+| 160 tokens | 1.86 s | 5.25 s |
+| 404 tokens | **4.31 s** (94 tokens/s) | 12.0 s |
+
+The batched logits are within 1.5e-5 of the token-at-a-time path's, with the same tokens. Below about 32 tokens
+most of the GPU stays idle, so short prompts run a token at a time (`QWEN3MOE_PREFILL=0 / 1` forces either).
+
+## On the Hexagon NPU
+
+The laptop's NPU is the same V81 HTP as the phones' (`../npu`). `npu/` runs one real layer (layer 0, fp16) through ONNX
+Runtime's QNN execution provider (Microsoft.ML.OnnxRuntime.QNN 1.24.4 for Windows on Arm, built with Zig):
+- attention, as for π0's prefix;
+- the router's top 8 as a dense weight per token (`TopK`);
+- **all 128 experts** for every token, weighted. An HTP graph is static and cannot gather a token's experts, so it
+  does 16× the useful arithmetic.
+
+| One layer, fp16 | NPU (HTP) | GPU, int4, this program |
+|---|---|---|
+| A token (decode) | 10.7–14 ms: all 128 experts' 1.2 GB at about 100 GB/s → 0.5–0.7 s a token | 27–32 ms for all 48 layers |
+| 128 prompt tokens | 213–218 ms → 10.3 s for 48 layers | about 1.6 s (1.41 s at 96, 1.86 s at 160) |
+| 256 prompt tokens | 95–97 ms (3.4 TFLOP/s) → 4.6 s for 48 layers | about 2.8 s (1.86 s at 160, 4.31 s at 404) |
+
+- **Accuracy:** against transformers' fp32 layer on the same input, the NPU's output is within 1.2e-3 for the median
+  token (relative to the layer's change). A few tokens reach 3%: for 2 of the 128, fp16 router logits change the top 8.
+- **Fixes it needed:** QNN's `RmsNorm` refuses the QK norms over heads of 128 (error 3110), and written-out fp16
+  squares underflow, so they are an L2 normalization times √128. The 128-token graph compiles to a slower plan than
+  the 256-token one.
+- **The hardware is fast.** It streams fp16 weights at about 100 GB/s, against 55–60 GB/s for these GPU kernels, and
+  runs 3.4 TFLOP/s of fp16 matrix work. But static graphs make it compute every expert. Reading only 8 would be
+  about 0.8 ms a layer (40 ms a token in fp16), in reach of the GPU's int4.
+- **The whole model does not fit as fp16:** 61 GB, beyond the laptop's 33.6 GB. On the HTP it would need its
+  quantized path (w4a16) and contexts of a few layers each.
+
+So, for this MoE, the GPU decodes and prefills. The NPU could take the dense attention, or a prefill with expert
+gathering, once QNN's graphs can select weights by index.
 
 New requests in the driver protocol make this possible on a remote GPU (`driver/protocol.h`, `driver/README.md`):
 - `OP_FILE`: the executor reads part of a file on its side into a buffer.
@@ -145,9 +203,11 @@ build/vla/venv/bin/python qwen3moe/run.py --prompt "..." --tokens 64 --check [--
 
 ## Follow-ups
 
-- **Batched prefill:** the prompt runs a token at a time. Experts grouped by token, as a grouped matmul, would run
-  a prompt at the speed of a few tokens.
+- **Prefill on the matrix units:** the batched products are fp32 FMAs on 8 tokens; cooperative-matrix tiles of 64
+  rows would read a prompt several times faster.
 - **Fusions:** the RMSNorms, router and top-8 are a quarter of a step as 192 small launches.
+- **The NPU with routing:** expert weights gathered by index in a QNN graph (or a graph per expert group), so it
+  reads 8 experts, not 128.
 - **Better int4:** GPTQ or AWQ-style rounding, or a w4a16 path, on the same storage.
 - **Stopping at `<|im_end|>`:** the GPU generates the asked-for count; the host cuts the text there.
 
@@ -163,3 +223,6 @@ build/vla/venv/bin/python qwen3moe/run.py --prompt "..." --tokens 64 --check [--
 | `reference.py` | transformers' Qwen3-MoE layers one at a time, on the int4 or bf16 weights (runs on the laptop) |
 | `run.py` | tokenize (chat template), run, decode the text, check against `reference.py` |
 | `build_mac.sh` | the server and converter for the laptop, the plugin and the program for the Mac |
+| `npu/export_layer.py` | one layer as an fp16 ONNX graph for the HTP (prefill of T tokens, all experts), and the recipe for its weights |
+| `npu/npu_run.cpp`, `npu/build_win.sh` | compile an ONNX graph to an HTP context on the laptop, then time it (ONNX Runtime + QNN, Windows on Arm) |
+| `npu/layer_ref.py` | the layer's input, and transformers' layer against the NPU's output |
