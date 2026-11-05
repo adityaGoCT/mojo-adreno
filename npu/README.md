@@ -36,6 +36,8 @@ activations (w4a16).
   6.8 ms. The process then releases the prefill contexts and loads the decode ones (2.1–2.4 s), since both sets
   together are 5 GB.
 - **Time to the first token:** 170 ms against 641–685 ms.
+- **Quantized weights** ([below](#quantized-weights-on-the-htp)): with int8 weights per output channel and uint16
+  activations (w8a16), the HTP prefills the same prompt in **116 ms**.
 - **Handoff:** 8–15 ms when it follows the whole prefill. It is overlapped with the NPU instead: each part's 4
   layers are converted and copied to the GPU while the NPU runs the next parts. That leaves 0.8–2.0 ms after the
   last part (its 4 layers and the logits), and the NPU's own time does not change. In the same process,
@@ -79,17 +81,177 @@ The relative errors are Frobenius norms. The HTP's fp16 is more accurate than ON
 same graph, consistent with wider accumulators in its matrix unit. With fp16 decode weights the fp16 prefill
 costs no token on this prompt. With int4 decode weights it flips the near-tie at token 38 (above).
 
-### Ternary Qwen3-8B: considered, not attempted
+## Quantized weights on the HTP
 
-The HTP path above relies on fp16 weights, which Qwen3-8B cannot use. Its 8.2 B parameters are 16 GB in fp16,
-beyond the phone's 11 GB of RAM, let alone the HTP's 32-bit address space per process. An int8 copy would still be
-8 GB. The ternary weights (−1, 0, +1 times a scale per 128) are exactly representable as int4 with per-128 block
-scales, about 4.1 GB. But the HTP runs int4 weights only against quantized activations (w4a16). That means:
-- a QDQ graph with block-quantized int4 weights and uint16 activations calibrated per tensor;
-- care with Qwen3's large activations;
-- splitting into contexts of about 1 GB, as Qualcomm does for 8B models.
+### What ONNX Runtime 1.29's QNN execution provider maps
 
-That is a quantization project of its own, so it is a follow-up rather than part of this experiment.
+- **Block-quantized int4 means LPBQ.** The only block-quantized weights the execution provider gives QNN are
+  low-power block quantization (`QNN_QUANTIZATION_ENCODING_BLOCKWISE_EXPANSION`), through two node-group
+  fusions, `LowPowerBlockQuantizedGemmFusion` and `LowPowerBlockQuantizedMatMulFusion`. A weight is
+  `q · c · u`: q int4, c an fp32 scale per output channel, u a 4-bit integer per block (1–15 here; QNN reads
+  it as a plain multiplier). In ONNX that is two DequantizeLinear nodes:
+  1. `DQ(u uint8, c, axis)` gives the block scales;
+  2. a second `DQ(q INT4, those scales, zero point INT4, block_size)` feeds the Gemm or MatMul, with a
+     uint16 `DQ` on its input and a `Q` on its output.
+- **Plain block DQ is not mapped.** A DequantizeLinear with fp16 block scales (the format of
+  `llama/run.py --quant q4`) gets no mapping. QNN's own block encoding (`QNN_QUANTIZATION_ENCODING_BLOCK`)
+  has a constructor in the execution provider but no caller, and the per-channel path would misread the
+  scales. So the GPU's int4 export cannot be pointed at directly. `quant.py` quantizes the fp16 weights
+  again, to scales of LPBQ's form. Each block picks the u near `ceil(s / c)` that minimizes its squared
+  error, where s is the block's own `max |w| / 7` and c is the row's largest s over 15. That costs nothing
+  measurable: with weights alone, the K/V error against the fp16 model is 0.431 (Frobenius, worst layer),
+  against 0.437 for the GPU's q4 with fp16 scales.
+- **Q/DQ scales must be fp32.** So the quantized graphs compute in fp32, which the HTP runs in fp16
+  (`enable_htp_fp16_precision`, on by default). Only the projections are quantized: each Gemm sits between
+  a uint16 QuantizeLinear/DequantizeLinear pair calibrated per tensor. RMSNorm, RoPE, attention, SwiGLU and
+  the residual stream stay float, and the graphs' inputs and outputs stay fp16, so `npu_prefill.cpp` reads
+  either kind.
+
+### What QNN 2.42's HTP backend builds
+
+Single-projection graphs on the S26 Ultra, 448 rows × 2048 inputs → 16384 outputs (Llama's gate/up), warm,
+including about 0.4 ms of fixed per-run cost (`npu_tool bench`):
+
+| Weights | Compiles | Time |
+|---|---|---|
+| fp16 (the fp16 graphs' FullyConnected) | yes | 4.25 ms |
+| int8, per output channel (w8a16 FullyConnected) | yes | 3.94 ms |
+| int4, per output channel (w4a16 FullyConnected) | yes | 3.75 ms |
+| int4 LPBQ, blocks of 64, MatMul form | yes | 23.4 ms (5.5× fp16) |
+| int4 LPBQ, blocks of 64, Gemm form (FullyConnected) | segmentation fault | |
+
+The Gemm form of LPBQ builds only when the weight is exactly 2048 × 2048 (blocks of 32, 64 or 128), and
+then takes 1.6 ms, about 3× the time per weight of per-channel int4. Every other shape tried (2048 × 1024,
+1024 × 2048, 4096 × 2048, 8192 × 2048, 2048 × 4096, 2048 × 8192) crashes QNN while it adds the weight
+tensor or, with inputs split into 2048-wide chunks, in finalization (`tcm_migration.cc: no properties
+registered for q::GenPad`).
+
+So on this stack, block-quantized int4 is either slow (MatMul) or unbuildable (FullyConnected).
+Per-channel int8 and int4 are faster than fp16.
+
+### Llama 3.2 1B with quantized weights
+
+The same 431-token prompt, the same phone, warm, SKIN below 40 °C. Each graph has 4 parts of 448 rows, like the
+fp16 one. The GPU decodes with fp16 weights in every row: 40 ms a token, 25 tokens/s.
+
+| Llama 3.2 1B | NPU prefill (warm) | Prompt: prefill + handoff | Contexts | Compile, once | K/V error vs PyTorch, fp16 model | the same, vs PyTorch with the graph's own weights | First-token logits vs the fp16 model | Tokens vs PyTorch (fp16) |
+|---|---|---|---|---|---|---|---|---|
+| fp16 (above) | 168 ms | 177 ms | 2.5 GB | 229 s | 2.2e-3 | | 0.027 | 80 of 80 |
+| **w8a16: int8 per channel** | **116 ms** | **130 ms** | 1.29 GB | 80 s | 3.1e-2 | 1.3e-2 | 0.57 | 29 of 80 |
+| **w4a16: int4 per channel** | **111 ms** | **126 ms** | 0.68 GB | 161 s | 0.60 | 3.8e-2 | 7.3 | 14 of 79 |
+| w4a16: int4 LPBQ, blocks of 64 (MatMul) | 495 ms | 509 ms | 0.72 GB | 291 s | 0.35 | 1.5e-2 | 5.5 | 16 of 71; all 71 vs the int4 model |
+
+- **Speed:** per-channel weights prefill **1.45× (int8) and 1.5× (int4) faster** than fp16 on the HTP. Against
+  the Adreno's 685 ms that is 5.9× and 6.2×.
+- **Accuracy:**
+  - **w8a16 is the usable variant.** Its K/V are within 3.1e-2 of the fp16 model, and the text stays coherent
+    after the 29th token, where it diverges into a paraphrase: "…involves matrix multiplication, which is
+    dominated by memory traffic" for "…is limited by memory bandwidth".
+  - **Int4 per channel is too coarse** for Llama: 0.60 against the fp16 model.
+  - **Block-64 int4 is as accurate as the GPU's q4,** but at 495 ms it is 3× slower than fp16 (below). Its
+    error is the weights' own: PyTorch's prompt pass with the same int4 weights, followed by fp16 decode,
+    gives all 71 of the phone's tokens.
+  - **Activations:** the uint16 activations add 1.3e-2 to 3.8e-2 (the second K/V column).
+  - **Handoff:** in every row, PyTorch decoding from the NPU's own K/V gives exactly the phone's tokens, so
+    handoff and decode are exact. The token differences come from the prefill alone.
+- **Layer 1's down projection stays fp16** in all three quantized graphs (`--keep`). Its input carries the
+  massive activation (−1093 against ±3 elsewhere), and a per-tensor uint16 scale over that range is 0.018.
+  Quantizing it raises the activations' K/V error from 1.4e-2 to 0.18.
+- **Calibration:** min/max per tensor, widened by 10%. The prompts are `calib.txt`: five prompts plus their
+  concatenation, cut at 448 tokens. The test prompt is not among them.
+- **Handoff time:** 13–15 ms, against 9 ms for fp16. The K/V are the same fp16 tensors; the difference is run
+  to run.
+- **Weights on the phone:** the per-channel weights are written there from its own fp16 `weights.bin`
+  (`pc_convert.cpp`, following `export.py`'s `recipe.txt`), byte for byte the Mac's (SHA-256), in seconds.
+  Pushing them over the lab's adb bridge runs at 1.3–3 MB/s.
+
+### Ternary Qwen3-8B
+
+Prism ML's ternary Qwen3-8B (`prism-ml/Ternary-Bonsai-8B-mlx-2bit`, the checkpoint `qwen3/` runs on the GPU).
+
+**Its weights cannot go on the HTP exactly at speed.** Every projection and the head are ternary: t ∈ {−1, 0, +1}
+times an fp16 scale per 128. That is exact as int4 with per-128 block scales, but:
+- block scales mean LPBQ (above), whose fast FullyConnected form QNN 2.42 does not build at Qwen3's shapes;
+- its MatMul form, at the rate the microbenchmark above measured (5.5× per-channel int4), would take about
+  4.8 s for this prefill, slower than the GPU's 3.95 s;
+- int8 per channel would be near-exact (k up to 127) but 7.6 GB, which does not fit next to the GPU's 2.2 GB.
+
+**So the graphs use int4 per output channel** (`export_qwen3.py --form pc4`, 3.79 GB), and the per-group
+scales are approximated. A weight is `t · k · c`:
+- k ∈ 1…7 per group of 128 (so the int4 value is ±k or 0);
+- c is fp32 per row, fitted with k by a few Lloyd steps to minimize the row's squared scale error.
+
+**What that costs.** Within a row the group scales spread about 1.3–1.4× (max/min). So a group's scale is
+typically off by up to 8%, and in rare rows with one tiny group by far more: the worst group in the model is
+192% off, because k cannot go below 1. In PyTorch (`qwen3_check.py`), these weights alone move the K/V of the
+408-token prompt by 0.086 (relative, worst layer) from the exact ternary model. The logits move by up to 0.93
+(range −11 … 27), with the same argmax and top 5.
+
+**The graph.** 36 layers in 6 parts of 6 layers, about 630 MB each, the last with the head (4 chunks).
+- 416 rows, for the 408-token prompt.
+- q/k RMSNorm per head, written out (ReduceMean, Sqrt, Div on values pre-scaled by 1/8), then RoPE from MLX's
+  YaRN table (`build/qwen3/rope1024.f32`, its attention factor included). The q/k norm cannot be an ONNX
+  `RMSNormalization` here. ONNX Runtime 1.29 gives every QNN `RmsNorm` one shared dummy beta tensor
+  (`_beta_dummy`), sized by the first norm it meets (4096). So a 128-wide `RmsNorm` in the same graph fails QNN's
+  validation ("Beta shape does not match … 4096 != 128", error 3110).
+- uint16 activations around every projection, calibrated on `calib.txt` in Qwen3's chat template.
+- The residual stream reaches 7,800, within fp16. No projection is kept in fp16.
+
+The widest activation ranges are in the last layers: layer 35's down-projection input reaches ±1,100 and its
+o-projection output 4,050. On the Mac's CPU (ONNX Runtime, `qwen3_check.py cpu`) the graphs give:
+
+| Qwen3-8B, 408-token prompt | K/V error, worst layer | Logits max error | Argmax, top 5 |
+|---|---|---|---|
+| PyTorch with the int4 weights, vs the exact ternary model | 8.6e-2 | 0.93 | same |
+| the graphs on the Mac's CPU, vs the exact ternary model | 8.7e-2 | 1.35 | same |
+| the graphs on the Mac's CPU, vs PyTorch with the same int4 weights (the activations' share) | 3.0e-2 | 1.96 | same |
+
+The activations' share grows from about 3e-3 in the first 18 layers to 3e-2 in the last ones, as the ranges
+widen.
+Keeping the widest projections in fp16 would cut it, as layer 1's down projection does for Llama.
+
+**On the phone.** The S26 dropped off the lab's adb bridge twice during these runs, and the lab then gave a
+Galaxy Z Fold SM-F976U (the same SM8850, Android 17, 11 GB). So the Qwen3 numbers are all from the Fold. Its
+graphs compile in about 10 minutes, a part a process. The last part was split once more, layers 30–32 apart from
+33–35 with the head (`--bounds`): compiling those six layers and the head in one process ran out of memory (QNN
+error 1002, then an abort).
+
+| Ternary Qwen3-8B, 408-token prompt, Galaxy Z Fold | Time | K/V error, worst layer (vs exact ternary; vs the same int4 weights) | Logits vs the exact model |
+|---|---|---|---|
+| NPU prefill, w4a16 per channel, 7 contexts (3.79 GB) | **1.53–1.65 s** (5 runs; 267–247 tokens/s) | 9.7e-2; 6.0e-2 | max error 1.35 (range −11 … 27); same argmax and top 5 |
+| loading the 7 contexts, once a process | 5.0 s | | |
+
+Then prefill on the NPU, decode on the GPU (`hybrid_qwen3`), against `Qwen3.prefill` on the GPU, the same Fold,
+SKIN below 40 °C, 80 greedy tokens:
+
+| Ternary Qwen3-8B, 408 tokens, Galaxy Z Fold | Prompt | Decode after it | Tokens |
+|---|---|---|---|
+| **NPU prefill (w4a16) + GPU decode** | **1.64 s** = 1.37 s prefill (best of 2 warm; 1.42 s cold) + 0.23 s handoff | 48.0 ms, 20.8 tokens/s | 80, identical to the all-GPU run's 80 |
+| All-GPU (`qwen3.mojo`, `QWEN3_PREFILL`, `tuner/`'s table) | 3.60 s (warm; the first run took 40.9 s, building the fused attention pipeline once) | 45.4 ms, 22.0 tokens/s | 80 |
+
+- **Speed:** the HTP prefills the prompt **2.6× faster** than the Adreno (1.37 s against 3.60 s). With the
+  handoff the time to the first token is **2.2× shorter**.
+- **Tokens:** despite the approximate group scales, all 80 tokens are the GPU's exact-ternary tokens.
+- **One model at a time:** the NPU's 7 contexts (3.8 GB) and the GPU's weights (2.2 GB) together rebooted the
+  Fold, which had 5.5 GB free. So `hybrid_qwen3` converts the NPU's K/V and logits into host memory (11 ms),
+  releases the contexts, then loads the GPU model (2.6 s, not counted in the prompt time) and copies the K/V into
+  its cache (219 ms for 36 layers of fp32).
+- **Decode** is 6% slower than in the all-GPU run (48.0 against 45.4 ms a token), with the same Mojo program. The
+  two runs differ only in what ran before them, so this is probably the phone's state after the NPU run rather
+  than the cache contents.
+
+**The pieces:**
+- **Phone setup.** The phone downloads the checkpoint itself (2.3 GB, SHA-256 `f43270cb…` checked) and writes
+  both weight files:
+  - `qwen3_lpbq.cpp` writes the NPU graphs' `weights.bin` in 20 s, byte for byte the Mac's export (same
+    SHA-256);
+  - `qwen3_convert` writes the GPU's, with a context of 1024.
+- **Prefill.** `npu_prefill.cpp` reads `qwen3-prefill` from `npu.txt` for Qwen3's shape and dequantizes the
+  2-bit embedding rows on the CPU.
+- **Handoff.** `hybrid_qwen3.mojo` copies each layer's K/V into `qwen3/model.mojo`'s position-major cache
+  (`npu_kv_rows`), takes the first token from the NPU's logits, and continues with `Qwen3.forward`.
+- **Validation.** The PyTorch reference (a layer at a time from the checkpoint) matches MLX's logits for
+  `qwen3/`'s 19-token prompt to 4 decimals.
 
 ## How the NPU is reached from `adb shell`
 
@@ -173,21 +335,36 @@ token's logits.
 
 - **Any prompt length:** the graphs are compiled for 448 rows. A chunked graph that takes a KV-cache input (128
   rows at a time, say) would serve any prompt without recompiling, as Qualcomm's own LLM pipelines do.
-- **Quantized weights on the HTP:** w8a16 or w4a16 QDQ graphs would cut the HTP's weight traffic. They need
-  calibrated activation ranges, and they would cost accuracy that this fp16 graph does not.
-- **Ternary Qwen3-8B,** through the same quantized path (above).
+- **Block-quantized int4 at speed:** LPBQ through a QNN FullyConnected is the fast form Qualcomm's own LLM
+  pipelines use, but QNN 2.42 builds it only for 2048 × 2048 weights. A newer QNN runtime (the HTP backend
+  libraries are separate from ONNX Runtime), or QNN's own converter instead of ONNX Runtime, may lift that.
+- **Fully quantized graphs:** the float parts (RMSNorm, attention, SwiGLU) run in fp16 between Quantize and
+  Dequantize ops. A graph quantized throughout (uint16 everywhere, as Qualcomm's are) would drop those
+  conversions. In the LPBQ graph's profile they took 40% of the HTP's cycles.
+- **The fp16 graph's SwiGLU:** in the HTP's profile of the fp16 graph, the two Muls of SwiGLU (`gate * sigmoid(gate)
+  * up` on [448, 8192]) took 25 M cycles a layer, three times the layer's four projections (8 M). An HTP-friendly
+  form of that product would speed up every variant.
 
 ## Files
 
 | File | |
 |---|---|
-| `export.py` | the prefill graphs (`--fp32` for checking on the Mac, `--parts`, `--rows`) |
-| `npu_prefill.cpp` | ONNX Runtime + QNN HTP (C interface): compile a part (`npu_compile`), load the compiled parts, prefill, K/V and logits out; `-DNPU_TOOL` builds `npu_tool` |
+| `export.py` | the prefill graphs (`--fp32` for checking on the Mac, `--parts`, `--rows`, `--kv-slots`; `--quant w4a16 --form pc8/pc4/matmul/fc` for quantized weights) |
+| `npu_prefill.cpp` | ONNX Runtime + QNN HTP (C interface), Llama's or Qwen3's graphs (from `npu.txt`): compile a part (`npu_compile`), load the compiled parts, prefill, K/V and logits out; `-DNPU_TOOL` builds `npu_tool` (also `bench`: time any compiled graph; `NPU_PROFILE`: QNN's per-op profile) |
 | `hybrid.mojo` | NPU prefill, handoff (timed one after the other and overlapped with the NPU's parts), GPU decode: the new entry point |
 | `export_decode.py` | the decode graphs (one token against an fp16 KV cache of 512 positions; `--fp32` for the Mac) |
 | `npu_decode.cpp` | all-NPU: `npu_prefill.cpp`'s prefill, then greedy decode through the decode graphs; `compile <dir> <i>` compiles one decode part |
-| `build.py` | `tool`, `hybrid` and `decode` for the phone, with the ORT and QNN libraries staged next to them |
-| `run.py` | reference in PyTorch, push, NPU K/V check (`--kv`), hybrid run, all-GPU baseline (`--baseline`), all-NPU run (`--all-npu`) |
+| `build.py` | `tool`, `hybrid`, `decode`, `hybrid_qwen3` and `convert` (`pc_convert`, `qwen3_lpbq`) for the phone, with the ORT and QNN libraries staged next to them |
+| `run.py` | reference in PyTorch, push, NPU K/V check (`--kv`), hybrid run, all-GPU baseline (`--baseline`), all-NPU run (`--all-npu`); `--graphs` picks a quantized variant |
+| `quant.py` | quantized weights: LPBQ (block int4) and per-channel int8 / int4, their `weights.bin` writer and reader, activation ranges |
+| `calib.txt` | the calibration prompts (not the test prompt) |
+| `pc_convert.cpp` | the per-channel graphs' `weights.bin` on the phone, from its fp16 one (`export.py`'s `recipe.txt`) |
+| `cpu_check.py` | the Llama graphs on the Mac's CPU (ONNX Runtime) against PyTorch |
+| `export_qwen3.py` | ternary Qwen3-8B's w4a16 prefill graphs, its PyTorch reference (a layer at a time) and calibration |
+| `qwen3_lpbq.cpp` | Qwen3's int4 `weights.bin` on the phone, from the checkpoint it downloads (byte for byte `export_qwen3.py`'s) |
+| `qwen3_check.py` | the Qwen3 reference against MLX's logits; the NPU's K/V and logits against it |
+| `hybrid_qwen3.mojo` | Qwen3: NPU prefill, handoff into `qwen3/model.mojo`'s cache, GPU decode |
+| `run_qwen3.py` | Qwen3 on the phone: setup, compile, K/V check, hybrid run, all-GPU baseline |
 
 ## Run
 
@@ -204,6 +381,28 @@ PYTHONPATH=build/npu/pydeps $PY npu/run.py --model $SNAP --quant q4 --kv --basel
 PYTHONPATH=build/npu/pydeps $PY npu/export_decode.py          # build/npu/decode
 python3 npu/build.py decode                                    # build/npu/phone/npu_decode
 PYTHONPATH=build/npu/pydeps $PY npu/run.py --model $SNAP --all-npu --no-hybrid
+```
+
+The quantized variants (`llama/run.py` defaults `ANDROID_SERIAL` to a Wi-Fi phone: set it to the lab phone's
+serial). `NPU_DEV` is the phone directory for the programs and libraries, `/data/local/tmp/npu` by default:
+
+```bash
+python3 npu/build.py tool hybrid hybrid_qwen3 convert       # convert: pc_convert, qwen3_lpbq for the phone
+for f in pc8 pc4 matmul; do      # w8a16, w4a16 per channel, w4a16 LPBQ (its weights are pushed, 0.66 GB)
+  PYTHONPATH=build/npu/pydeps $PY npu/export.py --quant w4a16 --form $f --out build/npu/graphs-$f --hf $SNAP
+  PYTHONPATH=build/npu/pydeps $PY npu/cpu_check.py --graphs build/npu/graphs-$f --hf $SNAP        # Mac CPU
+  ANDROID_SERIAL=localhost:<port> PYTHONPATH=build/npu/pydeps $PY npu/run.py --model $SNAP --graphs build/npu/graphs-$f --kv
+done
+```
+
+Ternary Qwen3-8B (the Mac needs the checkpoint for calibration; the phone downloads its own):
+
+```bash
+PYTHONPATH=build/npu/pydeps $PY npu/qwen3_check.py --checkpoint <ckpt dir> mlx         # the reference vs MLX
+PYTHONPATH=build/npu/pydeps $PY npu/export_qwen3.py --checkpoint <ckpt dir> --form pc4 --out build/npu/qwen3-pc4
+PYTHONPATH=build/npu/pydeps $PY npu/qwen3_check.py --checkpoint <ckpt dir> reference --graphs build/npu/qwen3-pc4
+python3 android/build.py qwen3
+ANDROID_SERIAL=localhost:<port> PYTHONPATH=build/npu/pydeps $PY npu/run_qwen3.py --setup --kv --baseline
 ```
 
 On the phone, by hand (`D=/data/local/tmp/npu`, `M=/data/local/tmp/llama/model`):

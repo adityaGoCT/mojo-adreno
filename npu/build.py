@@ -3,6 +3,8 @@
   python3 npu/build.py tool      # npu_tool: npu_prefill.cpp on its own (compile, time, dump)
   python3 npu/build.py hybrid    # hybrid: npu/hybrid.mojo (NPU prefill, then llama/model.mojo's GPU decode)
   python3 npu/build.py decode    # npu_decode: npu_decode.cpp (prefill and decode both on the NPU)
+  python3 npu/build.py hybrid_qwen3  # hybrid_qwen3: ternary Qwen3-8B, NPU prefill and GPU decode
+  python3 npu/build.py convert   # pc_convert, qwen3_lpbq: the quantized graphs' weights, written on the phone
 
 Both link ONNX Runtime for Android with the QNN execution provider (Maven Central's
 com.microsoft.onnxruntime:onnxruntime-android-qnn) and stage Qualcomm's QNN runtime next to the executable
@@ -74,8 +76,31 @@ def hybrid():
     ab.stage(OUT)
 
 
+def hybrid_qwen3():
+    """npu/hybrid_qwen3.mojo (NPU prefill of ternary Qwen3-8B, then qwen3/model.mojo's GPU decode), linked with
+    npu_prefill.cpp and staged like hybrid."""
+    spec = importlib.util.spec_from_file_location("android_build", ROOT / "android/build.py")
+    ab = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ab)
+    stage_npu()
+    ab.mojo_object(HERE / "hybrid_qwen3.mojo", OUT / "hybrid_qwen3.o",
+                   includes=[ROOT / "bonsai/kernels", ROOT / "qwen3/kernels", ROOT / "qwen3"])
+    sh(*compile_shim(), OUT / "hybrid_qwen3.o", f"-L{ab.BUILD / 'runtime'}", "-lKGENCompilerRTShared", "-ldl",
+       "-o", OUT / "hybrid_qwen3")
+    ab.stage(OUT)
+
+
+def convert():
+    """The quantized graphs' weights.bin, written on the phone instead of pushed: pc_convert (npu/export.py's
+    per-channel forms, from the fp16 weights.bin and export.py's recipe.txt) and qwen3_lpbq (npu/export_qwen3.py's,
+    from the checkpoint). Their float32 operations are the Mac's, so their output is byte for byte the same."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    for name in ("pc_convert", "qwen3_lpbq"):
+        sh(CXX, "-std=c++17", "-O2", "-ffp-contract=off", "-static-libstdc++", "-o", OUT / name, HERE / f"{name}.cpp")
+
+
 def main():
-    steps = {"tool": tool, "hybrid": hybrid, "decode": decode}
+    steps = {"tool": tool, "hybrid": hybrid, "decode": decode, "hybrid_qwen3": hybrid_qwen3, "convert": convert}
     for name in sys.argv[1:] or ["tool"]:
         if name not in steps:
             sys.exit(f"unknown step {name}: one of {' '.join(steps)}")
