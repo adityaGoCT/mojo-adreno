@@ -8,6 +8,7 @@
 from std.collections import Dict
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
+import gemm_table
 import kernels
 import prefill
 import qwen3k
@@ -181,11 +182,9 @@ struct Qwen3(Movable):
 
     def pproject(self, name: String, input: DeviceBuffer[DType.float32], output: DeviceBuffer[DType.float32],
                  n: Int, k: Int, rows: Int) raises:
-        """output = input W^T for `rows` fp32 rows and the packed tensor `name` (n outputs, k inputs): 128 x 128
-        tiles on cooperative matrices, 256 threads each."""
-        self.ctx.enqueue_function[prefill.p_gemm_t2](input, self.words[name + ".w"], self.halves[name + ".s"], output,
-                                                     Int32(n), Int32(k), grid_dim=Dim(n // 128, rows // 128),
-                                                     block_dim=256)
+        """output = input W^T for `rows` fp32 rows and the packed tensor `name` (n outputs, k inputs) on
+        cooperative matrices, in the tile shape gemm_table.mojo (tuner/) picked for this matrix and length."""
+        gemm_table.gemm_t2(self.ctx, input, self.words[name + ".w"], self.halves[name + ".s"], output, n, k, rows)
 
     def prefill(mut self, tokens: List[Int]) raises:
         """Enqueues the whole prompt at once, at positions 0 .. len(tokens) - 1: per layer the decode steps

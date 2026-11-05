@@ -5,7 +5,8 @@
 # once: the grid's second dimension is the row, and each wrapper offsets that row's pointers by
 # block_idx.y and calls the decode kernel, whose global_idx.x then indexes within the row exactly as
 # in decode (positions are the row numbers). New here:
-#   p_gemm_t2     the packed ternary projections as fp32 cooperative-matrix products
+#   p_gemm_t2     the packed ternary projections as fp32 cooperative-matrix products (p_gemm_t2v: in
+#                 the other tile shapes tuner/ searches)
 #   p_conv        the causal depthwise conv over all rows, leaving the last three in the history
 #   p_delta_scan  the DeltaNet recurrence over all rows, each thread's state slice in registers
 from std.memory import stack_allocation
@@ -148,11 +149,7 @@ def p_delta_scan(qkv: F32, gates: F32, state: F32, y: F32, count: Int32):
         state[unsafe_offset=(h * 128 + part * 16 + step) * 128 + d] = s[step]
 
 
-comptime BM = 128
-comptime BN = 128
-comptime BK = 16  # one 32-bit word of codes per column of W
 comptime KC = 8  # the 840's fp32 product: 64 x 64 x 8
-comptime THREADS = 256
 
 
 def p_gemm_t2(x: F32, w: Pointer[UInt32, MutAnyOrigin], params: Pointer[Float16, MutAnyOrigin], y: F32, n: Int32,
@@ -160,47 +157,160 @@ def p_gemm_t2(x: F32, w: Pointer[UInt32, MutAnyOrigin], params: Pointer[Float16,
     """Y = X W^T for all rows, W packed as kernels.packed_linear reads it: word (k / 16) * n + col holds
     the 2-bit codes of k .. k + 15 for output col, weight (code - 1) * scale, one fp16 scale per 128 k
     of a column at params[(k / 128) * n + col]. X: rows x k fp32 (the Hadamard-rotated input), Y: rows x
-    n fp32. A 256-thread workgroup (2 x 2 subgroups of 64) computes a 128 x 128 block of Y: per K step
-    of 16 it stages X's slice and W's slice, unpacked to fp32, in shared memory (W's as rows of W, so
-    B = W^T is read column-major), and each subgroup multiplies its 64 x 64 tile on the matrix units.
-    rows, n and k: multiples of 128, 128 and 16 (as llama/kernels/prefill/p_gemm_q4)."""
-    var sa = stack_allocation[BM * BK, Float32, address_space=AddressSpace.SHARED]()  # X: BM rows of BK
-    var sb = stack_allocation[BN * BK, Float32, address_space=AddressSpace.SHARED]()  # W: BN rows of BK
+    n fp32. The default shape of gemm_t2: a 256-thread workgroup (2 x 2 subgroups of 64) computes a
+    128 x 128 block of Y, 16 k a step. rows, n and k: multiples of 128, 128 and 16 (as
+    llama/kernels/prefill/p_gemm_q4). tuner/ picks other shapes per matrix and prompt length."""
+    gemm_t2[2, 2, 1, 1, 16, 0, 1, False, False](x, w, params, y, n, k)
+
+
+def p_gemm_t2v[WM: Int, WN: Int, TM: Int, TN: Int, BK: Int, PAD: Int, STAGES: Int, PF: Bool, XG: Bool](
+    x: F32, w: Pointer[UInt32, MutAnyOrigin], params: Pointer[Float16, MutAnyOrigin], y: F32, n: Int32, k: Int32
+):
+    """p_gemm_t2 in any of gemm_t2's shapes: launch with block_dim WM * WN * 64 and grid
+    (n / (WN * TN * 64), rows / (WM * TM * 64))."""
+    gemm_t2[WM, WN, TM, TN, BK, PAD, STAGES, PF, XG](x, w, params, y, n, k)
+
+
+@always_inline
+def gemm_t2[WM: Int, WN: Int, TM: Int, TN: Int, BK: Int, PAD: Int, STAGES: Int, PF: Bool, XG: Bool](
+    x: F32, w: Pointer[UInt32, MutAnyOrigin], params: Pointer[Float16, MutAnyOrigin], y: F32, n: Int32, k: Int32
+):
+    """The body of p_gemm_t2 and p_gemm_t2v. WM x WN subgroups of 64 threads; each computes TM x TN tiles
+    of 64 x 64 on the matrix units, so a workgroup computes a BM x BN block of Y, BM = WM * TM * 64 and
+    BN = WN * TN * 64. Each step of BK k (16, 32 or 64) stages W's slice, unpacked to fp32, in shared
+    memory (as rows of W, so B = W^T is read column-major), and X's slice too unless XG, which loads
+    X's tiles straight from memory. Shared rows are BK + PAD floats apart. STAGES 2 alternates two
+    shared buffers, one barrier a step instead of two; PF fetches the next step's slices into
+    registers before this step's products, so their memory latency overlaps the matrix units.
+    rows, n and k: multiples of BM, BN and BK."""
+    comptime BM = WM * TM * 64
+    comptime BN = WN * TN * 64
+    comptime THREADS = WM * WN * 64
+    comptime LDS = BK + PAD
+    comptime SA = 4 if XG else BM * LDS  # one stage of X, in floats
+    comptime SB = BN * LDS
+    comptime assert TM >= 1 and TM <= 2 and TN >= 1 and TN <= 2, "one to four 64 x 64 tiles a subgroup"
+    comptime assert BK % 16 == 0, "whole words of W"
+    comptime assert STAGES == 1 or STAGES == 2, "one or two shared buffers"
+    comptime assert STAGES * ((0 if XG else BM) + BN) * LDS * 4 <= 32768, "32 KB of shared memory"
+    var sa = stack_allocation[STAGES * SA, Float32, address_space=AddressSpace.SHARED]()
+    var sb = stack_allocation[STAGES * SB, Float32, address_space=AddressSpace.SHARED]()
     var ldy = Int(n)
     var ldx = Int(k)
     var t = Int(thread_idx.x)
     var sg = t // 64
     var row0 = Int(block_idx.y) * BM
     var col0 = Int(block_idx.x) * BN
-    var sr = (sg // 2) * 64  # this subgroup's tile of the block
-    var sc = (sg % 2) * 64
-    var out = y.unsafe_offset((row0 + sr) * ldy + col0 + sc)
-    var wn = t % BN  # the column of W this thread unpacks (consecutive threads, consecutive words)
-    var wh = t // BN * 8  # and which eight of the word's sixteen codes
-    comptime assert BN * 2 == THREADS, "two threads per word of W"
-    var acc = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
-    for k0 in range(0, ldx, BK):
-        comptime for i in range(BM * BK // 4 // THREADS):
+    var sr = (sg // WN) * TM * 64  # this subgroup's tiles of the block
+    var sc = (sg % WN) * TN * 64
+    var acc00 = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
+    var acc01 = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
+    var acc10 = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
+    var acc11 = CoopMatrix[DType.float32, 64, 64, ACCUMULATOR].zero()
+    comptime XV = BM * BK // 4  # X's slice in four-float loads
+    comptime WH = BN * BK // 8  # W's slice in half words of eight codes
+    comptime NX = (XV + THREADS - 1) // THREADS  # per thread
+    comptime NW = (WH + THREADS - 1) // THREADS
+    # this thread's share of the next slice, in registers between the fetch and the store
+    var xr = SIMD[DType.float32, 4 * NX](0)
+    var wr = SIMD[DType.uint32, NW](0)
+    var wsc = SIMD[DType.float32, NW](0)
+    var steps = ldx // BK
+    comptime if PF:
+        comptime if not XG:
+            comptime for i in range(NX):
+                var v = i * THREADS + t
+                if XV % THREADS == 0 or v < XV:
+                    xr = xr.insert[offset=4 * i](x.unsafe_load[width=4]((row0 + v // (BK // 4)) * ldx + v % (BK // 4) * 4))
+        comptime for i in range(NW):
             var v = i * THREADS + t
-            var r = v // (BK // 4)
-            var c = v % (BK // 4) * 4
-            sa.unsafe_store(r * BK + c, x.unsafe_load[width=4]((row0 + r) * ldx + k0 + c))
-        var word = w[unsafe_offset=(k0 // 16) * ldy + col0 + wn] >> UInt32(2 * wh)
-        var scale = params[unsafe_offset=(k0 // 128) * ldy + col0 + wn].cast[DType.float32]()
-        comptime for half in range(2):
-            var v = SIMD[DType.float32, 4](0)
-            comptime for j in range(4):
-                v[j] = (Float32((word >> UInt32(2 * (half * 4 + j))) & 3) - 1) * scale
-            sb.unsafe_store(wn * BK + wh + half * 4, v)
+            if WH % THREADS == 0 or v < WH:
+                var kw = (v // BN // 2) * 16
+                wr[i] = w[unsafe_offset=(kw // 16) * ldy + col0 + v % BN]
+                wsc[i] = params[unsafe_offset=(kw // 128) * ldy + col0 + v % BN].cast[DType.float32]()
+    for s in range(steps):
+        var k0 = s * BK
+        var buf = s % STAGES
+        comptime if not PF:  # fetch this step's slice now
+            comptime if not XG:
+                comptime for i in range(NX):
+                    var v = i * THREADS + t
+                    if XV % THREADS == 0 or v < XV:
+                        xr = xr.insert[offset=4 * i](
+                            x.unsafe_load[width=4]((row0 + v // (BK // 4)) * ldx + k0 + v % (BK // 4) * 4))
+            comptime for i in range(NW):
+                var v = i * THREADS + t
+                if WH % THREADS == 0 or v < WH:
+                    var kw = k0 + (v // BN // 2) * 16
+                    wr[i] = w[unsafe_offset=(kw // 16) * ldy + col0 + v % BN]
+                    wsc[i] = params[unsafe_offset=(kw // 128) * ldy + col0 + v % BN].cast[DType.float32]()
+        comptime if not XG:  # store X's slice
+            comptime for i in range(NX):
+                var v = i * THREADS + t
+                if XV % THREADS == 0 or v < XV:
+                    sa.unsafe_store(buf * SA + (v // (BK // 4)) * LDS + v % (BK // 4) * 4, xr.slice[4, offset=4 * i]())
+        comptime for i in range(NW):  # unpack W's slice: eight codes a thread and a half word
+            var v = i * THREADS + t
+            if WH % THREADS == 0 or v < WH:
+                var hw = v // BN
+                var word = wr[i] >> UInt32(16 * (hw % 2))
+                comptime for half in range(2):
+                    var q = SIMD[DType.float32, 4](0)
+                    comptime for j in range(4):
+                        q[j] = (Float32((word >> UInt32(2 * (half * 4 + j))) & 3) - 1) * wsc[i]
+                    sb.unsafe_store(buf * SB + (v % BN) * LDS + hw * 8 + half * 4, q)
         barrier()
+        comptime if PF:  # fetch the next step's slice while this one is multiplied
+            if s + 1 < steps:
+                var k1 = k0 + BK
+                comptime if not XG:
+                    comptime for i in range(NX):
+                        var v = i * THREADS + t
+                        if XV % THREADS == 0 or v < XV:
+                            xr = xr.insert[offset=4 * i](
+                                x.unsafe_load[width=4]((row0 + v // (BK // 4)) * ldx + k1 + v % (BK // 4) * 4))
+                comptime for i in range(NW):
+                    var v = i * THREADS + t
+                    if WH % THREADS == 0 or v < WH:
+                        var kw = k1 + (v // BN // 2) * 16
+                        wr[i] = w[unsafe_offset=(kw // 16) * ldy + col0 + v % BN]
+                        wsc[i] = params[unsafe_offset=(kw // 128) * ldy + col0 + v % BN].cast[DType.float32]()
         comptime for kk in range(0, BK, KC):
-            var at = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(sa.unsafe_offset(sr * BK + kk), BK)
-            var bt = CoopMatrix[DType.float32, KC, 64, MATRIX_B].load[row_major=False](
-                sb.unsafe_offset(sc * BK + kk), BK)
-            acc = at.multiply_add(bt, acc)
-        barrier()
-    acc.store(out, ldy)
-
+            var a0: CoopMatrix[DType.float32, 64, KC, MATRIX_A]
+            comptime if XG:
+                a0 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(x.unsafe_offset((row0 + sr) * ldx + k0 + kk), ldx)
+            else:
+                a0 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(sa.unsafe_offset(buf * SA + sr * LDS + kk), LDS)
+            var b0 = CoopMatrix[DType.float32, KC, 64, MATRIX_B].load[row_major=False](
+                sb.unsafe_offset(buf * SB + sc * LDS + kk), LDS)
+            acc00 = a0.multiply_add(b0, acc00)
+            comptime if TN == 2:
+                var b1 = CoopMatrix[DType.float32, KC, 64, MATRIX_B].load[row_major=False](
+                    sb.unsafe_offset(buf * SB + (sc + 64) * LDS + kk), LDS)
+                acc01 = a0.multiply_add(b1, acc01)
+            comptime if TM == 2:
+                var a1: CoopMatrix[DType.float32, 64, KC, MATRIX_A]
+                comptime if XG:
+                    a1 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(
+                        x.unsafe_offset((row0 + sr + 64) * ldx + k0 + kk), ldx)
+                else:
+                    a1 = CoopMatrix[DType.float32, 64, KC, MATRIX_A].load(
+                        sa.unsafe_offset(buf * SA + (sr + 64) * LDS + kk), LDS)
+                acc10 = a1.multiply_add(b0, acc10)
+                comptime if TN == 2:
+                    var b1 = CoopMatrix[DType.float32, KC, 64, MATRIX_B].load[row_major=False](
+                        sb.unsafe_offset(buf * SB + (sc + 64) * LDS + kk), LDS)
+                    acc11 = a1.multiply_add(b1, acc11)
+        comptime if STAGES == 1:
+            barrier()  # before the next step overwrites the one buffer
+    var out = y.unsafe_offset((row0 + sr) * ldy + col0 + sc)
+    acc00.store(out, ldy)
+    comptime if TN == 2:
+        acc01.store(out.unsafe_offset(64), ldy)
+    comptime if TM == 2:
+        acc10.store(out.unsafe_offset(64 * ldy), ldy)
+        comptime if TN == 2:
+            acc11.store(out.unsafe_offset(64 * ldy + 64), ldy)
 
 def p_scale(x: F32, width: Int32, scale: Float32):
     """x *= scale for every row (width elements a row)."""

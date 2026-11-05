@@ -1,0 +1,17 @@
+{
+  "device": "Galaxy S26 Ultra (SM-S948U), SM8850, Adreno 840, Android 16 build S948USQS4AZG3, Qualcomm driver 512.842.19",
+  "failed": {},
+  "max_accumulators": 1,
+  "max_threads": 512,
+  "peaks": {
+    "dram_gbs": 66.0,
+    "fp32_mma_tflops": 2.5
+  },
+  "rules": [
+    "max_accumulators 1: every candidate with two or four 64 x 64 fp32 accumulators a subgroup (23 of 60, any block shape, k step and padding) failed at pipeline creation (vkCreateComputePipelines), 2026-11-04",
+    "shared_strict: the two candidates using exactly 32768 bytes of shared memory (1x1-1x1-k64-p0, 2x2-1x1-k32-p0) ran without error and returned wrong results (max abs error 8.8 and 9.0 against outputs of 7.3); every candidate under 32768 matched, 2026-11-04",
+    "peaks: fp32 cooperative-matrix matmul 2048^3 staged in shared memory, 2.5 TFLOP/s (coopmat/); vecadd of 12 MB, 66 GB/s (android/vecadd.mojo)"
+  ],
+  "shared_bytes": 32768,
+  "shared_strict": true
+}
