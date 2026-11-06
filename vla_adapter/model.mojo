@@ -294,6 +294,21 @@ struct VLAAdapter(Movable):
         if rem:
             for part in rem.split(","):
                 remotes.append(String(part))
+        # VLA_REMOTE_INDEX: "name file offset" lines: tensors read from another file in the remote directory (the
+        # official .pt files the laptop downloads itself; each tensor a contiguous, uncompressed slice)
+        var ifile = Dict[String, String]()
+        var ioff = Dict[String, Int]()
+        var index = getenv("VLA_REMOTE_INDEX")
+        if index:
+            for line in open(index, "r").read().splitlines():
+                var parts = line.split(" ")
+                if len(parts) == 3:
+                    ifile[String(parts[0])] = String(parts[1])
+                    ioff[String(parts[0])] = Int(String(parts[2]))
+        var rdir = String("")
+        if len(remotes) > 0:
+            var cut = remotes[0].rfind("\\")
+            rdir = String(remotes[0][byte=0:cut + 1]) if cut >= 0 else String("")
         for fi in range(len(files)):
             var path = String(files[fi])
             var ck = Checkpoint(path)
@@ -308,10 +323,11 @@ struct VLAAdapter(Movable):
                 var n = ck.sizes[name] // 2
                 var buf = self.ctx.enqueue_create_buffer[DType.uint16](n)
                 if len(remotes) > 0:
-                    var remote = String(remotes[fi])
+                    var remote = rdir + ifile[name] if name in ifile else String(remotes[fi])
+                    var off = ioff[name] if name in ioff else ck.offsets[name]
                     if self.lib.call["M_driver_remote_file", Int32](UInt64(Int(buf.unsafe_ptr())), UInt64(2 * n),
                                                                     remote.as_c_string_span().unsafe_ptr(),
-                                                                    UInt64(ck.offsets[name])) != 0:
+                                                                    UInt64(off)) != 0:
                         raise Error("M_driver_remote_file failed for " + name)
                 else:
                     var data = ck.read(f, name)

@@ -68,6 +68,12 @@ def externalize(path):
         for k, v in head.items():
             if k != "__metadata__":
                 where[k.replace(".", "__")] = (loc, 8 + n + v["data_offsets"][0], v["data_offsets"][1] - v["data_offsets"][0])
+    # the head's tensors from the official .pt files instead (pt_offsets.txt: name, file, offset), which the laptop
+    # downloads itself
+    for line in (B / "pt_offsets.txt").read_text().splitlines():
+        name, loc, off = line.split(" ")
+        key = name.replace(".", "__")
+        where[key] = (loc, int(off), where[key][2])
     m = onnx.load(str(path))
     moved = kept = 0
     for init in m.graph.initializer:

@@ -1,0 +1,28 @@
+# Evo-1 fp32 CPU reference (evo1/reference.py): the inference-path subset of
+# MINT-SJTU/Evo-1@2020853 Evo_1/requirements.txt, for Python 3.10 on macOS arm64 (CPU torch, no CUDA, no flash-attn).
+#   uv venv -p /opt/homebrew/bin/python3.10 build/evo1/venv
+#   uv pip install -p build/evo1/venv/bin/python --exclude-newer 2025-11-06 -r evo1/requirements-reference.txt
+# --exclude-newer resolves the unpinned packages as of the LIBERO checkpoint's release (Nov 2025).
+# Pinned upstream and kept: transformers 4.39.0, torch 2.5.1, torchvision 0.20.1.
+# Left out (training, logging or not on the inference path): deepspeed (the checkpoint is a plain torch zip; the
+# loader never imports deepspeed), diffusers, ninja, pandas, matplotlib, pyarrow, accelerator, swanlab, wandb, av,
+# flash-attn (CUDA only; reference.py emulates its masking instead).
+transformers==4.39.0
+torch==2.5.1
+torchvision==0.20.1
+# InternVL3-1B's remote code: modeling_intern_vit.py imports timm.layers.DropPath and einops.
+timm
+einops
+# from_pretrained(low_cpu_mem_usage=True), as the embedder calls it, requires accelerate.
+accelerate
+# scripts/Evo1_server.py imports cv2 (resize, BGR2RGB), websockets and fvcore at module level; reference.py imports
+# that module unmodified for its Normalizer, decode_image_from_list and infer_from_json_dict. Headless opencv has the
+# same imgproc as opencv-python; 4.10 is the last line that accepts numpy < 2.
+opencv-python-headless==4.10.0.84
+websockets
+fvcore
+# transformers 4.39 predates numpy 2.
+numpy<2
+pillow
+safetensors
+huggingface_hub<1.0
