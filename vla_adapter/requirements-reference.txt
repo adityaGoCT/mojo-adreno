@@ -1,0 +1,44 @@
+# VLA-Adapter fp32 CPU reference (vla_adapter/reference.py): the inference-path subset of
+# OpenHelix-Team/VLA-Adapter@23fa0c9's pyproject.toml, for Python 3.10 on macOS arm64.
+#   uv venv -p /opt/homebrew/bin/python3.10 build/vla_adapter/venv
+#   uv pip install -p build/vla_adapter/venv/bin/python -r vla_adapter/requirements-reference.txt
+#   uv pip install -p build/vla_adapter/venv/bin/python --no-deps tensorflow_graphics==2021.12.3
+# Versions the pyproject pins are kept; the unpinned ones are pinned to the authors' environment (our_envs.txt).
+# torch 2.2.0's macOS arm64 wheel on PyPI is CPU (+MPS) only, no CUDA. The venv is about 1.6 GB.
+torch==2.2.0
+torchvision==0.17.0
+transformers==4.40.1
+tokenizers==0.19.1
+timm==0.9.10
+# experiments/robot/openvla_utils.py does the JPEG/lanczos resize and the center crop with tf.image.
+tensorflow==2.15.0
+numpy==1.26.4
+ml-dtypes==0.2.0
+json-numpy==2.1.0
+huggingface-hub==0.30.2
+accelerate==1.6.0
+safetensors==0.5.3
+einops==0.8.1
+pillow==10.4.0
+requests
+# Imported, never run at inference: prismatic/__init__ -> conf (draccus), overwatch (rich); openvla_utils ->
+# prismatic.vla.datasets.rlds (dlimp, tensorflow_datasets; oxe/utils/droid_utils.py imports
+# tensorflow_graphics.geometry.transformation, which needs only tensorflow + numpy, hence --no-deps above: its own
+# requirements drag in OpenEXR, trimesh, tensorflow-addons and matplotlib); modeling_prismatic -> prismatic.training
+# (jsonlines, wandb); robot_utils (msgpack, msgpack_numpy for its HTTP client policy).
+draccus==0.8.0
+rich==14.0.0
+dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46
+tensorflow_datasets==4.9.3
+# tensorflow-metadata > 1.16 needs protobuf >= 5 (google.protobuf.runtime_version), which tensorflow 2.15 refuses;
+# 1.16.1 wants protobuf < 4.21 on Python 3.10: 3.20.3 as in the authors' environment.
+tensorflow-metadata==1.16.1
+protobuf==3.20.3
+etils==1.12.2
+dm-tree==0.1.9
+jsonlines==4.0.0
+wandb==0.19.8
+msgpack==1.1.0
+msgpack-numpy==0.4.8
+# Left out: peft (FiLM only), torchaudio, diffusers, sentencepiece, flash-attn, uvicorn/fastapi, the LIBERO
+# simulator (no simulator: the repo's sample observation is the input).
