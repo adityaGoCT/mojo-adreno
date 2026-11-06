@@ -1,0 +1,35 @@
+# VLA-JEPA fp32 CPU reference (vla_jepa/reference.py): the inference-path subset of
+# ginwind/VLA-JEPA@ec90777 requirements.txt, for Python 3.10 on macOS arm64 (CPU torch, no CUDA, no flash-attn).
+#   uv venv -p /opt/homebrew/bin/python3.10 build/vla_jepa/venv
+#   uv pip install -p build/vla_jepa/venv/bin/python --exclude-newer 2026-02-12 -r vla_jepa/requirements-reference.txt
+# --exclude-newer resolves the unpinned packages as of the day the authors published the checkpoints (HF repo created
+# 2026-02-12). Pinned upstream and kept: transformers 4.57.0, torchvision 0.21.0 (hence torch 2.6.0, the authors'
+# torch per issue #10; the macOS arm64 wheel is CPU/MPS only), accelerate 1.5.2, numpy 1.26.4.
+# Left out (training, logging, video decoding or CUDA only): deepspeed, flash-attn, decord, eva-decord, av (pulled in
+# by qwen-vl-utils anyway), pytorch3d, albumentations, pyarrow, fastparquet, numpydantic, pydantic, wandb, tensorboard,
+# tiktoken, transformers_stream_generator, scipy, websocket-client (the client's websockets.sync is in websockets).
+transformers==4.57.0
+torch==2.6.0
+torchvision==0.21.0
+accelerate==1.5.2
+numpy==1.26.4
+# starVLA imports: diffusers (DiT: Attention, FeedForward, Timesteps, TimestepEmbedding), omegaconf (config),
+# timm (vj2_modules drop_path), qwen-vl-utils (QWen3.py imports process_vision_info at module level), tqdm, einops,
+# rich (starVLA's overwatch logger configures a rich.logging.RichHandler at import).
+diffusers
+omegaconf
+timm
+qwen-vl-utils
+tqdm
+einops
+rich
+pillow
+safetensors
+# deployment/model_server (WebsocketPolicyServer._route_message, msgpack_numpy, image_tools) and the LIBERO client
+# examples/LIBERO/model2libero_interface.py (M1Inference: cv2 INTER_AREA resize, min/max unnormalization; imports
+# matplotlib and the websocket client at module level). Headless opencv has the same imgproc as opencv-python.
+msgpack
+websockets
+typing_extensions
+opencv-python-headless==4.10.0.84
+matplotlib
