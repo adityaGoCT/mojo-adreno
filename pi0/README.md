@@ -169,11 +169,19 @@ tunnel transfer.
 
 The laptop's Hexagon NPU is the same V81 HTP as the phone's. [`../npu/build_win.sh`](../npu/build_win.sh) builds
 `pi0npu_tool` and `pi0_f16` for Windows on ARM (Zig) against ONNX Runtime's QNN NuGet package (1.24.4). There:
-- `gemma.bin` came from the checkpoint's 7.9 GB Gemma byte range (an HTTP range request), SHA-256 identical to the
-  phone's;
-- the tool compiled the first of the six graphs for the HTP in 97 s.
+- `gemma.bin` came from the checkpoint's 7.9 GB Gemma byte range (an HTTP range request, 8.6 minutes), SHA-256
+  identical to the phone's;
+- the six graphs compiled for the HTP in 9.6 minutes (78–102 s a graph, one graph a process; 18.5 minutes on the
+  phone). Their 3.78 GB of contexts load in 1.9–2.1 s.
+- **The prefix takes 0.80–0.84 s on the NPU** (`pi0npu_tool`, two processes of 10 runs), against 2.13–2.15 s on the
+  laptop's GPU: 2.6× faster. The phone's NPU takes 0.79–0.92 s.
+- Its K/V is within 0.085 (K) and 0.16 (V) of PyTorch's, relative 4.8e-3 and 6.0e-3 (layer 17). PyTorch's 10 steps
+  from it (`reference.py --kv`) give actions within 1.95e-3 of the fp32 model's (mean 1.7e-4), against 3.2e-3 from
+  the phone's. The two HTPs' K/V are not bit-identical (27% of the values match, the rest within 0.07 and 0.2):
+  ONNX Runtime 1.24.4's QNN libraries here, QNN 2.42 on the phone.
 
-The QDC session ended before the other five were compiled, so the laptop's NPU prefix is not timed yet.
+The laptop's chunk with the NPU prefix is not measured: the Mac drives the laptop's GPU through the tunnel, so
+handing it the K/V would need the NPU inside `vk_server` (writing into its mapped buffers).
 
 ## How it is computed
 
