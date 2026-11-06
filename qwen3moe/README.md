@@ -108,11 +108,16 @@ The products run a matrix row per lane against 8 tokens at once: a lane decodes 
 |---|---|---|
 | 20 tokens | 1.17–1.33 s | 0.77–0.87 s |
 | 48 tokens | 1.26 s | 1.78 s |
-| 96 tokens | 1.41 s | 3.61 s |
-| 160 tokens | 1.86 s | 5.25 s |
-| 404 tokens | **4.31 s** (94 tokens/s) | 12.0 s |
+| 96 tokens | 1.41–1.63 s | 2.64–3.61 s |
+| 128 tokens | 1.66–1.71 s | 4.02–4.25 s |
+| 160 tokens | 1.86–1.99 s | 4.71–5.56 s |
+| 256 tokens | 2.57–2.66 s (98 tokens/s) | 7.48–7.80 s |
+| 404 tokens | **4.24–4.31 s** (94–95 tokens/s) | 11.8–13.1 s |
 
-The batched logits are within 1.5e-5 of the token-at-a-time path's, with the same tokens. Below about 32 tokens
+The prompts are the first tokens of one 404-token prompt. The 96-, 160- and 404-token ranges span two laptop
+sessions running the same build. 128 and 256 tokens were timed only in the second session, twice each. From 128 tokens
+on, batched is 2.3–3.1× faster. The batched logits are within 1.5e-5 of the token-at-a-time path's, with the same
+tokens. Below about 32 tokens
 most of the GPU stays idle, so short prompts run a token at a time (`QWEN3MOE_PREFILL=0 / 1` forces either).
 
 ## On the Hexagon NPU
@@ -127,8 +132,8 @@ Runtime's QNN execution provider (Microsoft.ML.OnnxRuntime.QNN 1.24.4 for Window
 | One layer, fp16 | NPU (HTP) | GPU, int4, this program |
 |---|---|---|
 | A token (decode) | 10.7–14 ms: all 128 experts' 1.2 GB at about 100 GB/s → 0.5–0.7 s a token | 27–32 ms for all 48 layers |
-| 128 prompt tokens | 213–218 ms → 10.3 s for 48 layers | about 1.6 s (1.41 s at 96, 1.86 s at 160) |
-| 256 prompt tokens | 95–97 ms (3.4 TFLOP/s) → 4.6 s for 48 layers | about 2.8 s (1.86 s at 160, 4.31 s at 404) |
+| 128 prompt tokens | 213–218 ms → 10.3 s for 48 layers | 1.66–1.71 s for all 48 layers |
+| 256 prompt tokens | 95–97 ms (3.4 TFLOP/s) → 4.6 s for 48 layers | 2.57–2.66 s for all 48 layers |
 
 - **Accuracy:** against transformers' fp32 layer on the same input, the NPU's output is within 1.2e-3 for the median
   token (relative to the layer's change). A few tokens reach 3%: for 2 of the 128, fp16 router logits change the top 8.
