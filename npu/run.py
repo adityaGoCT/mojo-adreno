@@ -35,9 +35,10 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "llama"))
 import run as llama_run  # noqa: E402  llama/run.py: load_model, reference, quantize_model4, CONFIG_1B
 
-DEV = "/data/local/tmp/npu"
+DEV = os.environ.get("NPU_DEV", "/data/local/tmp/npu")  # the NPU runtime and programs on the phone
 LLAMA = "/data/local/tmp/llama"
 GRAPHS = f"{LLAMA}/model"  # the NPU graphs and their compiled contexts, next to the fp16 weights.bin they read
+# (w4a16 graphs, which read their own weights.bin, go to f"{LLAMA}/npu-<their directory's name>")
 # system libraries before vendor ones: otherwise libbinder_ndk binds the vendor libbinder and the HTP stub fails
 LD = f"LD_LIBRARY_PATH={DEV}:/system/lib64:/vendor/lib64"
 
@@ -90,6 +91,23 @@ def reference_mixed(model, ids, max_new, eos):
 
 
 @torch.no_grad()
+def reference_prompt_from(prompt_model, decode_model, ids, max_new, eos):
+    """prompt_model's prompt pass (the NPU's weights), then greedy decode with decode_model (the GPU's fp16
+    weights): (tokens, logits after the prompt)."""
+    out = prompt_model(torch.tensor([ids]), use_cache=True)
+    first = out.logits[0, -1].float().numpy()
+    past, nxt = out.past_key_values, int(out.logits[0, -1].argmax())
+    toks = []
+    for _ in range(max_new):
+        toks.append(nxt)
+        if nxt in eos or len(toks) == max_new:
+            break
+        out = decode_model(torch.tensor([[nxt]]), past_key_values=past, use_cache=True)
+        past, nxt = out.past_key_values, int(out.logits[0, -1].argmax())
+    return toks, first
+
+
+@torch.no_grad()
 def prompt_cache(model, ids):
     out = model(torch.tensor([ids]), use_cache=True)
     pkv = out.past_key_values
@@ -128,32 +146,50 @@ def setup():
     print("phone: weights byte for byte the Mac's export")
 
 
-def push(graphs, push_graphs):
-    """The NPU runtime and programs to DEV; the graphs next to the phone's model/weights.bin (their external data
-    is "weights.bin" in the graph's own directory; a lab phone may refuse a hard link to it)."""
-    sh("adb", "shell", f"mkdir -p {DEV}")
+def push(graphs, push_graphs, gdir):
+    """The NPU runtime and programs to DEV; the graphs to gdir: next to the phone's model/weights.bin, which the
+    fp16 graphs read (their external data is "weights.bin" in the graph's own directory; a lab phone may refuse a
+    hard link to it), or with their own weights.bin (w4a16), pushed when the phone's differs in size."""
+    sh("adb", "shell", f"mkdir -p {DEV} {gdir}")
     have = set(sh("adb", "shell", f"ls {DEV}").stdout.split())
     phone = ROOT / "build/npu/phone"
     files = [p for p in phone.iterdir()
-             if p.suffix != ".o" and (p.name not in have or p.name in ("hybrid", "npu_tool"))]
+             if p.suffix != ".o" and (p.name not in have or p.name in ("hybrid", "hybrid_qwen3", "npu_tool"))]
     if files:
         sh("adb", "push", *files, f"{DEV}/")
-    if push_graphs or "npu.txt" not in sh("adb", "shell", f"ls {GRAPHS}").stdout.split():
-        sh("adb", "shell", f"rm -f {GRAPHS}/part*")  # the old graphs and their compiled contexts
-        sh("adb", "push", graphs / "npu.txt", *sorted(graphs.glob("part*.onnx")), f"{GRAPHS}/")
+    if (graphs / "manifest.txt").exists():  # quantized graphs: their own weights
+        size = sh("adb", "shell", f"stat -c %s {gdir}/weights.bin", check=False).stdout.strip()
+        if size != str((graphs / "weights.bin").stat().st_size):
+            recipe = (graphs / "recipe.txt").read_text().splitlines() if (graphs / "recipe.txt").exists() else []
+            if len(recipe) > 1:  # per-channel forms: written on the phone from its fp16 weights.bin
+                print(f"writing {gdir}/weights.bin on the phone (npu/pc_convert.cpp) ...", flush=True)
+                sh("adb", "push", graphs / "recipe.txt", f"{gdir}/")
+                print(adb_run(f"cd {DEV}; ./pc_convert {GRAPHS} {gdir}/recipe.txt {gdir}", f"{DEV}/conv.txt"))
+                want = sh("shasum", "-a", "256", graphs / "weights.bin").stdout.split()[0]
+                got = sh("adb", "shell", f"sha256sum {gdir}/weights.bin").stdout.split()[0]
+                if want != got:
+                    sys.exit(f"{gdir}/weights.bin differs from {graphs}/weights.bin")
+            else:
+                print(f"pushing {graphs}/weights.bin ({(graphs / 'weights.bin').stat().st_size / 1e6:.0f} MB) ...",
+                      flush=True)
+                sh("adb", "push", graphs / "weights.bin", f"{gdir}/")
+            push_graphs = True
+    if push_graphs or "npu.txt" not in sh("adb", "shell", f"ls {gdir}").stdout.split():
+        sh("adb", "shell", f"rm -f {gdir}/part*")  # the old graphs and their compiled contexts
+        sh("adb", "push", graphs / "npu.txt", *sorted(graphs.glob("part*.onnx")), f"{gdir}/")
 
 
-def compile_graphs(graphs):
+def compile_graphs(graphs, gdir):
     """The one-time step: each part compiled for the HTP by QNN on the phone and its context binary saved, a part a
     process (compiling holds several copies of a part's weights; all four in one process exhaust the phone)."""
     parts = int((graphs / "npu.txt").read_text().split()[4])
-    have = sh("adb", "shell", f"ls {GRAPHS}").stdout.split()
+    have = sh("adb", "shell", f"ls {gdir}").stdout.split()
     todo = [i for i in range(parts) if f"part{i}_ctx.onnx" not in have]
     if not todo:
         return
     print(f"\ncompiling parts {todo} for the HTP (once; QNN's graph finalization mode 3) ...", flush=True)
     for i in todo:
-        out = adb_run(f"cd {DEV}; {LD} ./npu_tool compile {GRAPHS} {i}", f"{DEV}/compile{i}.txt")
+        out = adb_run(f"cd {DEV}; {LD} ./npu_tool compile {gdir} {i}", f"{DEV}/compile{i}.txt")
         print("\n".join("  " + l for l in out.splitlines() if not l.startswith("[ort")))
 
 
@@ -205,24 +241,32 @@ def parse(out):
     return toks
 
 
+def parse(out):
+    toks = [int(l.split()[1]) for l in out.splitlines() if l.startswith("tok ")]
+    return toks
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="Hugging Face snapshot dir of Llama-3.2-1B-Instruct")
     ap.add_argument("--prompt-file", default=str(ROOT / "llama/prompts/long.txt"))
     ap.add_argument("--max-new", type=int, default=80)
     ap.add_argument("--quant", choices=["fp16", "q4"], default="fp16", help="the GPU decode's weights")
-    ap.add_argument("--graphs", type=pathlib.Path, default=ROOT / "build/npu/graphs")
+    ap.add_argument("--graphs", type=pathlib.Path, default=ROOT / "build/npu/graphs",
+                    help="npu/export.py's output: fp16 (build/npu/graphs) or w4a16 (build/npu/graphs-w4a16-fc)")
     ap.add_argument("--push-graphs", action="store_true", help="replace the phone's graphs (and their contexts)")
+    ap.add_argument("--npu-dir", help="the graphs' directory on the phone (default: model/ for fp16 graphs, "
+                                      "npu-<graphs' name> for quantized ones, which carry their own weights.bin)")
     ap.add_argument("--kv", action="store_true", help="check the NPU's K/V against PyTorch's (npu_tool)")
     ap.add_argument("--baseline", action="store_true", help="also time the all-GPU path (llama.mojo, LLAMA_PREFILL)")
     ap.add_argument("--runs", type=int, default=3, help="NPU prefills in the hybrid run (first cold)")
-    ap.add_argument("--cool", type=float, default=40.0)
-    ap.add_argument("--setup", action="store_true", help="a wiped phone: download, convert and push everything")
-    ap.add_argument("--compile-only", action="store_true", help="compile the graphs on the phone and stop")
     ap.add_argument("--all-npu", action="store_true",
                     help="also run prefill and decode both on the NPU (npu_decode, npu/export_decode.py's graphs)")
     ap.add_argument("--decode-graphs", type=pathlib.Path, default=ROOT / "build/npu/decode")
     ap.add_argument("--no-hybrid", action="store_true", help="skip the NPU prefill + GPU decode run")
+    ap.add_argument("--cool", type=float, default=40.0)
+    ap.add_argument("--setup", action="store_true", help="a wiped phone: download, convert and push everything")
+    ap.add_argument("--compile-only", action="store_true", help="compile the graphs on the phone and stop")
     a = ap.parse_args()
     from transformers import AutoTokenizer
 
@@ -231,8 +275,18 @@ def main():
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True)
     ids = list(ids["input_ids"] if hasattr(ids, "keys") else ids)
     eos = list(llama_run.CONFIG_1B["eos_token_id"])
-    model = llama_run.load_model(a.model)
+    w4 = (a.graphs / "calib.json").exists()  # w4a16 graphs, with their own weights
+    gdir = a.npu_dir or (f"{LLAMA}/npu-{a.graphs.name}" if w4 else GRAPHS)
     print(f"prompt: {len(ids)} tokens")
+    cache_w4 = ref_w4 = None
+    if w4:  # the model with the graphs' int4 weights: its K/V, and its prompt pass followed by fp16 decode
+        import export
+
+        model = export.apply_w4a16_weights(llama_run.load_model(a.model), a.graphs)
+        cache_w4 = prompt_cache(model, ids) if a.kv else None
+        ref_w4 = reference_prompt_from(model, llama_run.load_model(a.model), ids, a.max_new, eos)
+        del model
+    model = llama_run.load_model(a.model)
     cache = prompt_cache(model, ids) if a.kv else None
     t = time.time()
     if a.quant == "q4":
@@ -243,18 +297,18 @@ def main():
 
     if a.setup:
         setup()
-    push(a.graphs, a.push_graphs)
-    compile_graphs(a.graphs)
+    push(a.graphs, a.push_graphs, gdir)
+    compile_graphs(a.graphs, gdir)
     if a.compile_only:
         return
-    gdir = "model-q4" if a.quant == "q4" else "model"
+    mdir = "model-q4" if a.quant == "q4" else "model"
     id_str = " ".join(map(str, ids))
     eos_env = f"LLAMA_EOS={','.join(map(str, eos))}"
 
     if a.kv:
         print(f"\nnpu_tool (SKIN {cool(a.cool):.1f} C):", flush=True)
         sh("adb", "shell", f"mkdir -p {DEV}/dump")
-        out = adb_run(f"cd {DEV}; {LD} ./npu_tool {GRAPHS} {LLAMA}/model 3 dump {id_str}", f"{DEV}/tool.txt")
+        out = adb_run(f"cd {DEV}; {LD} ./npu_tool {gdir} {LLAMA}/model 5 dump {id_str}", f"{DEV}/tool.txt")
         print("\n".join("  " + l for l in out.splitlines() if not l.startswith("[ort")))
         build = ROOT / "build/npu"
         sh("adb", "pull", f"{DEV}/dump/kv.f16", f"{DEV}/dump/logits.f32", build)
@@ -271,17 +325,22 @@ def main():
         lg = np.fromfile(build / "logits.f32", np.float32)
         print(f"  K/V relative error (Frobenius) at most {worst:.1e}; logits max |err| "
               f"{np.abs(lg - ref_logits).max():.3f}, argmax {lg.argmax()} (PyTorch {ref_logits.argmax()})")
+        if cache_w4 is not None:
+            worst = max(max(np.linalg.norm(kv[l, i] - c) / np.linalg.norm(c) for i, c in enumerate(cache_w4[l]))
+                        for l in range(len(cache_w4)))
+            print(f"  against PyTorch with the graphs' quantized weights (the activations' share of the error): K/V "
+                  f"relative error at most {worst:.1e}; logits max |err| {np.abs(lg - ref_w4[1]).max():.3f}")
 
     if a.all_npu:
-        if a.quant != "fp16":
-            sys.exit("--all-npu: the NPU decode graphs are fp16")
+        if a.quant != "fp16" or w4:
+            sys.exit("--all-npu: the NPU decode graphs are fp16, with the fp16 prefill graphs")
         all_npu(a, ids, eos, ref, tok)
     if a.no_hybrid:
         return
 
     print(f"\nhybrid: NPU prefill + GPU decode, {a.quant} decode weights (SKIN {cool(a.cool):.1f} C):", flush=True)
     out = adb_run(f"cd {DEV}; {LD} MODULAR_DRIVER_PLUGINS=vulkan@{DEV}/libM_driver_vulkan.so NPU_RUNS={a.runs} "
-                  f"{eos_env} LLAMA_LOGITS={DEV}/logits.bin ./hybrid {LLAMA}/{gdir} {GRAPHS} {a.max_new} {id_str}",
+                  f"{eos_env} LLAMA_LOGITS={DEV}/logits.bin ./hybrid {LLAMA}/{mdir} {gdir} {a.max_new} {id_str}",
                   f"{DEV}/hybrid.txt")
     print("\n".join("  " + l for l in out.splitlines() if not l.startswith(("tok ", "[ort"))))
     got = parse(out)
@@ -294,6 +353,10 @@ def main():
     print("  phone:  ", repr(tok.decode(got, skip_special_tokens=True)))
     if match < min(len(got), len(ref)):
         print("  PyTorch:", repr(tok.decode(ref, skip_special_tokens=True)))
+    if ref_w4 is not None:
+        same = next((i for i, (x, y) in enumerate(zip(got, ref_w4[0])) if x != y), min(len(got), len(ref_w4[0])))
+        print(f"  against PyTorch's prompt pass with the graphs' quantized weights, then {a.quant} decode: identical for "
+              f"the first {same} of {len(ref_w4[0])}")
     if a.kv and got:  # the model holds the decode's weights now (int4 after reference_mixed)
         again = replay(model, kv, got[0], a.max_new, eos)
         same = next((i for i, (x, y) in enumerate(zip(got, again)) if x != y), min(len(got), len(again)))
@@ -302,7 +365,7 @@ def main():
     if a.baseline:
         print(f"\nall-GPU: llama.mojo, batched prefill on the Adreno (SKIN {cool(a.cool):.1f} C):", flush=True)
         out = adb_run(f"cd {LLAMA}; MODULAR_DRIVER_PLUGINS=vulkan@{LLAMA}/mojo/libM_driver_vulkan.so LLAMA_PREFILL=1 "
-                      f"{eos_env} mojo/llama {gdir} {a.max_new} {id_str}", f"{DEV}/gpu.txt")
+                      f"{eos_env} mojo/llama {mdir} {a.max_new} {id_str}", f"{DEV}/gpu.txt")
         print("\n".join("  " + l for l in out.splitlines() if not l.startswith("tok ")))
         got = parse(out)
         if a.quant == "q4":  # all int4 on the GPU: against PyTorch with int4 weights throughout (the model is int4 now)

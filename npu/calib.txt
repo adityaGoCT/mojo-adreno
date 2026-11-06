@@ -1,0 +1,23 @@
+Explain how a refrigerator keeps food cold. Start with the refrigerant and the compressor, then describe what happens in the condenser coils at the back and the evaporator inside, and why the gas cools when it expands. Mention why the back of the fridge feels warm, what the thermostat does, and why leaving the door open on a hot day does not cool the kitchen. Finish with two practical tips for saving electricity.
+---
+Write a short story, about three paragraphs long, about a lighthouse keeper on a small northern island who finds a message in a bottle. The message is written in a language she does not know, but it contains a hand-drawn map of her own island with a mark near the old boathouse. Describe the weather, the sound of the sea, and what she finds when she finally goes to dig at the spot.
+---
+Here is a Python function. Find the bug and explain how to fix it.
+
+def moving_average(values, window):
+    result = []
+    total = 0
+    for i, v in enumerate(values):
+        total += v
+        if i >= window:
+            total -= values[i - window]
+        result.append(total / window)
+    return result
+
+print(moving_average([1, 2, 3, 4, 5, 6], 3))
+
+Also suggest a version that uses numpy, and say what its complexity is for a list of n values.
+---
+I am planning a four-day trip to Kyoto in late November with my parents, who are in their seventies and do not like long walks. Suggest an itinerary with one main area per day, the best time of day to visit temples to avoid the crowds, where autumn leaves are usually best that week, and two restaurants for each evening, one traditional and one casual. Include how to get around by bus or taxi, approximate costs in yen, and what to pack for the weather.
+---
+List the planets of the solar system in order from the Sun, and for each give its approximate distance in astronomical units, the length of its day and year, the number of known moons, and one surprising fact. Then compute how long light from the Sun takes to reach Jupiter, showing your working with the speed of light as 299,792 kilometres per second and one astronomical unit as 149.6 million kilometres.
