@@ -1,7 +1,8 @@
 # Gemma 4 E2B / E4B (google/gemma-4-E2B-it, -E4B-it) text decode as MAX DeviceContext launches of gemma4/kernels.
-# One program for both: the sizes come from export.py's manifest. int4 projections and head (gemma4.bin), fp32
-# activations and KV cache. The token embedding and the per-layer embedding stay in the checkpoint's model.safetensors
-# (bf16): the host reads a token's two rows from there and copies them to the GPU.
+# One program for both: the sizes come from export.py's manifest. int4 or int8 projections and head (gemma4.bin, each
+# matrix as export.py's storage picks), fp32 activations and KV cache. The token embedding and the per-layer
+# embedding stay in the checkpoint's model.safetensors (bf16): the host reads a token's two rows from there and copies
+# them to the GPU.
 #
 # Per token: the per-layer inputs (per_layer_model_projection of the scaled embedding, normed, plus the token's
 # per-layer embedding row), then 35 (E2B) or 42 (E4B) layers of 12 launches, the soft-capped head and argmax. Layers
@@ -14,6 +15,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
 import p_gemm_q4
+import p_gemm_q8
 
 comptime PL = 256  # the per-layer input's width
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of p_gemm_q4's 128)
@@ -49,6 +51,7 @@ struct Gemma4(Movable):
     var words: Dict[String, DeviceBuffer[DType.uint32]]
     var halves: Dict[String, DeviceBuffer[DType.float16]]
     var floats: Dict[String, DeviceBuffer[DType.float32]]
+    var int8: Dict[String, Bool]  # the matrices stored as int8 (the rest are int4)
     var bytes: Int
     var kc: Dict[Int, DeviceBuffer[DType.float32]]
     var vc: Dict[Int, DeviceBuffer[DType.float32]]
@@ -107,6 +110,7 @@ struct Gemma4(Movable):
         self.words = Dict[String, DeviceBuffer[DType.uint32]]()
         self.halves = Dict[String, DeviceBuffer[DType.float16]]()
         self.floats = Dict[String, DeviceBuffer[DType.float32]]()
+        self.int8 = Dict[String, Bool]()
         self.bytes = 0
         self.kc = Dict[Int, DeviceBuffer[DType.float32]]()
         self.vc = Dict[Int, DeviceBuffer[DType.float32]]()
@@ -167,7 +171,7 @@ struct Gemma4(Movable):
 
     def load(mut self, dir: String) raises:
         """gemma4.bin's tensors, as the manifest lists them ("<name> <offset> <bytes> <dtype> <shape>"), each in a
-        device buffer of its type; and the two RoPE tables."""
+        device buffer of its type (int8 weights as uint32 words, like int4's); and the two RoPE tables."""
         var lines = open(dir + "/manifest.txt", "r").read().splitlines()
         var f = open(dir + "/gemma4.bin", "r")
         for i in range(1, len(lines)):
@@ -180,10 +184,12 @@ struct Gemma4(Movable):
             var data = f.read_bytes(n)
             if len(data) != n:
                 raise Error("gemma4.bin: short read of " + name)
-            if p[3] == "u32":
+            if p[3] == "u32" or p[3] == "i8":  # int4 or int8 weights, as uint32 words
                 var b = self.ctx.enqueue_create_buffer[DType.uint32](n // 4)
                 self.ctx.enqueue_copy(b, data.unsafe_ptr().unsafe_bitcast[UInt32]())
                 self.words[name] = b
+                if p[3] == "i8":
+                    self.int8[String(name[byte=:name.byte_length() - 2])] = True
             elif p[3] == "f16":
                 var b = self.ctx.enqueue_create_buffer[DType.float16](n // 2)
                 self.ctx.enqueue_copy(b, data.unsafe_ptr().unsafe_bitcast[Float16]())
@@ -238,6 +244,27 @@ struct Gemma4(Movable):
         self.ctx.enqueue_copy(self.plein.create_sub_buffer[DType.float32](p0 * W, n * W), ps.unsafe_ptr())
         self.ctx.synchronize()
 
+    def gemv(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], cols: Int,
+             rows: Int) raises:
+        """y = W x for the int4 or int8 matrix `name` (rows x cols): a workgroup a row."""
+        if name in self.int8:
+            self.ctx.enqueue_function[g4k.gemv[True]](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                      Int32(cols), grid_dim=rows, block_dim=64)
+        else:
+            self.ctx.enqueue_function[g4k.gemv[False]](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                       Int32(cols), grid_dim=rows, block_dim=64)
+
+    def head(self, x: DeviceBuffer[DType.float32]) raises:
+        """The soft-capped logits of x (a final-normed row), and their argmax into tok[0]."""
+        if "head" in self.int8:
+            self.ctx.enqueue_function[g4k.head[True]](self.words["head.q"], self.halves["head.s"], x, self.logits,
+                                                      Int32(self.D), self.softcap, grid_dim=self.V, block_dim=64)
+        else:
+            self.ctx.enqueue_function[g4k.head[False]](self.words["head.q"], self.halves["head.s"], x, self.logits,
+                                                       Int32(self.D), self.softcap, grid_dim=self.V, block_dim=64)
+        self.ctx.enqueue_function[g4k.argmax](self.logits, Int32(self.V), self.tok, Int32(0), grid_dim=1,
+                                              block_dim=256)
+
     def step(self, pos: Int) raises:
         """The token at `pos` (its rows uploaded) through the model: logits, and their argmax into tok[0]."""
         var ctx = self.ctx
@@ -248,8 +275,7 @@ struct Gemma4(Movable):
         var p = Int32(pos)
         var xin = self.xin.create_sub_buffer[DType.float32](pos * D, D)
         var raw = self.plein.create_sub_buffer[DType.float32](pos * W, W)
-        ctx.enqueue_function[g4k.gemv_q4](self.words["ple_proj.q"], self.halves["ple_proj.s"], xin, self.proj,
-                                          Int32(D), grid_dim=W, block_dim=64)
+        self.gemv("ple_proj", xin, self.proj, D, W)
         ctx.enqueue_function[g4k.ple_prep](self.proj, raw, self.floats["ple_norm"], self.ple,
                                            Float32(1.0 / sqrt(Float64(D))), grid_dim=self.L, block_dim=64)
         ctx.enqueue_function[g4k.start](xin, self.x, self.floats["l0.in_norm"], self.xn, Int32(D), grid_dim=1,
@@ -263,8 +289,7 @@ struct Gemma4(Movable):
             var heads = (H + 2 * KVH) if own else H
             var qn = self.floats[n + "q_norm"]
             var kn = self.floats[n + "k_norm"] if own else qn
-            ctx.enqueue_function[g4k.gemv_q4](self.words[n + "qkv.q"], self.halves[n + "qkv.s"], self.xn, self.qkv,
-                                              Int32(D), grid_dim=heads * hd, block_dim=64)
+            self.gemv(n + "qkv", self.xn, self.qkv, D, heads * hd)
             var table = self.rope_s if self.plan[l].sliding else self.rope_f
             var kc = self.kc[src]
             var vc = self.vc[src]
@@ -285,35 +310,46 @@ struct Gemma4(Movable):
             ctx.enqueue_function[g4k.attn_values](self.scores, vc, self.att, p, Int32(first), Int32(H // KVH),
                                                   Int32(KVH), Int32(hd), Int32(self.CAP), grid_dim=H * hd // 64,
                                                   block_dim=64)
-            ctx.enqueue_function[g4k.gemv_q4](self.words[n + "o.q"], self.halves[n + "o.s"], self.att, self.tmp,
-                                              Int32(H * hd), grid_dim=D, block_dim=64)
+            self.gemv(n + "o", self.att, self.tmp, H * hd, D)
             var sc = self.floats[n + "scalar"]
             ctx.enqueue_function[g4k.norm_add](self.x, self.tmp, self.floats[n + "post_attn_norm"], sc,
                                                self.floats[n + "pre_ff_norm"], self.xn, Int32(D), Int32(2),
                                                grid_dim=1, block_dim=64)
-            ctx.enqueue_function[g4k.gate_up_gelu](self.words[n + "gu.q"], self.halves[n + "gu.s"], self.xn, self.act,
-                                                   Int32(D), Int32(f), grid_dim=f, block_dim=64)
-            ctx.enqueue_function[g4k.gemv_q4](self.words[n + "down.q"], self.halves[n + "down.s"], self.act, self.tmp,
-                                              Int32(f), grid_dim=D, block_dim=64)
+            if n + "gu" in self.int8:
+                ctx.enqueue_function[g4k.gate_up_gelu[True]](self.words[n + "gu.q"], self.halves[n + "gu.s"], self.xn,
+                                                             self.act, Int32(D), Int32(f), grid_dim=f, block_dim=64)
+            else:
+                ctx.enqueue_function[g4k.gate_up_gelu[False]](self.words[n + "gu.q"], self.halves[n + "gu.s"],
+                                                              self.xn, self.act, Int32(D), Int32(f), grid_dim=f,
+                                                              block_dim=64)
+            self.gemv(n + "down", self.act, self.tmp, f, D)
             ctx.enqueue_function[g4k.norm_add](self.x, self.tmp, self.floats[n + "post_ff_norm"], sc, sc, self.xn,
                                                Int32(D), Int32(0), grid_dim=1, block_dim=64)
-            ctx.enqueue_function[g4k.ple_gate](self.words[n + "pg.q"], self.halves[n + "pg.s"], self.x, self.ple,
-                                               Int32(l * PL), self.pga, Int32(D), grid_dim=PL, block_dim=64)
-            ctx.enqueue_function[g4k.gemv_q4](self.words[n + "pp.q"], self.halves[n + "pp.s"], self.pga, self.tmp,
-                                              Int32(PL), grid_dim=D, block_dim=64)
+            if n + "pg" in self.int8:
+                ctx.enqueue_function[g4k.ple_gate[True]](self.words[n + "pg.q"], self.halves[n + "pg.s"], self.x,
+                                                         self.ple, Int32(l * PL), self.pga, Int32(D), grid_dim=PL,
+                                                         block_dim=64)
+            else:
+                ctx.enqueue_function[g4k.ple_gate[False]](self.words[n + "pg.q"], self.halves[n + "pg.s"], self.x,
+                                                          self.ple, Int32(l * PL), self.pga, Int32(D), grid_dim=PL,
+                                                          block_dim=64)
+            self.gemv(n + "pp", self.pga, self.tmp, PL, D)
             var wn = self.floats["l" + String(l + 1) + ".in_norm"] if l + 1 < self.L else self.floats["final_norm"]
             ctx.enqueue_function[g4k.norm_add](self.x, self.tmp, self.floats[n + "ple_norm"], sc, wn, self.xn,
                                                Int32(D), Int32(3), grid_dim=1, block_dim=64)
-        ctx.enqueue_function[g4k.head_q4](self.words["head.q"], self.halves["head.s"], self.xn, self.logits, Int32(D),
-                                          self.softcap, grid_dim=self.V, block_dim=64)
-        ctx.enqueue_function[g4k.argmax](self.logits, Int32(self.V), self.tok, Int32(0), grid_dim=1, block_dim=256)
+        self.head(self.xn)
 
     def gemm(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], n: Int, k: Int,
              rows: Int) raises:
-        """y[rows, n] = x[rows, k] W^T for the int4 matrix `name` (n x k), on cooperative matrices."""
-        self.ctx.enqueue_function[p_gemm_q4.p_gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y,
-                                                       Int64(n), Int64(k), grid_dim=Dim(n // 128, rows // 128),
-                                                       block_dim=256)
+        """y[rows, n] = x[rows, k] W^T for the int4 or int8 matrix `name` (n x k), on cooperative matrices."""
+        if name in self.int8:
+            self.ctx.enqueue_function[p_gemm_q8.p_gemm_q8](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                           Int64(n), Int64(k), grid_dim=Dim(n // 128, rows // 128),
+                                                           block_dim=256)
+        else:
+            self.ctx.enqueue_function[p_gemm_q4.p_gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                           Int64(n), Int64(k), grid_dim=Dim(n // 128, rows // 128),
+                                                           block_dim=256)
 
     def prefill(self, p0: Int, count: Int) raises:
         """Positions p0 .. p0 + count - 1 (rows uploaded) in batches of up to PMAX rows: each projection one matrix
@@ -399,7 +435,4 @@ struct Gemma4(Movable):
             var wn = self.floats["l" + String(l + 1) + ".in_norm"] if l + 1 < self.L else self.floats["final_norm"]
             ctx.enqueue_function[g4k.p_norm_add](self.px, self.ptmp, self.floats[n + "ple_norm"], sc, wn, self.pxn,
                                                  Int32(D), Int32(3), grid_dim=count, block_dim=64)
-        var last = self.pxn.create_sub_buffer[DType.float32]((count - 1) * D, D)
-        ctx.enqueue_function[g4k.head_q4](self.words["head.q"], self.halves["head.s"], last, self.logits, Int32(D),
-                                          self.softcap, grid_dim=self.V, block_dim=64)
-        ctx.enqueue_function[g4k.argmax](self.logits, Int32(self.V), self.tok, Int32(0), grid_dim=1, block_dim=256)
+        self.head(self.pxn.create_sub_buffer[DType.float32]((count - 1) * D, D))

@@ -4,7 +4,7 @@ submissions: recorded over .. ms, then waited X ms"). The last decode step's lau
 model.mojo's step(): 3 launches, 12 per layer, then the head and argmax. Each launch waited for alone pays a
 submission's latency too, so the sum exceeds a normal step's time.
 
-  build/vla/venv/bin/python gemma4/step_profile.py --model e2b [--tokens 4] [--prefill]
+  build/vla/venv/bin/python gemma4/step_profile.py --model e2b [--storage int8] [--tokens 4] [--prefill]
 
 The decode profile runs after run.py's default prompt (batched), the prefill profile on prompts/long.txt.
 """
@@ -18,35 +18,39 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PHONE = "/data/local/tmp/gemma4"
-PLAYER = ["q/k/v (int4, matrix units)", "q/k norm + RoPE", "attention: Q K^T (matrix units)", "attention: softmax",
-          "attention: P V (matrix units)", "o (int4, matrix units)", "norms + residual",
-          "gate/up (int4, matrix units)", "GELU x up", "down (int4, matrix units)", "norms + residual",
-          "per-layer gate (int4, matrix units)", "GELU x per-layer input", "per-layer projection (int4, matrix units)",
+PLAYER = ["q/k/v (matrix units)", "q/k norm + RoPE", "attention: Q K^T (matrix units)", "attention: softmax",
+          "attention: P V (matrix units)", "o (matrix units)", "norms + residual",
+          "gate/up (matrix units)", "GELU x up", "down (matrix units)", "norms + residual",
+          "per-layer gate (matrix units)", "GELU x per-layer input", "per-layer projection (matrix units)",
           "norms + residual"]
-LAYER = ["q/k/v (int4)", "q/k norm + RoPE", "attention scores", "attention values", "o (int4)", "norms + residual",
-         "gate/up + GELU (int4)", "down (int4)", "norms + residual", "per-layer gate (int4)",
-         "per-layer projection (int4)", "norms + residual"]
+LAYER = ["q/k/v ", "q/k norm + RoPE", "attention scores", "attention values", "o ", "norms + residual",
+         "gate/up + GELU ", "down ", "norms + residual", "per-layer gate ",
+         "per-layer projection ", "norms + residual"]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="e2b")
+    ap.add_argument("--storage", default="int4", help="export.py's storage: int4, int8, mixed")
     ap.add_argument("--tokens", type=int, default=4)
     ap.add_argument("--prefill", action="store_true")
     a = ap.parse_args()
-    d = f"{PHONE}/{a.model}"
+    d = f"{PHONE}/{a.model}" + ("" if a.storage == "int4" else f"/{a.storage}")
+    ckpt = f"{PHONE}/{a.model}/model.safetensors"
     sys.path.insert(0, str(ROOT / "gemma4"))
+    from export import storage_dir
     from run import tokenize
+    sdir = storage_dir(a.model, a.storage)
     sky = "Explain in two sentences why the sky is blue."
     text = (ROOT / "gemma4/prompts/long.txt").read_text() if a.prefill else sky
     ids = tokenize(a.model, text)[1]
-    local = ROOT / "build/gemma4" / a.model / "prof.ids"
+    local = sdir / "prof.ids"
     local.write_text(" ".join(map(str, ids)) + "\n")
     subprocess.run(["adb", "push", str(local), f"{d}/prof.ids"], check=True, capture_output=True)
-    L = int(re.search(r" L (\d+) ", (ROOT / "build/gemma4" / a.model / "manifest.txt").read_text()).group(1))
+    L = int(re.search(r" L (\d+) ", (sdir / "manifest.txt").read_text()).group(1))
     subprocess.run(["adb", "shell", f"cd {PHONE}/gemma4; GEMMA4_PREFILL=1 VK_SERVER_PROFILE=2 "
                     f"MODULAR_DRIVER_PLUGINS=vulkan@{PHONE}/gemma4/libM_driver_vulkan.so ./gemma4 {d} "
-                    f"{d}/model.safetensors {a.tokens} @{d}/prof.ids > {d}/prof.log "
+                    f"{ckpt} {a.tokens} @{d}/prof.ids > {d}/prof.log "
                     f"2>&1; echo exit $? >> {d}/prof.log"], check=True)
     log = subprocess.run(["adb", "shell", f"cat {d}/prof.log"], capture_output=True, text=True, check=True).stdout
     if "exit 0" not in log:
@@ -57,10 +61,10 @@ def main():
         w = next(i for i, s in enumerate(lines) if s.startswith("weights:"))
         p = next(i for i, s in enumerate(lines) if s.startswith("prompt:"))
         t = [float(m.group(1)) for s in lines[w:p] if (m := re.search(timed, s))]
-        names = ["per-layer projection in (int4, matrix units)", "per-layer inputs", "start"]
+        names = ["per-layer projection in (matrix units)", "per-layer inputs", "start"]
         for _ in range(L):
             names += PLAYER
-        names += ["head (int4) + soft-cap", "argmax"]
+        names += ["head + soft-cap", "argmax"]
         t = t[len(t) % len(names):]  # the uploads' copies come first
         total = collections.OrderedDict()
         for i, x in enumerate(t):
@@ -75,10 +79,10 @@ def main():
     toks = [i for i, s in enumerate(lines) if s.startswith("tok ")]
     step = [float(m.group(1)) for s in lines[toks[-2] + 1:toks[-1]]
             if (m := re.search(r"^1 commands in 1 submissions: .* waited ([\d.]+) ms", s))]
-    names = ["per-layer projection in (int4)", "per-layer inputs", "start"]
+    names = ["per-layer projection in ", "per-layer inputs", "start"]
     for _ in range(L):
         names += LAYER
-    names += ["head (int4) + soft-cap", "argmax"]
+    names += ["head + soft-cap", "argmax"]
     if len(step) < len(names):
         sys.exit(f"{len(step)} timed launches in the last step, expected {len(names)}")
     step = step[-len(names):]

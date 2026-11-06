@@ -7,7 +7,10 @@
 //                                         low nibble first (llama/kernels' gemv_q4 storage). The scale is the fp16 of
 //                                         max |w| / d for the d in 6.5 .. 9 (steps of 0.25) with the least squared
 //                                         error (qwen3moe/convert.c's choice).
-// The q4 lines run a block of rows at a time, so the phone never holds a whole 262144-row head.
+//   q8 <out q> <out s> <src> <rows> <cols> <group>   a bf16 matrix -> int8: an fp16 scale per `group` weights of a row,
+//                                         the fp16 of max |w| / 127, q = rint(w / scale) clamped to -127..127, 4 a
+//                                         uint32, low byte first (g4k's gemv[True] and p_gemm_q8's storage).
+// The q4 and q8 lines run a block of rows at a time, so the phone never holds a whole 262144-row head.
 //
 //   convert <checkpoint dir> <recipe.txt> <gemma4.bin>
 // Builds for macOS (cc) and Android (the NDK's clang), both with -ffp-contract=off, so both write the same bytes.
@@ -79,6 +82,26 @@ static void quantize(const uint16_t *src, int gs, uint32_t *q, __fp16 *s) {
   }
 }
 
+// One group of gs weights in int8: its scale and gs / 4 words.
+static void quantize8(const uint16_t *src, int gs, uint32_t *q, __fp16 *s) {
+  float w[256], m = 0;
+  for (int j = 0; j < gs; ++j) {
+    w[j] = bf16(src[j]);
+    m = fmaxf(m, fabsf(w[j]));
+  }
+  __fp16 h = (__fp16)(m / 127.0f);
+  float sf = (float)h;
+  *s = h;
+  for (int k = 0; k < gs / 4; ++k) {
+    uint32_t word = 0;
+    for (int j = 0; j < 4; ++j) {
+      float v = sf > 0 ? fminf(fmaxf(rintf(w[k * 4 + j] / sf), -127.0f), 127.0f) : 0.0f;
+      word |= (uint32_t)((int)v & 255) << (8 * j);
+    }
+    q[k] = word;
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc != 4) {
     fprintf(stderr, "usage: convert <checkpoint dir> <recipe.txt> <gemma4.bin>\n");
@@ -117,21 +140,26 @@ int main(int argc, char **argv) {
       for (long long j = 0; j < n; ++j) ((float *)dst)[j] = bf16(src[j]);
       put(out, a, dst, n * 4);
       values += n;
-    } else if (!strcmp(kind, "q4")) {
+    } else if (!strcmp(kind, "q4") || !strcmp(kind, "q8")) {
+      int bits = kind[1] == '8' ? 8 : 4;
       if (fscanf(r, "%lld %lld %lld %lld %lld %lld", &a, &c, &b, &rows, &cols, &gs) != 6 || cols % gs || gs % 8 ||
           gs > 256)
         return 2;
+      long long qb = cols * bits / 8;  // bytes of q a row
       long long block = (64ll << 20) / (cols * 2);  // rows of 64 MB of bf16 at a time
       if (block < 1) block = 1;
       for (long long r0 = 0; r0 < rows; r0 += block) {
         long long m = rows - r0 < block ? rows - r0 : block;
         src = grow(src, &cap_src, m * cols * 2);
-        dst = grow(dst, &cap_dst, m * cols / 2);
+        dst = grow(dst, &cap_dst, m * qb);
         dst2 = grow(dst2, &cap_dst2, m * cols / gs * 2);
         get(in, b + r0 * cols * 2, src, m * cols * 2);
         for (long long g = 0; g < m * cols / gs; ++g)
-          quantize(src + g * gs, (int)gs, (uint32_t *)dst + g * gs / 8, (__fp16 *)dst2 + g);
-        put(out, a + r0 * cols / 2, dst, m * cols / 2);
+          if (bits == 8)
+            quantize8(src + g * gs, (int)gs, (uint32_t *)dst + g * gs / 4, (__fp16 *)dst2 + g);
+          else
+            quantize(src + g * gs, (int)gs, (uint32_t *)dst + g * gs / 8, (__fp16 *)dst2 + g);
+        put(out, a + r0 * qb, dst, m * qb);
         put(out, c + r0 * cols / gs * 2, dst2, m * cols / gs * 2);
       }
       values += rows * cols;

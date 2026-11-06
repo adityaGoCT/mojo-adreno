@@ -5,7 +5,9 @@ Google's on-device Gemma 4 models, [`google/gemma-4-E2B-it`](https://huggingface
 text on the GPU of a Galaxy Z Fold (SM-F976U, Snapdragon 8 Elite Gen 5, Adreno 840, Android 17) in Samsung's Remote Test
 Lab. Every GPU kernel is Mojo, compiled by the fork's adreno840 SPIR-V target. The program around them is Mojo too
 (`DeviceContext`, built for Android by `android/build.py gemma4`) and runs on the phone. One program serves both
-models; their sizes come from the manifest. Both checkpoints are Apache 2.0 and not gated.
+models; their sizes come from the manifest. Both checkpoints are Apache 2.0 and not gated. The weight matrices are
+int4, or with `--storage int8` int8, which brings the outputs close to the bf16 models' at 1.5× the decode time (see
+[int8](#int8)).
 
 ```
 $ build/vla/venv/bin/python gemma4/run.py --model e2b --check --bf16
@@ -21,23 +23,40 @@ bf16: the original model's greedy choice agrees with the phone's token at 42 of 
 phone's tokens; first difference: position 22); mean KL(bf16 || int4) 0.2988
 ```
 
+```
+$ build/vla/venv/bin/python gemma4/run.py --model e2b --storage int8 --tokens 64 --check --bf16
+phone: weights: 2.151 GB in 1.6 s; 35 layers, hidden 1536 , context 2048
+phone: decode: 53 steps, 41.39 ms/token ( 24.16 tokens/s )
+output: "The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter wavelengths of sunlight
+(blue and violet) are scattered more effectively by the Earth's atmosphere than longer wavelengths. This scattered blue
+light reaches our eyes from all directions, making the sky appear blue.<turn|>"
+int8: phone logits within 1.78e-04 of the reference's at 7 positions (all 262144 logits; range -30.0 .. 17.4; ...)
+greedy: 54 of 54 phone tokens are the int8 reference's argmax
+bf16: the original model's greedy choice agrees with the phone's token at 53 of 54 positions (teacher-forced on the
+phone's tokens; first difference: position 58); mean KL(bf16 || int8) 0.0116
+```
+
 | | E2B | E4B |
 |---|---|---|
-| Decode | **28.1 ms a token (35.6 tokens/s)** | **53.8 ms a token (18.6 tokens/s)** |
-| A 960-token prompt, batched prefill | **2.36 s (406 tokens/s)**, 13× a token at a time | **4.71 s (204 tokens/s)**, 15× |
-| On the GPU | 1.21 GB | 2.47 GB |
+| Decode, int4 | **28.1 ms a token (35.6 tokens/s)** | **53.8 ms a token (18.6 tokens/s)** |
+| Decode, int8 | **41.1 ms a token (24.3 tokens/s)** | **83.0 ms a token (12.0 tokens/s)** |
+| A 960-token prompt, batched prefill, int4 / int8 | **2.36 / 2.44 s** (int4: 406 tokens/s, 13× a token at a time) | **4.71 / 4.76 s** (204 tokens/s, 15×) |
+| On the GPU, int4 / int8 | 1.21 / 2.15 GB | 2.47 / 4.46 GB |
+| bf16's greedy choice agrees, int4 → int8 (short, long prompt) | 42 of 47 → 53 of 54, 49 of 64 → 64 of 64 | 39 of 48 → 52 of 52, 55 of 64 → 64 of 64 |
 
-- **Exact on its weights.** At every position checked, the phone's logits are within 1.7e-4 of transformers' own
-  Gemma 4 layers running the same int4 weights (`reference.py`). That holds for all 262,144 logits, over a range of
-  ±30. Every greedy token matches, in all six checked runs (see [Checks](#checks)). The long prompt crosses the
-  512-token sliding window and two prefill batches.
-- **Against the bf16 models**, teacher-forced on the phone's tokens, the original weights' greedy choice agrees at
-  42 of 47 and 49 of 64 positions for E2B, and 39 of 48 and 55 of 64 for E4B. The differences come from int4, not
-  from the kernels (see [Checks](#checks)).
+- **Exact on its weights.** At every position checked, the phone's logits are within 1.9e-4 of transformers' own
+  Gemma 4 layers running the same int4 or int8 weights (`reference.py`). That holds for all 262,144 logits, over a
+  range of ±30. Every greedy token matches, in all checked runs (see [Checks](#checks) and [int8](#int8)). The long
+  prompt crosses the 512-token sliding window and two prefill batches.
+- **Against the bf16 models**, teacher-forced on the phone's tokens, the original weights' greedy choice agrees with
+  int4 at 42 of 47 and 49 of 64 positions for E2B, and 39 of 48 and 55 of 64 for E4B (mean KL 0.30–0.62). The
+  differences come from int4, not from the kernels. With int8 it agrees at 53 of 54 and 64 of 64 (E2B), and 52 of 52
+  and 64 of 64 (E4B), with a mean KL of 0.003–0.012.
 - **The weights never cross adb.** The phone downloads each checkpoint from Hugging Face itself: 10.2 GB in about 6
   minutes and 16.0 GB in about 15, matching Hugging Face's SHA-256 (`2db5482b…`, `cfbd3d2f…`). `gemma4_convert`
   (`convert.c`) then writes `gemma4.bin`, byte for byte the Mac's: SHA-256 `02bdea70…` (E2B, 1.213 GB) and
-  `c6355f9c…` (E4B, 2.470 GB).
+  `c6355f9c…` (E4B, 2.470 GB); with int8, `dbba9286…` (E2B, 2.151 GB, 11 s on the phone) and `3252f9fa…` (E4B,
+  4.456 GB, 20 s).
 
 ## What is new in Gemma 4
 
@@ -90,9 +109,22 @@ transformers' own `Gemma4TextRotaryEmbedding` in fp32, so the proportional RoPE 
   E2B's 10.2, 9.3 GB of E4B's 16.0), plus embedding rows on demand. `convert.c` runs on that copy unchanged and writes
   the same `gemma4.bin`.
 
+`export.py --storage` picks each matrix's format. int8 is symmetric too, with int4's scale layout: an fp16 scale per
+64 weights of a row (the fp16 of max |w| / 127), q = rint(w / scale) clamped to ±127, 4 weights a uint32, low byte
+first, so plain int8 rows. A storage other than int4 keeps its recipe, manifest, RoPE tables and `gemma4.bin` in
+`<model>/<storage>/`, on the Mac and on the phone; `model.safetensors` stays one per model.
+
+| `--storage` | int8 | int4 | `gemma4.bin`, E2B | E4B |
+|---|---|---|---|---|
+| `int4` (the default) | | every matrix | 1.21 GB | 2.47 GB |
+| `int8` | every matrix but the head | the head | 2.15 GB | 4.46 GB |
+| `mixed` | attention, per-layer input matrices, MLPs of the layers with their own K/V | the head, MLPs of the layers that reuse K/V | 1.59 GB | 3.75 GB |
+
 ## How a token runs
 
-`model.mojo`'s `step()` makes 3 + 12 per layer + 2 launches: 425 for E2B, 509 for E4B.
+`model.mojo`'s `step()` makes 3 + 12 per layer + 2 launches: 425 for E2B, 509 for E4B. Each matrix-vector kernel
+(`gemv`, `gate_up_gelu`, `ple_gate`, `head`) comes in an int4 and an int8 form, and the step picks the one for each
+matrix's storage; below, "int4" is either.
 1. The per-layer inputs: `per_layer_model_projection` (int4), then `ple_prep`: per layer, scale by D^-½, RMS norm,
    add the embedding row × 16, divide by √2. Then `start`: the residual stream is the scaled embedding, and its first
    norm.
@@ -116,7 +148,7 @@ KV cache are fp32. The cache holds 2048 positions; only the 15 (E2B) or 24 (E4B)
 `Gemma4.prefill` runs the prompt in batches of up to 512 rows (`GEMMA4_PREFILL`, `run.py --prefill`):
 - **Projections** are one matrix product each on the matrix units: llama's `p_gemm_q4`, which unpacks int4 into fp32 in
   shared memory and multiplies on KHR cooperative matrices (fp32, 64 × 64 × 8). The export's layout is already its
-  layout.
+  layout. An int8 matrix goes to `kernels/p_gemm_q8.mojo`, the same kernel unpacking int8.
 - **Attention** is on the matrix units too: qwen3's three kernels, for heads of 256 and 512, grouped KV heads, the
   sliding window, and batches that start mid-prompt. `p_scores_mma` computes Q Kᵀ per 64 rows and 64 keys, with K
   read straight from the cache. Then `p_softmax`, then `p_values_mma` (P V). A block reads only the keys in its rows'
@@ -185,17 +217,105 @@ certain of the same token. No single part dominates the error. With one group of
 | the MLPs | 0.23 | 41 of 47 |
 | the per-layer input matrices | 0.22 | 41 of 47 |
 
-A finer int4 grid barely helps, and 8 bits nearly close the gap. On E2B's 960-token run, every quantized matrix
-quantized another way (simulated in the reference from the bf16 weights):
+So the gap to bf16 is int4 rounding, spread over the whole model. [int8](#int8) closes it.
 
-| Every int4 matrix as | Mean KL | Greedy agreement | Bytes a token (E2B) |
+## int8
+
+`--storage int8` stores every matrix but the head in 8 bits. Both models then make the bf16 models' greedy choice at
+every position of the long prompt and at all but one of the short prompt's. The mean KL is 25–130× smaller than
+int4's:
+
+| Model, prompt | Storage | Prompt run | Max \|phone − reference\| | Greedy = reference | bf16 agrees | Mean KL(bf16 ‖ storage) |
+|---|---|---|---|---|---|---|
+| E2B, the sky | int4 | a token at a time | 1.7e-4 | 47 of 47 | 42 of 47 | 0.30 |
+| | **int8** | a token at a time | 1.8e-4 | 54 of 54 | **53 of 54** | **0.012** |
+| | mixed | a token at a time | 1.9e-4 | 55 of 55 | 49 of 55 | 0.14 |
+| E2B, the post | int4 | batched prefill | 1.2e-4 | 64 of 64 | 49 of 64 | 0.62 |
+| | **int8** | batched prefill | 1.0e-4 | 64 of 64 | **64 of 64** | **0.0054** |
+| | mixed | batched prefill | 1.3e-4 | 64 of 64 | 63 of 64 | 0.032 |
+| E4B, the sky | int4 | a token at a time | 1.6e-4 | 48 of 48 | 39 of 48 | 0.41 |
+| | **int8** | a token at a time | 1.7e-4 | 52 of 52 | **52 of 52** | **0.0031** |
+| | mixed | a token at a time | 1.4e-4 | 54 of 54 | 52 of 54 | 0.038 |
+| E4B, the post | int4 | batched prefill | 1.2e-4 | 64 of 64 | 55 of 64 | 0.34 |
+| | **int8** | batched prefill | 1.6e-4 | 64 of 64 | **64 of 64** | **0.0033** |
+| | mixed | batched prefill | 1.2e-4 | 64 of 64 | 59 of 64 | 0.022 |
+
+Each storage's reference is `reference.py` on its own weights (dequantized from its `gemma4.bin`), as in
+[Checks](#checks). The answers change with the weights, so the counts differ. E2B's sky answer now starts as bf16's
+does ("The sky appears blue because of", where int4 says "due to"), and runs 54 tokens.
+
+**Why int8, and why not the head.** The gap is spread over the model, so the storage was chosen by simulation first:
+`reference.py`'s layers with the weights quantized in numpy from the bf16 checkpoint, on E2B's 960-token prompt,
+teacher-forced on the phone's int4 tokens. A smaller int4 group barely helps, while 8 bits nearly close the gap. An
+fp16 scale per 64 int8 weights costs 3% more bytes than one per row, cuts the KL 3.4×, and keeps int4's scale layout:
+
+| Every quantized matrix as | Mean KL | bf16 argmax agrees | E2B bytes |
 |---|---|---|---|
-| int4, a scale per 64 (the phone's) | 0.62 | 49 of 64 | 1.21 GB |
+| int4, a scale per 64 (`int4`) | 0.62 | 49 of 64 | 1.21 GB |
 | int4, a scale per 32 | 0.45 | 51 of 64 | 1.28 GB |
-| int8, a scale per row | 0.008 | 63 of 64 | about 2.3 GB |
+| int8, a scale per row | 0.0082 | 63 of 64 | 2.28 GB |
+| int8, a scale per 64 | 0.0024 | 64 of 64 | 2.35 GB |
 
-So the gap to bf16 is int4 rounding, and closing it needs more than a smaller group: GPTQ or AWQ-style rounding, or
-8 bits where it matters.
+Then which matrices need the 8 bits: all int8 (a scale per 64) but one part left in int4.
+
+| int4 for (the rest int8) | Mean KL | bf16 argmax agrees | Saves (E2B) |
+|---|---|---|---|
+| nothing | 0.0024 | 64 of 64 | |
+| the head | 0.0085 | 62 of 64 | 0.20 GB |
+| the per-layer input matrices (2% of the weights) | 0.12 | 56 of 64 | 0.02 GB |
+| attention (q/k/v, o) | 0.22 | 52 of 64 | 0.14 GB |
+| the MLPs | 0.17 | 53 of 64 | 0.78 GB |
+| the MLPs of layers 0–14 | 0.12 | 54 of 64 | 0.21 GB |
+| the MLPs of layers 15–34 (they reuse K/V; double-wide) | 0.033 | 60 of 64 | 0.57 GB |
+| the head and the MLPs of layers 15–34 (`mixed`) | 0.036 | 61 of 64 | 0.77 GB |
+
+Every part but the head costs 0.1–0.2 of KL in int4, even the per-layer input matrices at 2% of the weights. Better
+int4 rounding (GPTQ, AWQ) would have to shrink the error of nearly every matrix as far as 8 bits do, which have a
+16× finer step. It would also need a calibration set, and the phone's converter would have to reproduce the
+rounding, or the phone would download a precomputed file instead of the checkpoint. The head is the exception: in
+int4 it adds only 0.006, and keeping it int4 saves 0.20 GB (E2B) or 0.34 GB (E4B) of every token's reads. So `int8`
+keeps it int4. On E4B's long prompt the same simulation gives 0.34 for int4, 0.0012 with every matrix int8, 0.0039
+with the head int4 (`int8`), and 0.026 for `mixed`.
+
+`mixed` also leaves the K/V-sharing layers' MLPs in int4, the largest block that costs little there (0.57 GB of
+E2B's reads). On the phone it reaches 0.032 on E2B's long prompt but 0.14 on the sky prompt, where int8 gets 0.012
+(E4B: 0.022 and 0.038, against 0.0033 and 0.0031). So `int8` is the one to use when the answers should be bf16's,
+and `mixed` sits between.
+
+**What it costs.** Prefill barely changes (2–4% more): `p_gemm_q8` unpacks int8 into the same fp32 tiles in shared
+memory as `p_gemm_q4`, and the matrix products, not the weight reads, set its time. Decode reads 1.8× the bytes and
+takes 1.5× as long, since the int8 matrix-vector products run at least as close to the memory's rate as int4's and
+the rest of a step (norms, attention, launches) does not grow. One series on a second Galaxy Z Fold of the same model
+and build (the first one's lab session ended), each run after 90 s idle (battery 27.1–29.4 °C at the start), 64
+tokens generated or up to the end of turn. On that freshly wiped phone the first batched prefill took 16.4 s instead of
+4.7, so each storage first ran once untimed.
+
+| Model, storage | `gemma4.bin` | The sky, a token at a time: prompt, decode | The sky, batched: prompt, decode | The post (960 tokens), batched: prompt, decode |
+|---|---|---|---|---|
+| E2B, int4 | 1.21 GB | 0.53 s, 28.0 ms/token | 0.31 s, 28.1 ms/token | 2.35 s, 30.3 ms/token |
+| E2B, **int8** | 2.15 GB | 0.76 s, **41.1 ms/token** | 0.31 s, 41.1 ms/token | **2.44 s**, 43.1 ms/token |
+| E2B, mixed | 1.59 GB | 0.62 s, 33.1 ms/token | 0.32 s, 32.6 ms/token | 2.37 s, 35.5 ms/token |
+| E4B, int4 | 2.47 GB | 1.03 s, 54.2 ms/token | 0.58 s, 54.6 ms/token | 4.68 s, 57.9 ms/token |
+| E4B, **int8** | 4.46 GB | 1.53 s, **83.0 ms/token** | 0.58 s, 82.9 ms/token | **4.76 s**, 87.4 ms/token |
+| E4B, mixed | 3.75 GB | 1.35 s, 73.0 ms/token | 0.59 s, 73.1 ms/token | 4.73 s, 76.2 ms/token |
+
+int4's numbers match the first phone's ([Speed](#speed)) within 1%. int8 decodes at 1.47× int4's time on E2B and
+1.53× on E4B; mixed at 1.18× and 1.35×.
+
+Where an E2B decode step goes, int4 against int8 (`step_profile.py --storage`: each launch submitted and waited for
+alone, so about 0.1 ms each of submission on top):
+
+| Launches | int4 | int8 |
+|---|---|---|
+| gate/up + GELU | 12.9 ms | 20.6 ms |
+| down | 9.3 ms | 12.7 ms |
+| q/k/v and o | 9.8 ms | 14.5 ms |
+| per-layer gate and projection | 7.5 ms | 7.0 ms |
+| head + soft-cap (int4 in both) | 4.5 ms | 4.5 ms |
+| norms, residual adds, attention, RoPE, the rest | 22.9 ms | 22.9 ms |
+| **all 425 launches, each alone** | **66.9 ms** | **82.2 ms** |
+
+The int8 gate/up launches read 1.07 GB in 20.6 ms, 52 GB/s even with each launch's submission counted.
 
 ## Speed
 
@@ -243,6 +363,8 @@ build/vla/venv/bin/python gemma4/export.py --model e2b        # build/gemma4/e2b
 build/vla/venv/bin/python gemma4/fetch.py --model e2b         # the Mac's sparse model.safetensors (4.6 GB of 10.2)
 cc -O2 -ffp-contract=off -o build/gemma4/bin/convert gemma4/convert.c
 (cd build/gemma4/e2b; ../bin/convert hf recipe.txt gemma4.bin)                       # for the reference
+build/vla/venv/bin/python gemma4/export.py --model e2b --storage int8   # build/gemma4/e2b/int8: recipe, manifest, RoPE
+(cd build/gemma4/e2b/int8; ../../bin/convert ../hf recipe.txt gemma4.bin)
 python3 android/build.py gemma4                               # build/android/gemma4: gemma4, gemma4_convert, runtime
 D=/data/local/tmp/gemma4
 adb push build/android/gemma4 $D/
@@ -250,9 +372,13 @@ adb push build/gemma4/e2b/manifest.txt build/gemma4/e2b/recipe.txt build/gemma4/
     build/gemma4/e2b/rope_full.f32 $D/e2b/
 adb shell "cd $D/e2b; curl -sSL -o model.safetensors https://huggingface.co/google/gemma-4-E2B-it/resolve/4adf15748de9e1a0097b6274cee9c15836c41c37/model.safetensors"
 adb shell "cd $D/e2b; $D/gemma4/gemma4_convert . recipe.txt gemma4.bin"
+adb push build/gemma4/e2b/int8/manifest.txt build/gemma4/e2b/int8/recipe.txt build/gemma4/e2b/int8/rope_sliding.f32 \
+    build/gemma4/e2b/int8/rope_full.f32 $D/e2b/int8/
+adb shell "cd $D/e2b/int8; $D/gemma4/gemma4_convert .. recipe.txt gemma4.bin"     # the same checkpoint, int8
 build/vla/venv/bin/python gemma4/run.py --model e2b --check --bf16                 # the sky prompt
+build/vla/venv/bin/python gemma4/run.py --model e2b --storage int8 --check --bf16
 build/vla/venv/bin/python gemma4/run.py --model e2b --prefill --check --prompt-file gemma4/prompts/long.txt
-build/vla/venv/bin/python gemma4/step_profile.py --model e2b [--prefill]          # time per kernel
+build/vla/venv/bin/python gemma4/step_profile.py --model e2b [--storage int8] [--prefill]   # time per kernel
 ```
 
 E4B is the same with `e4b` and its revision, `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c`. The phone needs no Python.
@@ -261,7 +387,8 @@ on the `adb shell` line dropped the lab's bridge. Then it runs one plain command
 
 ## Follow-ups
 
-- **Better int4.** GPTQ or AWQ-style rounding, or a scale per 32, on the same kernels: see the table above.
+- **Between int4 and int8.** int8 decodes at about 1.5× int4's time. A 5- or 6-bit storage, or GPTQ-style rounding
+  for the int4 MLPs of `mixed`, could land in between; [int8](#int8) shows where the error comes from.
 - **Prefill in fp16 on the matrix units.** The int4 projections are 80–86% of the prompt and run fp32 cooperative
   matrices at 1.8–2.1 TFLOP/s; the 840's fp16 product is about twice that (fp16 accumulators only).
 - **Fewer decode launches.** A quarter of a step's launches are single-workgroup norms and residual adds.
@@ -272,13 +399,14 @@ on the `adb shell` line dropped the lab's bridge. Then it runs one plain command
 
 | File | |
 |---|---|
-| `export.py` | `gemma4.bin`'s layout from `model.safetensors`' header: `recipe.txt`, `manifest.txt`, RoPE tables from transformers |
+| `export.py` | `gemma4.bin`'s layout from `model.safetensors`' header: `recipe.txt`, `manifest.txt`, RoPE tables from transformers; `--storage` int4, int8 or mixed |
 | `fetch.py` | the Mac's sparse copy of `model.safetensors`: the ranges `convert.c` and `reference.py` read, by HTTP range request |
-| `convert.c` | `model.safetensors` to `gemma4.bin` (int4 with searched scales, fp32 norms); macOS and Android, the same bytes |
-| `kernels/g4k.mojo` | decode kernels (int4 matrix-vector products, norms, RoPE, attention, per-layer inputs, soft-capped head, argmax) and prefill's row and attention kernels |
+| `convert.c` | `model.safetensors` to `gemma4.bin` (int4 with searched scales or int8, fp32 norms); macOS and Android, the same bytes |
+| `kernels/g4k.mojo` | decode kernels (int4 and int8 matrix-vector products, norms, RoPE, attention, per-layer inputs, soft-capped head, argmax) and prefill's row and attention kernels |
+| `kernels/p_gemm_q8.mojo` | prefill's int8 projections: `llama/kernels/prefill`'s `p_gemm_q4`, unpacking int8 |
 | `model.mojo` | the weights, the embedding rows from the checkpoint, `step()` (decode) and `prefill()` |
 | `gemma4.mojo` | the program: prompt, greedy decode, logits for checking, the phone's timings |
-| `reference.py` | transformers' Gemma 4 text layers one at a time, on the int4 or bf16 weights; `--selftest` against `Gemma4ForCausalLM` |
+| `reference.py` | transformers' Gemma 4 text layers one at a time, on a storage's int4/int8 weights or bf16; `--selftest` against `Gemma4ForCausalLM` |
 | `run.py` | tokenize (chat template), run on the phone, decode the text, check against `reference.py` |
 | `step_profile.py` | time per kernel of a decode step or a prefill (`VK_SERVER_PROFILE=2`) |
 | `prompts/long.txt` | the 960-token prompt: the start of this repo's Part 4 post, then "Summarize the text above in three sentences." |

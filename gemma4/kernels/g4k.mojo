@@ -4,7 +4,8 @@
 # or all positions, norms after attention and the MLP before each residual add, a GELU-tanh MLP, and the per-layer
 # input: a 256-wide gate from the residual stream times this layer's slice of the per-layer embedding, projected back,
 # normed and added; then the layer scalar. The int4 storage is llama/kernels' gemv_q4's: an fp16 scale per 64
-# weights of a row, 8 weights a uint32 as 4-bit two's complement, low nibble first.
+# weights of a row, 8 weights a uint32 as 4-bit two's complement, low nibble first. The matrix-vector kernels also
+# take int8 (their Q8 parameter): the same scales, 4 weights a uint32, low byte first.
 #
 # Every workgroup is one 64-lane subgroup unless noted. As in qwen3moe/kernels/moek.mojo: loops before a subgroup sum
 # run the same number of iterations in every lane (guards inside), and reductions after divergent work use shared
@@ -27,20 +28,26 @@ comptime PL = 256  # the per-layer input's width
 
 
 @always_inline
-def dot_q4_row(wq: U32, ws: F16, row: Int, cols: Int, x: F32, t: Int) -> Float32:
-    """Lane t's share of W[row] . x for an int4 row of `cols` weights, 64 lanes taking words t, t + 64, ... Every lane
-    runs the same number of iterations (a 256-wide row is 32 words: half the lanes skip the body)."""
-    var words = cols // 8
+def dot_row[Q8: Bool](wq: U32, ws: F16, row: Int, cols: Int, x: F32, t: Int) -> Float32:
+    """Lane t's share of W[row] . x for a row of `cols` weights, int4 (8 a uint32) or int8 (Q8: 4 a uint32, low byte
+    first), an fp16 scale per 64 of either; 64 lanes take words t, t + 64, ... Every lane runs the same number of
+    iterations (a 256-wide int4 row is 32 words: half the lanes skip the body)."""
+    comptime PER = 4 if Q8 else 8  # weights a word
+    var words = cols // PER
     var acc = Float32(0)
     for i in range((words + 63) // 64):
         var wi = i * 64 + t
         if wi < words:
             var word = wq[row * words + wi]
             var part = Float32(0)
-            comptime for j in range(8):
-                var q = Int32((word >> UInt32(4 * j)) & 15) ^ 8
-                part += Float32(q - 8) * x[wi * 8 + j]
-            acc += part * ws[row * (cols // G) + wi // (G // 8)].cast[DType.float32]()
+            comptime for j in range(PER):
+                comptime if Q8:
+                    var q = Int32((word >> UInt32(8 * j)) & 255) ^ 128
+                    part += Float32(q - 128) * x[wi * 4 + j]
+                else:
+                    var q = Int32((word >> UInt32(4 * j)) & 15) ^ 8
+                    part += Float32(q - 8) * x[wi * 8 + j]
+            acc += part * ws[row * (cols // G) + wi // (G // PER)].cast[DType.float32]()
     return acc
 
 
@@ -58,39 +65,39 @@ def softcap(x: Float32, cap: Float32) -> Float32:
     return cap * (1 - 2 / (exp(2 * x / cap) + 1))
 
 
-def gemv_q4(wq: U32, ws: F16, x: F32, y: F32, cols: Int32):
-    """y[r] = W[r] . x, int4 W: a workgroup a row."""
+def gemv[Q8: Bool](wq: U32, ws: F16, x: F32, y: F32, cols: Int32):
+    """y[r] = W[r] . x, int4 or int8 W: a workgroup a row."""
     var r = Int(block_idx.x)
     var t = Int(thread_idx.x)
-    var s = warp_sum(dot_q4_row(wq, ws, r, Int(cols), x, t))
+    var s = warp_sum(dot_row[Q8](wq, ws, r, Int(cols), x, t))
     if t == 0:
         y[r] = s
 
 
-def head_q4(wq: U32, ws: F16, x: F32, y: F32, cols: Int32, cap: Float32):
+def head[Q8: Bool](wq: U32, ws: F16, x: F32, y: F32, cols: Int32, cap: Float32):
     """The output head with Gemma's final soft-cap: y[r] = cap tanh(W[r] . x / cap)."""
     var r = Int(block_idx.x)
     var t = Int(thread_idx.x)
-    var s = warp_sum(dot_q4_row(wq, ws, r, Int(cols), x, t))
+    var s = warp_sum(dot_row[Q8](wq, ws, r, Int(cols), x, t))
     if t == 0:
         y[r] = softcap(s, cap)
 
 
-def gate_up_gelu(wq: U32, ws: F16, x: F32, a: F32, cols: Int32, f: Int32):
+def gate_up_gelu[Q8: Bool](wq: U32, ws: F16, x: F32, a: F32, cols: Int32, f: Int32):
     """a[j] = gelu_tanh(gate[j] . x) * (up[j] . x): gate row j and up row f + j of the fused matrix, workgroup j."""
     var j = Int(block_idx.x)
     var t = Int(thread_idx.x)
-    var g = warp_sum(dot_q4_row(wq, ws, j, Int(cols), x, t))
-    var u = warp_sum(dot_q4_row(wq, ws, Int(f) + j, Int(cols), x, t))
+    var g = warp_sum(dot_row[Q8](wq, ws, j, Int(cols), x, t))
+    var u = warp_sum(dot_row[Q8](wq, ws, Int(f) + j, Int(cols), x, t))
     if t == 0:
         a[j] = gelu_tanh(g) * u
 
 
-def ple_gate(wq: U32, ws: F16, x: F32, ple: F32, off: Int32, a: F32, cols: Int32):
+def ple_gate[Q8: Bool](wq: U32, ws: F16, x: F32, ple: F32, off: Int32, a: F32, cols: Int32):
     """a[r] = gelu_tanh(per_layer_input_gate[r] . x) * ple[off + r], r < 256: this layer's per-layer input gate."""
     var r = Int(block_idx.x)
     var t = Int(thread_idx.x)
-    var s = warp_sum(dot_q4_row(wq, ws, r, Int(cols), x, t))
+    var s = warp_sum(dot_row[Q8](wq, ws, r, Int(cols), x, t))
     if t == 0:
         a[r] = gelu_tanh(s) * ple[Int(off) + r]
 

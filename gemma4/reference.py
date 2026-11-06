@@ -1,8 +1,9 @@
 """The reference for the GPU: transformers' own Gemma 4 text model, run a decoder layer at a time in fp32 on the Mac.
 
-By default it runs the GPU's weights: every int4 matrix of gemma4.bin dequantized, the rest (norms, layer scalars,
-the bf16 embedding rows) as the GPU has them. With --bf16 it runs the checkpoint's original bf16 weights instead
-(widened to fp32), for the check against the unquantized model. Neither needs the whole model in memory: each layer
+By default it runs the GPU's weights: every int4 (or int8) matrix of gemma4.bin dequantized, the rest (norms, layer
+scalars, the bf16 embedding rows) as the GPU has them; --storage picks export.py's storage (which gemma4.bin). With
+--bf16 it runs the checkpoint's original bf16 weights instead (widened to fp32), for the check against the
+unquantized model. Neither needs the whole model in memory: each layer
 is built from transformers' Gemma4TextDecoderLayer, given its weights, run over the whole token list and dropped.
 The K/V that later layers share stays in the shared_kv_states dict that transformers' layers fill and read.
 
@@ -12,6 +13,7 @@ masking_utils, every Gemma4TextDecoderLayer, the final Gemma4RMSNorm. The head i
 with Gemma 4's final logit soft-cap, as Gemma4ForCausalLM computes it.
 
   build/vla/venv/bin/python gemma4/reference.py --model e2b --ids 2 105 ... --start 18 --out logits.npy [--bf16]
+                                              [--storage int8]
   build/vla/venv/bin/python gemma4/reference.py --selftest     # this driver against Gemma4ForCausalLM, tiny config
 """
 
@@ -26,7 +28,7 @@ import torch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "gemma4"))
-from export import MODELS  # noqa: E402
+from export import MODELS, storage_dir  # noqa: E402
 from fetch import Sparse  # noqa: E402
 
 P = "model.language_model."
@@ -90,16 +92,18 @@ def forward(tc, get, rows, ids, start, log=print):
 
 
 class Gemma4Weights:
-    """A checkpoint's language-model tensors for forward(): the GPU's (int4 dequantized from gemma4.bin) or bf16."""
+    """A checkpoint's language-model tensors for forward(): the GPU's (int4 or int8, dequantized from gemma4.bin) or
+    bf16."""
 
-    def __init__(self, model, bf16, binpath=None, keep=()):
-        self.keep = set(keep)  # int4 groups read as bf16 instead (an ablation): head, ple, attn, mlp
+    def __init__(self, model, bf16, binpath=None, keep=(), storage="int4"):
+        self.keep = set(keep)  # quantized groups read as bf16 instead (an ablation): head, ple, attn, mlp
         self.dir = ROOT / "build/gemma4" / model
+        self.sdir = storage_dir(model, storage)  # manifest.txt and gemma4.bin
         self.sparse = Sparse(model)
         self.header = json.loads((self.dir / "header.json").read_text())
         self.bf16 = bf16
         self.tensors, self.tables, self.layers = {}, {}, {}
-        lines = (self.dir / "manifest.txt").read_text().splitlines()
+        lines = (self.sdir / "manifest.txt").read_text().splitlines()
         f = lines[0].split()
         self.cfg = {f[i]: f[i + 1] for i in range(2, len(f), 2)}
         for line in lines[1:]:
@@ -112,7 +116,7 @@ class Gemma4Weights:
                 self.tensors[f[0]] = (int(f[1]), int(f[2]), f[3], [int(s) for s in f[4].split("x")])
         self.bin = None
         if not bf16:
-            self.bin = np.memmap(binpath or self.dir / "gemma4.bin", np.uint8, "r")
+            self.bin = np.memmap(binpath or self.sdir / "gemma4.bin", np.uint8, "r")
         self.H, self.KVH = int(self.cfg["H"]), int(self.cfg["KVH"])
 
     def ckpt(self, name):
@@ -123,14 +127,18 @@ class Gemma4Weights:
         return torch.from_numpy((raw.astype(np.uint32) << 16).view(np.float32).reshape(e["shape"]).copy())
 
     def q4(self, name):
-        off, n, _, (rows, words) = self.tensors[name + ".q"]
-        q = np.frombuffer(self.bin, np.uint32, rows * words, off).reshape(rows, words)
-        soff, sn, _, (_, groups) = self.tensors[name + ".s"]
+        """The int4 or int8 matrix `name` of gemma4.bin, dequantized (fp32)."""
+        off, n, dtype, shape = self.tensors[name + ".q"]
+        soff, sn, _, (rows, groups) = self.tensors[name + ".s"]
         s = np.frombuffer(self.bin, np.float16, rows * groups, soff).reshape(rows, groups).astype(np.float32)
-        nib = ((q[:, :, None] >> (4 * np.arange(8, dtype=np.uint32))) & 15).astype(np.int32)
-        w = ((nib ^ 8) - 8).astype(np.float32).reshape(rows, words * 8)
-        w = (w.reshape(rows, groups, -1) * s[:, :, None]).reshape(rows, words * 8)
-        return torch.from_numpy(w)
+        if dtype == "i8":
+            w = np.frombuffer(self.bin, np.int8, rows * shape[1], off).astype(np.float32).reshape(rows, groups, -1)
+        else:
+            words = shape[1]
+            q = np.frombuffer(self.bin, np.uint32, rows * words, off).reshape(rows, words)
+            nib = ((q[:, :, None] >> (4 * np.arange(8, dtype=np.uint32))) & 15).astype(np.int32)
+            w = ((nib ^ 8) - 8).astype(np.float32).reshape(rows, groups, -1)
+        return torch.from_numpy((w * s[:, :, None]).reshape(rows, -1))
 
     def group(self, name):
         if name == "embed_tokens.weight":
@@ -223,7 +231,8 @@ def main():
     ap.add_argument("--start", type=int, default=0, help="first position whose logits are kept")
     ap.add_argument("--bf16", action="store_true", help="the checkpoint's bf16 weights instead of the GPU's int4")
     ap.add_argument("--keep", default="", help="int4 groups to read as bf16 instead: head,ple,attn,mlp")
-    ap.add_argument("--bin", type=pathlib.Path, help="gemma4.bin (default build/gemma4/<model>/gemma4.bin)")
+    ap.add_argument("--storage", default="int4", help="export.py's storage: int4, int8, mixed")
+    ap.add_argument("--bin", type=pathlib.Path, help="gemma4.bin (default: the storage's)")
     ap.add_argument("--out", type=pathlib.Path)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -233,7 +242,7 @@ def main():
     from transformers import AutoConfig
 
     ids = a.ids if a.ids else [int(t) for t in a.ids_file.read_text().split()]
-    w = Gemma4Weights(a.model, a.bf16, a.bin, [k for k in a.keep.split(",") if k])
+    w = Gemma4Weights(a.model, a.bf16, a.bin, [k for k in a.keep.split(",") if k], a.storage)
     tc = AutoConfig.from_pretrained(w.dir).get_text_config()
     torch.set_num_threads(8)
     logits = forward(tc, w.get, w.rows, ids, a.start)

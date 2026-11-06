@@ -117,7 +117,7 @@ def recipe_ranges(recipe):
         f = line.split()
         if f[0] == "f32":
             out.append((int(f[2]), int(f[3]) * 2))
-        elif f[0] == "q4":
+        elif f[0] in ("q4", "q8"):
             out.append((int(f[3]), int(f[4]) * int(f[5]) * 2))
     return out
 

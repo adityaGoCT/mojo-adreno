@@ -1,12 +1,13 @@
 """Gemma 4 E2B / E4B on the phone's Adreno: tokenize a chat prompt, run gemma4 (the Mojo program, on the phone), print
 the text and the phone's timings, and check it against reference.py on the Mac (transformers' Gemma 4 layers, a layer at
-a time, on the same int4 weights; --bf16 also on the checkpoint's own bf16 weights).
+a time, on the same int4 or int8 weights; --bf16 also on the checkpoint's own bf16 weights).
 
-  build/vla/venv/bin/python gemma4/run.py --model e2b [--prompt TEXT | --prompt-file F] [--tokens 48] [--prefill]
-                                          [--check] [--bf16]
+  build/vla/venv/bin/python gemma4/run.py --model e2b [--storage int8] [--prompt TEXT | --prompt-file F] [--tokens 48]
+                                          [--prefill] [--check] [--bf16]
 
 The phone (ANDROID_SERIAL) holds /data/local/tmp/gemma4: gemma4/ (android/build.py gemma4's directory) and <model>/:
 model.safetensors (downloaded there), gemma4.bin (gemma4_convert's), manifest.txt and the rope tables (export.py's).
+Another storage's gemma4.bin, manifest and rope tables are in <model>/<storage>/ (int8, mixed).
 --check pulls the logits the phone wrote after the prompt and after each generated token, and compares them with
 the reference's at the same positions: the largest difference, and whether each generated token is the reference's
 argmax. --bf16 runs the original bf16 weights on the same tokens (teacher-forced) and counts where their greedy choice
@@ -24,7 +25,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "gemma4"))
-from export import MODELS  # noqa: E402
+from export import MODELS, STORAGES, storage_dir  # noqa: E402
 
 PHONE = "/data/local/tmp/gemma4"
 PY = str(ROOT / "build/vla/venv/bin/python")
@@ -49,6 +50,7 @@ def tokenize(model, text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=MODELS, default="e2b")
+    ap.add_argument("--storage", choices=STORAGES, default="int4", help="export.py's storage: which gemma4.bin")
     ap.add_argument("--prompt", default="Explain in two sentences why the sky is blue.")
     ap.add_argument("--prompt-file", type=pathlib.Path)
     ap.add_argument("--tokens", type=int, default=48)
@@ -63,7 +65,9 @@ def main():
     P = len(ids)
     print(f"prompt: {P} tokens ({text[:60]!r}{'...' if len(text) > 60 else ''})")
 
-    d = f"{PHONE}/{a.model}"
+    d = f"{PHONE}/{a.model}" + ("" if a.storage == "int4" else f"/{a.storage}")  # the storage's files
+    ckpt = f"{PHONE}/{a.model}/model.safetensors"
+    sdir = storage_dir(a.model, a.storage)
     env = [f"MODULAR_DRIVER_PLUGINS=vulkan@{PHONE}/gemma4/libM_driver_vulkan.so"]
     if not a.no_eos:
         env.append("GEMMA4_EOS=1,106,50")
@@ -76,10 +80,10 @@ def main():
         env.append("GEMMA4_PREFILL=1")
     # one plain command per adb shell line (the lab's bridge drops lines with && or a bare &, and a long prompt's
     # ids on the line dropped it too: they go in a file)
-    idfile = ROOT / "build/gemma4" / a.model / "prompt.ids"
+    idfile = sdir / "prompt.ids"
     idfile.write_text(" ".join(map(str, ids)) + "\n")
     adb("push", str(idfile), f"{d}/prompt.ids")
-    adb("shell", f"cd {PHONE}/gemma4; {' '.join(env)} ./gemma4 {d} {d}/model.safetensors {a.tokens} @{d}/prompt.ids "
+    adb("shell", f"cd {PHONE}/gemma4; {' '.join(env)} ./gemma4 {d} {ckpt} {a.tokens} @{d}/prompt.ids "
                  f"> {d}/run.log 2>&1; echo exit $? >> {d}/run.log")
     log = adb("shell", f"cat {d}/run.log")
     for line in log.splitlines():
@@ -92,7 +96,7 @@ def main():
     if not (a.check or a.bf16):
         return
 
-    local = ROOT / "build/gemma4" / a.model / "phone_logits.f32"
+    local = sdir / "phone_logits.f32"
     adb("pull", f"{d}/logits.f32", str(local))
     V = 262144
     phone = np.fromfile(local, np.float32).reshape(-1, V)
@@ -101,7 +105,7 @@ def main():
     assert phone.shape[0] == len(rows), (phone.shape, len(rows))
     seq = ids + gen[:n - 1]
     (local.parent / "check.ids").write_text(" ".join(map(str, seq)))
-    runs = [("int4", [])] + ([("bf16", ["--bf16"])] if a.bf16 else [])
+    runs = [(a.storage, ["--storage", a.storage])] + ([("bf16", ["--bf16"])] if a.bf16 else [])
     for name, extra in runs:
         out = local.parent / f"ref_{name}.npy"
         t0 = time.time()
@@ -114,19 +118,19 @@ def main():
         assert ref.shape == (n, V), (ref.shape, n)
         am = ref.argmax(-1)
         same = int((am == np.array(gen[:n])).sum())
-        if name == "int4":
+        if name != "bf16":
             err = np.abs(ref[rows] - phone).max(-1)
-            print(f"int4: phone logits within {err.max():.2e} of the reference's at {len(rows)} positions (all "
+            print(f"{name}: phone logits within {err.max():.2e} of the reference's at {len(rows)} positions (all "
                   f"{V} logits; range {ref[rows].min():.1f} .. {ref[rows].max():.1f}; median position "
                   f"{np.median(err):.2e}), reference in {time.time() - t0:.0f} s")
-            print(f"greedy: {same} of {n} phone tokens are the int4 reference's argmax")
+            print(f"greedy: {same} of {n} phone tokens are the {name} reference's argmax")
             bad = [i for i in range(n) if am[i] != gen[i]]
             for i in bad[:5]:
                 top = np.argsort(-ref[i])[:2]
                 print(f"  position {P - 1 + i}: phone {gen[i]}, reference {am[i]} (reference top-2 margin "
                       f"{ref[i, top[0]] - ref[i, top[1]]:.4f})")
         else:
-            q = np.load(local.parent / "ref_int4.npy")
+            q = np.load(local.parent / f"ref_{a.storage}.npy")
 
             def logp(z):
                 z = z - z.max(-1, keepdims=True)
@@ -136,7 +140,8 @@ def main():
             first = next((i for i in range(n) if am[i] != gen[i]), None)
             print(f"bf16: the original model's greedy choice agrees with the phone's token at {same} of {n} positions "
                   f"(teacher-forced on the phone's tokens; first difference: "
-                  f"{'none' if first is None else f'position {P - 1 + first}'}); mean KL(bf16 || int4) {kl.mean():.4f}")
+                  f"{'none' if first is None else f'position {P - 1 + first}'}); "
+                  f"mean KL(bf16 || {a.storage}) {kl.mean():.4f}")
 
 if __name__ == "__main__":
     main()

@@ -3,12 +3,20 @@ model.mojo, plus the RoPE tables. Only model.safetensors' header is read (by HTT
 the checkpoint itself and convert.c writes gemma4.bin from it there. fetch.py gives the Mac the same file's needed
 byte ranges (a sparse copy), so convert.c writes the same gemma4.bin here for the reference.
 
-  build/vla/venv/bin/python gemma4/export.py --model e2b      # or e4b; writes build/gemma4/<model>/
+  build/vla/venv/bin/python gemma4/export.py --model e2b [--storage int8]   # or e4b; writes build/gemma4/<model>/
+                                                                            # (int4) or build/gemma4/<model>/<storage>/
+
+--storage picks each matrix's format (STORAGES): int4 everywhere (the default), int8 everywhere but the head, or
+"mixed": int4 for the head and for the MLPs of the layers that reuse K/V, int8 for the rest. int8 is symmetric too,
+an fp16 scale per 64 weights of a row (the fp16 of max |w| / 127), 4 weights a uint32, low byte first: plain int8
+rows (g4k's gemv[True], p_gemm_q8).
 
 gemma4.bin, every tensor aligned to 4096 bytes (int4 as llama/kernels' gemv_q4 reads it: symmetric, an fp16 scale per
 64 weights of a row, 8 weights a uint32 as 4-bit two's complement, low nibble first; each scale is the one of
 max |w| / d, d in 6.5 .. 9, with the least squared error, as qwen3moe/convert.c picks it):
   head.q / .s             int4 [V, D]              the output head: the tied token embedding, quantized
+  (each <name>.q below is int4 (u32 [rows, cols / 8]) or int8 (i8 [rows, cols]), as the storage picks; .s: fp16
+  [rows, cols / 64])
   final_norm              fp32 [D]
   ple_proj.q / .s         int4 [L * 256, D]        per_layer_model_projection
   ple_norm                fp32 [256]               per_layer_projection_norm
@@ -40,9 +48,23 @@ MODELS = {  # the instruction-tuned checkpoints, pinned
 }
 FILES = ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"]
 P = "model.language_model."
-G4 = 64
+G4 = 64  # weights per scale, int4 and int8
 ALIGN = 4096
+# per storage: which matrices are int8 (the rest int4). group: head, ple (per-layer input matrices), attn, mlp;
+# shared: the matrix is in a layer that reuses another layer's K/V.
+STORAGES = {
+    "int4": lambda group, shared: False,
+    "int8": lambda group, shared: group != "head",
+    "mixed": lambda group, shared: group in ("attn", "ple") or (group == "mlp" and not shared),
+}
 CAP = 2048  # positions of the RoPE tables (and the program's KV caches)
+
+
+def storage_dir(model, storage):
+    """Where a storage's recipe, manifest, RoPE tables and gemma4.bin live: build/gemma4/<model> for int4 (the first
+    layout), build/gemma4/<model>/<storage> otherwise. The checkpoint's files stay in build/gemma4/<model>."""
+    d = ROOT / "build/gemma4" / model
+    return d if storage == "int4" else d / storage
 
 
 def url(repo, rev, name):
@@ -63,8 +85,8 @@ def header(repo, rev, path):
 
 
 class Layout:
-    def __init__(self, h):
-        self.h = h
+    def __init__(self, h, int8=STORAGES["int4"]):
+        self.h, self.int8 = h, int8
         self.recipe, self.manifest, self.pos = ["src model.safetensors"], [], 0
 
     def src(self, tensor):
@@ -86,17 +108,22 @@ class Layout:
         out = self.alloc(name, "f32", shape, n * 4)
         self.recipe.append(f"f32 {out} {off} {n}")
 
-    def int4(self, name, tensors, rows_each, cols):
-        """bf16 matrices [rows, cols], stacked by rows, as one int4 matrix (name.q, name.s)."""
+    def quant(self, name, tensors, rows_each, cols, group, shared=False):
+        """bf16 matrices [rows, cols], stacked by rows, as one int4 or int8 matrix (name.q, name.s)."""
         rows = sum(rows_each)
         assert cols % G4 == 0, (name, cols)
-        oq = self.alloc(name + ".q", "u32", [rows, cols // 8], rows * cols // 2)
+        if self.int8(group, shared):
+            kind, oq = "q8", self.alloc(name + ".q", "i8", [rows, cols], rows * cols)
+            qrow = cols
+        else:
+            kind, oq = "q4", self.alloc(name + ".q", "u32", [rows, cols // 8], rows * cols // 2)
+            qrow = cols // 2
         os_ = self.alloc(name + ".s", "f16", [rows, cols // G4], rows * cols // G4 * 2)
         r0 = 0
         for t, r in zip(tensors, rows_each):
             shape, off = self.src(t)
             assert shape == [r, cols], (t, shape, r, cols)
-            self.recipe.append(f"q4 {oq + r0 * cols // 2} {os_ + r0 * cols // G4 * 2} {off} {r} {cols} {G4}")
+            self.recipe.append(f"{kind} {oq + r0 * qrow} {os_ + r0 * cols // G4 * 2} {off} {r} {cols} {G4}")
             r0 += r
 
     def table(self, name, tensor):
@@ -149,28 +176,29 @@ def rope_tables(cfg_path, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=MODELS, default="e2b")
-    ap.add_argument("--out", type=pathlib.Path)
+    ap.add_argument("--storage", choices=STORAGES, default="int4")
     a = ap.parse_args()
     repo, rev = MODELS[a.model]
-    out = a.out or ROOT / "build/gemma4" / a.model
+    mdir = ROOT / "build/gemma4" / a.model
+    out = storage_dir(a.model, a.storage)
     out.mkdir(parents=True, exist_ok=True)
     for f in FILES:
-        if not (out / f).exists():
-            (out / f).write_bytes(urllib.request.urlopen(url(repo, rev, f)).read())
-    tc = json.loads((out / "config.json").read_text())["text_config"]
-    h = header(repo, rev, out / "header.json")
+        if not (mdir / f).exists():
+            (mdir / f).write_bytes(urllib.request.urlopen(url(repo, rev, f)).read())
+    tc = json.loads((mdir / "config.json").read_text())["text_config"]
+    h = header(repo, rev, mdir / "header.json")
     D, L, H, KVH = tc["hidden_size"], tc["num_hidden_layers"], tc["num_attention_heads"], tc["num_key_value_heads"]
     V, PL = tc["vocab_size"], tc["hidden_size_per_layer_input"]
     assert not tc["attention_k_eq_v"] and not tc["enable_moe_block"] and not tc["attention_bias"]
     assert tc["hidden_activation"] == "gelu_pytorch_tanh" and tc["tie_word_embeddings"]
     plan = layer_plan(tc)
 
-    lay = Layout(h)
+    lay = Layout(h, STORAGES[a.storage])
     lay.table("embed", P + "embed_tokens.weight")
     lay.table("ple", P + "embed_tokens_per_layer.weight")
-    lay.int4("head", [P + "embed_tokens.weight"], [V], D)
+    lay.quant("head", [P + "embed_tokens.weight"], [V], D, "head")
     lay.f32("final_norm", P + "norm.weight")
-    lay.int4("ple_proj", [P + "per_layer_model_projection.weight"], [L * PL], D)
+    lay.quant("ple_proj", [P + "per_layer_model_projection.weight"], [L * PL], D, "ple")
     lay.f32("ple_norm", P + "per_layer_projection_norm.weight")
     for i, (sliding, f, src, hd) in enumerate(plan):
         p = f"{P}layers.{i}."
@@ -178,16 +206,18 @@ def main():
                         ("pre_ff_norm", "pre_feedforward_layernorm"), ("post_ff_norm", "post_feedforward_layernorm"),
                         ("ple_norm", "post_per_layer_input_norm"), ("q_norm", "self_attn.q_norm")):
             lay.f32(f"l{i}.{name}", p + t + ".weight")
-        if src == i:
+        shared = src != i
+        if not shared:
             lay.f32(f"l{i}.k_norm", p + "self_attn.k_norm.weight")
-            lay.int4(f"l{i}.qkv", [p + f"self_attn.{w}_proj.weight" for w in "qkv"], [H * hd, KVH * hd, KVH * hd], D)
+            lay.quant(f"l{i}.qkv", [p + f"self_attn.{w}_proj.weight" for w in "qkv"], [H * hd, KVH * hd, KVH * hd], D,
+                      "attn")
         else:
-            lay.int4(f"l{i}.qkv", [p + "self_attn.q_proj.weight"], [H * hd], D)
-        lay.int4(f"l{i}.o", [p + "self_attn.o_proj.weight"], [D], H * hd)
-        lay.int4(f"l{i}.gu", [p + "mlp.gate_proj.weight", p + "mlp.up_proj.weight"], [f, f], D)
-        lay.int4(f"l{i}.down", [p + "mlp.down_proj.weight"], [D], f)
-        lay.int4(f"l{i}.pg", [p + "per_layer_input_gate.weight"], [PL], D)
-        lay.int4(f"l{i}.pp", [p + "per_layer_projection.weight"], [D], PL)
+            lay.quant(f"l{i}.qkv", [p + "self_attn.q_proj.weight"], [H * hd], D, "attn")
+        lay.quant(f"l{i}.o", [p + "self_attn.o_proj.weight"], [D], H * hd, "attn")
+        lay.quant(f"l{i}.gu", [p + "mlp.gate_proj.weight", p + "mlp.up_proj.weight"], [f, f], D, "mlp", shared)
+        lay.quant(f"l{i}.down", [p + "mlp.down_proj.weight"], [D], f, "mlp", shared)
+        lay.quant(f"l{i}.pg", [p + "per_layer_input_gate.weight"], [PL], D, "ple")
+        lay.quant(f"l{i}.pp", [p + "per_layer_projection.weight"], [D], PL, "ple")
         lay.f32(f"l{i}.scalar", p + "layer_scalar")
 
     head = (f"gemma4 {repo}@{rev[:8]} D {D} L {L} H {H} KVH {KVH} HD {tc['head_dim']} GHD {tc['global_head_dim']} "
@@ -195,9 +225,9 @@ def main():
     layers = [f"layer {i} {'sliding' if s else 'full'} {f} {src} {hd}" for i, (s, f, src, hd) in enumerate(plan)]
     (out / "recipe.txt").write_text(f"size {lay.pos}\n" + "\n".join(lay.recipe) + "\n")
     (out / "manifest.txt").write_text(head + "\n" + "\n".join(layers + lay.manifest) + "\n")
-    rope_tables(out, out)
+    rope_tables(mdir, out)
     gpu = sum(int(m.split()[2]) for m in lay.manifest if not m.startswith("table"))
-    print(f"{a.model}: gemma4.bin {lay.pos / 1e9:.3f} GB ({gpu / 1e9:.3f} GB of tensors), "
+    print(f"{a.model} {a.storage}: gemma4.bin {lay.pos / 1e9:.3f} GB ({gpu / 1e9:.3f} GB of tensors), "
           f"{len(lay.manifest)} manifest lines, {len(lay.recipe)} recipe lines")
 
 
