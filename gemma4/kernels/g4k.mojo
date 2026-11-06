@@ -46,7 +46,8 @@ def dot_q4_row(wq: U32, ws: F16, row: Int, cols: Int, x: F32, t: Int) -> Float32
 
 @always_inline
 def gelu_tanh(x: Float32) -> Float32:
-    """GELU, tanh form (gelu_pytorch_tanh): 0.5 x (1 + tanh(u)) = x / (1 + exp(-2u)), u = sqrt(2/pi) (x + 0.044715 x^3)."""
+    """GELU, tanh form (gelu_pytorch_tanh): 0.5 x (1 + tanh(u)) = x / (1 + exp(-2u)),
+    u = sqrt(2/pi) (x + 0.044715 x^3)."""
     var u = Float32(0.7978845608028654) * (x + Float32(0.044715) * x * x * x)
     return x / (1 + exp(-2 * u))
 
@@ -194,7 +195,8 @@ def qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, pos: 
 
 def attn_scores[NQ: Int](q: F32, kc: F32, y: F32, pos: Int32, first: Int32, kvh: Int32, hd: Int32, capacity: Int32):
     """q . k (scale 1) for cached positions first .. pos: a thread per KV head g and position t computes the NQ query
-    heads g NQ .. g NQ + NQ - 1 that share it, so each cached K row is read once. Head h's scores at y[h capacity + t]."""
+    heads g NQ .. g NQ + NQ - 1 that share it, so each cached K row is read once. Head h's scores at
+    y[h capacity + t]."""
     var i = global_idx.x
     var length = Int(pos) - Int(first) + 1
     var n = Int(hd)

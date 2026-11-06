@@ -1,11 +1,12 @@
-"""Where a decode step's (or, with --prefill, a batched prompt's) time goes on the phone: gemma4 run with VK_SERVER_PROFILE=2, which makes the driver plugin
-submit each launch alone and wait for it ("1 commands in 1 submissions: recorded over .. ms, then waited X ms"). The
-last decode step's launches are matched, in order, to model.mojo's step(): 3 launches, 12 per layer, then the head
-and argmax. Each launch waited for alone pays a submission's latency too, so the sum exceeds a normal step's time.
+"""Where a decode step's (or, with --prefill, a batched prompt's) time goes on the phone: gemma4 run with
+VK_SERVER_PROFILE=2, which makes the driver plugin submit each launch alone and wait for it ("1 commands in 1
+submissions: recorded over .. ms, then waited X ms"). The last decode step's launches are matched, in order, to
+model.mojo's step(): 3 launches, 12 per layer, then the head and argmax. Each launch waited for alone pays a
+submission's latency too, so the sum exceeds a normal step's time.
 
   build/vla/venv/bin/python gemma4/step_profile.py --model e2b [--tokens 4] [--prefill]
 
-The prompt is run.py's last (prompt.ids on the phone).
+The decode profile runs after run.py's default prompt (batched), the prefill profile on prompts/long.txt.
 """
 
 import argparse
@@ -34,9 +35,18 @@ def main():
     ap.add_argument("--prefill", action="store_true")
     a = ap.parse_args()
     d = f"{PHONE}/{a.model}"
+    sys.path.insert(0, str(ROOT / "gemma4"))
+    from run import tokenize
+    sky = "Explain in two sentences why the sky is blue."
+    text = (ROOT / "gemma4/prompts/long.txt").read_text() if a.prefill else sky
+    ids = tokenize(a.model, text)[1]
+    local = ROOT / "build/gemma4" / a.model / "prof.ids"
+    local.write_text(" ".join(map(str, ids)) + "\n")
+    subprocess.run(["adb", "push", str(local), f"{d}/prof.ids"], check=True, capture_output=True)
     L = int(re.search(r" L (\d+) ", (ROOT / "build/gemma4" / a.model / "manifest.txt").read_text()).group(1))
-    subprocess.run(["adb", "shell", f"cd {PHONE}/gemma4; {'GEMMA4_PREFILL=1 ' if a.prefill else ''}VK_SERVER_PROFILE=2 MODULAR_DRIVER_PLUGINS=vulkan@{PHONE}/gemma4/"
-                    f"libM_driver_vulkan.so ./gemma4 {d} {d}/model.safetensors {a.tokens} @{d}/prompt.ids > {d}/prof.log "
+    subprocess.run(["adb", "shell", f"cd {PHONE}/gemma4; GEMMA4_PREFILL=1 VK_SERVER_PROFILE=2 "
+                    f"MODULAR_DRIVER_PLUGINS=vulkan@{PHONE}/gemma4/libM_driver_vulkan.so ./gemma4 {d} "
+                    f"{d}/model.safetensors {a.tokens} @{d}/prof.ids > {d}/prof.log "
                     f"2>&1; echo exit $? >> {d}/prof.log"], check=True)
     log = subprocess.run(["adb", "shell", f"cat {d}/prof.log"], capture_output=True, text=True, check=True).stdout
     if "exit 0" not in log:

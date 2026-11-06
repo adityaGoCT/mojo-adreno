@@ -2,9 +2,8 @@
 that something here reads (by HTTP range request from the pinned revision). The disk keeps what was fetched; the
 holes cost nothing. The phone downloads the whole file instead.
 
-  build/vla/venv/bin/python gemma4/fetch.py --model e2b            # every range recipe.txt reads (convert.c's input)
-  build/vla/venv/bin/python gemma4/fetch.py --model e2b --bf16     # and the layers' bf16 weights reference.py --bf16 reads
-                                                                   # (the same ranges: convert.c reads all of them)
+  build/vla/venv/bin/python gemma4/fetch.py --model e2b      # every range recipe.txt reads (convert.c's input), which
+                                                             # are also every bf16 weight reference.py --bf16 reads
 
 Rows of the two embedding tables (`table` lines of the manifest) are fetched when reference.py asks for them.
 Fetched ranges are listed in model.safetensors.ranges, so a run picks up where the last one stopped.
@@ -36,7 +35,8 @@ class Sparse:
         self.path = self.dir / "hf/model.safetensors"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         h = json.loads((self.dir / "header.json").read_text())
-        self.size = h["__base__"] + max(v["data_offsets"][1] for k, v in h.items() if isinstance(v, dict) and "data_offsets" in v)
+        ends = [v["data_offsets"][1] for v in h.values() if isinstance(v, dict) and "data_offsets" in v]
+        self.size = h["__base__"] + max(ends)
         self.ranges_path = self.path.with_suffix(".safetensors.ranges")
         self.lock = threading.Lock()
         if not self.path.exists():

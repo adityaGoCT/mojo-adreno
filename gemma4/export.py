@@ -53,8 +53,10 @@ def header(repo, rev, path):
     """model.safetensors' header (tensor -> dtype, shape, absolute offset), cached."""
     if not path.exists():
         u = url(repo, rev, "model.safetensors")
-        n = struct.unpack("<Q", urllib.request.urlopen(urllib.request.Request(u, headers={"Range": "bytes=0-7"})).read())[0]
-        h = json.loads(urllib.request.urlopen(urllib.request.Request(u, headers={"Range": f"bytes=8-{8 + n - 1}"})).read())
+        def get(r):
+            return urllib.request.urlopen(urllib.request.Request(u, headers={"Range": f"bytes={r}"})).read()
+        n = struct.unpack("<Q", get("0-7"))[0]
+        h = json.loads(get(f"8-{8 + n - 1}"))
         h["__base__"] = 8 + n
         path.write_text(json.dumps(h))
     return json.loads(path.read_text())

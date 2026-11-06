@@ -64,7 +64,8 @@ def forward(tc, get, rows, ids, start, log=print):
         rot = Gemma4TextRotaryEmbedding(tc)
         pe = {t: rot(x, pos, t) for t in set(tc.layer_types)}
         kw = dict(config=tc, inputs_embeds=x, attention_mask=None, past_key_values=None, position_ids=pos)
-        masks = {"full_attention": create_causal_mask(**kw), "sliding_attention": create_sliding_window_causal_mask(**kw)}
+        masks = {"full_attention": create_causal_mask(**kw),
+                 "sliding_attention": create_sliding_window_causal_mask(**kw)}
         shared = {}
         h = x
         t0 = time.time()
@@ -205,8 +206,9 @@ def selftest():
     with torch.no_grad():
         want = m(ids).logits[0]
     sd = m.state_dict()
-    got = forward(tc, lambda n: sd["model." + n], lambda t, u: sd["model.embed_tokens" + ("_per_layer" if t == "ple" else "") + ".weight"][u],
-                  ids[0].tolist(), 0, log=lambda s: None)
+    def rows(table, u):
+        return sd["model.embed_tokens" + ("_per_layer" if table == "ple" else "") + ".weight"][u]
+    got = forward(tc, lambda n: sd["model." + n], rows, ids[0].tolist(), 0, log=lambda s: None)
     err = (got - want).abs().max().item()
     print(f"selftest: max |driver - Gemma4ForCausalLM| = {err:.2e} over {tuple(want.shape)} logits (range "
           f"{want.min().item():.2f} .. {want.max().item():.2f})")
