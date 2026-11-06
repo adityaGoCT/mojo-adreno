@@ -9,6 +9,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py bonsai      # build/android/bonsai/: the Android port's Bonsai model.mojo,
                                        # and bonsai_convert for its weights
   python3 android/build.py vla         # build/android/smolvla/ and pi0/: the robot models (SmolVLA, pi0) on vla/
+  python3 android/build.py gemma4      # build/android/gemma4/: gemma4/gemma4.mojo (Gemma 4 E2B / E4B), gemma4_convert
 
 Each program's directory holds everything it needs on the phone: the executable, MAX's runtime
 libraries, NDK libc++ and the driver plugin. Its DeviceContext loads the plugin named in
@@ -167,6 +168,18 @@ def vla():
         link(out, name, [out / f"{name}.o"])
 
 
+def gemma4():
+    """gemma4/gemma4.mojo: gemma4/model.mojo's forward pass on gemma4/kernels (one program for E2B and E4B); and
+    gemma4_convert (gemma4/convert.c), which writes gemma4.bin on the phone from the downloaded checkpoint."""
+    out = BUILD / "gemma4"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "gemma4/gemma4.mojo", out / "gemma4.o",
+                includes=[ROOT / "gemma4", ROOT / "gemma4/kernels", ROOT / "llama/kernels/prefill"])
+    link(out, "gemma4", [out / "gemma4.o"])
+    sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-ffp-contract=off", "-o", out / "gemma4_convert",
+       ROOT / "gemma4/convert.c")
+
+
 def bonsai():
     out = BUILD / "bonsai"
     src = out / "src"
@@ -190,7 +203,7 @@ def bonsai():
 
 def main():
     steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
-             "vla": vla}
+             "vla": vla, "gemma4": gemma4}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
         if name not in steps:
