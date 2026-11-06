@@ -250,7 +250,7 @@ class Half(nn.Module):
 
     def forward(self, *xs):
         ys = self.m(*(x.half() if x.is_floating_point() else x for x in xs))
-        return ys.float()
+        return tuple(y.float() for y in ys) if isinstance(ys, tuple) else ys.float()
 
 
 def precision(m, dtype):
