@@ -1,0 +1,32 @@
+# Octo-Small 1.5 fp32 CPU reference (octo/reference.py): the inference-path subset of
+# octo-models/octo@241fb35's requirements.txt, for Python 3.10 on macOS arm64.
+#   uv venv -p /opt/homebrew/bin/python3.10 build/octo/venv
+#   uv pip install -p build/octo/venv/bin/python --exclude-newer 2024-07-31 -r octo/requirements-reference.txt
+# --exclude-newer resolves the unpinned packages as of the pinned octo commit's date (2024-07-30).
+# Left out (training, data-loading, MUSE or eval only): gym, optax's extras, wandb, moviepy, imageio, plotly,
+# matplotlib, pre-commit, ml_collections, tensorflow_hub, tensorflow_text, tensorflow_graphics.
+jax==0.4.20
+jaxlib==0.4.20
+flax==0.7.5
+numpy==1.24.3
+ml_dtypes==0.2.0
+chex==0.1.85
+optax==0.1.5
+distrax==0.1.5
+tensorflow_probability==0.23.0
+# octo_model.py and text_processing.py import tensorflow (tf.io.gfile); data_utils.py imports dlimp,
+# which imports tensorflow_datasets.
+tensorflow==2.15.0
+tensorflow_datasets==4.9.2
+dlimp @ git+https://github.com/kvablack/dlimp@5edaa4691567873d495633f2708982b42edf1972
+# orbax is unpinned upstream; 0.4.4 (2023-12) is contemporary with jax 0.4.20 / flax 0.7.5.
+orbax-checkpoint==0.4.4
+# Flax T5 needs transformers < 5 (v5 dropped the Flax backend).
+transformers>=4.34.1,<5
+einops>=0.6.1
+# jax 0.4.20 wraps scipy.linalg.tril, which scipy 1.13 removed.
+scipy>=1.6.0,<1.13
+tqdm>=4.60.0
+absl-py>=0.12.0
+huggingface_hub
+safetensors

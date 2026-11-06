@@ -14,7 +14,9 @@
 # Masks (MASK): key j is visible to query i when klev[j] <= qlev[i] (key and query rows as indexed in their
 # buffers, batch included). Levels express everything SmolVLA and pi0 need: padding keys +inf, the prefix's
 # blocks 0 and 1 (images and language; the state), the action tokens 2, 3, ... (causal). A query with no
-# visible key gets zeros. Without MASK every key 0 .. nk - 1 is visible.
+# visible key gets zeros. Without MASK every key 0 .. nk - 1 is visible. LV2: two levels a row (klev and qlev
+# hold pairs), key j visible when both of its levels are <= the query's: Octo's readout tokens, which see
+# earlier readouts that no observation token sees.
 #
 # Rows: queries block_idx.y * 64 .. + 63 of batch block_idx.z (qbatch rows apart), keys 0 .. nk - 1 of the
 # batch (kbatch rows apart; nk a multiple of 64). Head h reads Q's columns qcol + 64 h, and K's and V's
@@ -29,7 +31,8 @@ comptime F32P = UnsafePointer[Float32, MutAnyOrigin]
 comptime KC = 8
 
 
-def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False, SPLIT: Bool = False, KB: Int = 64](
+def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False, SPLIT: Bool = False, KB: Int = 64,
+               LV2: Bool = False](
     q: F32P, k: F32P, v: F32P, o: F32P, klev: F32P, qlev: F32P,
     ldq: Int32, ldk: Int32, ldv: Int32, ldo: Int32, qcol: Int32, kcol: Int32, vcol: Int32, ocol: Int32,
     nk: Int32, group: Int32, scale: Float32, qbatch: Int32, kbatch: Int32, c0: Int32, nchunks: Int32,
@@ -75,8 +78,13 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False, SPLI
     var kbase = k.unsafe_offset(Int(kcol) + kvh * HD)
     var vbase = v.unsafe_offset(Int(vcol) + kvh * HD + cc)
     var level = Float32(0)
+    var level2 = Float32(0)
     comptime if MASK:
-        level = qlev[qrow0 + t]
+        comptime if LV2:
+            level = qlev[2 * (qrow0 + t)]
+            level2 = qlev[2 * (qrow0 + t) + 1]
+        else:
+            level = qlev[qrow0 + t]
     var m = Float32(-1e30)
     var l = Float32(0)
     var oc = SIMD[DType.float32, 64](0)  # column t of O's CW columns, rows 0 .. 63
@@ -117,7 +125,10 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False, SPLI
             var c = (i + t) % KB
             var visible = True
             comptime if MASK:
-                visible = klev[kr + c] <= level
+                comptime if LV2:
+                    visible = klev[2 * (kr + c)] <= level and klev[2 * (kr + c) + 1] <= level2
+                else:
+                    visible = klev[kr + c] <= level
             if visible:
                 bm = max(bm, s[t * KB + c] * scale)
         var mn = max(m, bm)
@@ -126,7 +137,10 @@ def attention[MASK: Bool, HD: Int = 64, CW: Int = 64, HOISTQ: Bool = False, SPLI
             var c = (i + t) % KB
             var visible = True
             comptime if MASK:
-                visible = klev[kr + c] <= level
+                comptime if LV2:
+                    visible = klev[2 * (kr + c)] <= level and klev[2 * (kr + c) + 1] <= level2
+                else:
+                    visible = klev[kr + c] <= level
             var p = Float32(0)
             if visible:
                 p = exp(s[t * KB + c] * scale - mn)

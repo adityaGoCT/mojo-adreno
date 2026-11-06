@@ -4,6 +4,7 @@
 //
 //   vk_server.exe [port]        VK_SERVER_PROFILE=1: the executor's batches; VK_PIPELINE_CACHE: the cache file
 //
+// VK_SERVER_NPUG=<context>;...: (vk_server_npu) NPU graphs to open at startup, before any client.
 // VK_SERVER_SEGMENTS=1 prints, at each synchronize or read, the time from the first request after the previous one
 // to its answer, and the launches in between: the GPU's time for that stretch of work without the network's round
 // trip, which through an SSH tunnel is a few hundred ms (the requests still stream in at the tunnel's rate).
@@ -236,6 +237,22 @@ int main(int argc, char** argv) {
     fprintf(stderr, "vk_server: bind: %d\n", WSAGetLastError());
     return 2;
   }
+#ifdef VK_SERVER_NPU
+  // VK_SERVER_NPUG=<context>;<context>...: NPU graphs opened now, before any client; a client's OP_NPUG_OPEN of
+  // the same path then gets this handle. A session created after an earlier client had run another crashed the
+  // server (an access violation in ONNX Runtime's memcpy; cause not found: a plain process opening one graph after
+  // running another does not); with every graph opened first, clients switching graphs ran without one.
+  const char* pre = getenv("VK_SERVER_NPUG");
+  if (pre && *pre) {
+    char paths[4096];
+    snprintf(paths, sizeof paths, "%s", pre);
+    for (char* tok = strtok(paths, ";"); tok; tok = strtok(NULL, ";")) {
+      double ms = 0;
+      int h = npug_open(tok, &ms);
+      printf("vk_server: NPU graph %d: %s (%.0f ms)\n", h, tok, ms);
+    }
+  }
+#endif
   printf("vk_server: listening on 127.0.0.1:%d\n", port);
   fflush(stdout);
   for (;;) {  // one client at a time; its buffers and modules are freed when it leaves

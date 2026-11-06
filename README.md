@@ -49,6 +49,12 @@ the official PyTorch model. On the laptop's clock, a chunk takes 136 ms on the G
 and 66 ms with fp16 matrix units (1.1e-2). With DINOv3 on the Hexagon NPU and the rest on the GPU it takes 65 ms
 (1.9e-2), and all on the NPU 39 ms (2.2e-2). Medians, without BERT, which runs once per instruction.
 
+**[Octo-Small on a Snapdragon X2 Elite laptop: GPU, GPU+NPU and NPU](octo/README.md)**: the 27M generalist policy
+(and its T5 encoder), checked stage by stage against Octo's own JAX model. A chunk takes 65 ms on the GPU in fp32
+(actions within 2.6e-6), 51 ms with the 20 denoising steps in one launch, and 48 ms with fp16 weights (3.3e-3). With
+the stems and trunk on the NPU it takes 44 ms (4.8e-2), and all on the NPU 47 ms (4.2e-2): this small trunk gains
+nothing from the NPU.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -578,6 +584,8 @@ qwen3moe/          Qwen3-30B-A3B (MoE, int4) on the X2 Elite laptop's GPU: moek.
                    reference.py (transformers' layers, a layer at a time), run.py
 turbovla/          TurboVLA on the X2 Elite laptop: model.mojo (GPU), export_npu.py (NPU graphs), reference.py,
                    npu_check.py
+octo/              Octo-Small on the X2 Elite laptop: model.mojo (GPU), export_npu.py (NPU graphs), reference.py
+                   (Octo's JAX), npu_check.py
 qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLSL; runners load them
                    when a driver has the extension; see its README)
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,

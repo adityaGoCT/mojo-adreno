@@ -143,8 +143,9 @@ that folder. Copy `turbovla.safetensors` and `build/turbovla/npu` to `C:\Users\H
 
 ```bash
 X2="ssh -p 2222 -i <QDC key> HCKTest@localhost"
-# the server, from the DLLs' folder, with the port forward (leave running)
-$X2 -L 7790:127.0.0.1:7788 "cd /d C:\Users\HCKTest\pi0npu\runtimes\win-arm64\native & set VK_SERVER_SEGMENTS=1& vk_server_npu.exe 7788"
+# the server, from the DLLs' folder, with the port forward (leave running); VK_SERVER_NPUG opens the NPU graph at
+# startup (see ../octo/README.md: a graph opened after another client's crashed the server)
+$X2 -L 7790:127.0.0.1:7788 "cd /d C:\Users\HCKTest\pi0npu\runtimes\win-arm64\native & set VK_SERVER_SEGMENTS=1& set VK_SERVER_NPUG=C:\Users\HCKTest\turbovla\npu\vision_ctx.onnx& vk_server_npu.exe 7788"
 # GPU: every stage checked, then timed (TURBOVLA_OPT / _F16 / _MMA16 for the optimized variants)
 TURBOVLA_REPLAY=4 VK_REMOTE_PORT=7790 MODULAR_DRIVER_PLUGINS=vulkan@$PWD/build/vla/x2/libM_driver_vulkan_remote.dylib \
   TURBOVLA_REMOTE='C:\Users\HCKTest\turbovla\turbovla.safetensors' \
