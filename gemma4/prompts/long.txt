@@ -1,0 +1,31 @@
+# Mojo on Adreno, Part 4: A Native GPU Target, and Llama Prefill on the Matrix Units
+
+*Part 4 of [Bringing PyTorch LLMs to a Mid-Range Adreno GPU with IREE](https://github.com/adityaGoCT/iree-adreno-genai-tuner/blob/main/BLOG.md) (Part 3: [Running Mojo GPU Kernels on an Adreno Phone GPU](BLOG.md)) · October 29, 2026 · Aditya*
+
+## TL;DR
+
+[Part 3](BLOG.md) got Mojo kernels onto an Adreno 710 by rewriting the LLVM IR that Mojo produces for an AMD GPU. Mojo's compiler has since been open sourced, so this part does it properly. I added a Vulkan SPIR-V target to the compiler, so `mojo build --target-accelerator adreno710` produces a Vulkan compute shader directly. On that target I taught Mojo the GPU's matrix hardware through Vulkan's cooperative-matrix extension. Then I ran Llama 3.2 1B's prompt processing on those matrix units, on a Snapdragon 8 Elite Gen 5 phone rented from a cloud test lab.
+
+| | Adreno 710 (moto g stylus 5G) | Adreno 840 (Galaxy S26 Ultra) |
+|---|---|---|
+| Llama 3.2 1B decode | 285 ms/token | **41 ms/token** (24 tokens/s) |
+| 431-token prompt, one token at a time | — | 17.7 s |
+| 431-token prompt, batched on cooperative matrices | — | **0.63 s** (28x) |
+| matmul on cooperative matrices, 2048³ | no matrix units | **3.7 TFLOP/s** fp16, **2.5 TFLOP/s** fp32 |
+| tokens identical to PyTorch | 48 of 48 | 48 of 48 (logits within 6.0e-5) |
+| decode with 4-bit weights | — | **13.4 ms/token** (75 tokens/s) |
+
+*(The prefill numbers are from [the update](#update-faster-weight-staging-and-a-second-driver-build): 1.29 s with the first prefill matmul, 0.68 s with coalesced weight staging, 0.63 s with fused attention.)*
+
+All of it is Mojo code, from the Llama kernels to the matmul that reaches 3.7 TFLOP/s. The compiler work is on the branch [`adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target) of my fork of modular/modular. The kernels, runners and the Llama runtime are in [this repo](README.md).
+
+What I learned:
+
+1. **A GPU target is mostly an ABI.** The first version of the target was about 2,100 lines of C++ and 400 lines of Mojo. Most of that rewrites how a kernel receives its arguments. LLVM's SPIR-V backend does the instruction selection.
+2. **New hardware features can travel as opaque calls.** Mojo has no type for "a matrix spread across a subgroup". A cooperative matrix travels as a 64-bit handle through calls to placeholder functions, which the backend rewrites late, once it knows each pointer's buffer.
+3. **Ask the driver, not the reports.** The Adreno 840 offers only 64-row tiles and no fp16-to-fp32 products, and its fp16 shared memory has three quirks. Each turned up only by running small kernels on the phone. Public reports were right about the shapes and wrong about a crash.
+4. **Prefill is where matrix units pay.** Decode reads every weight once per token, so it's limited by memory bandwidth. Prefill reuses each weight for every prompt token, so it's the workload matrix hardware is built for.
+
+## 1. A Vulkan target inside Mojo's compiler
+
+Summarize the text above in three sentences.
