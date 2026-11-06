@@ -31,6 +31,15 @@ enum {
   OP_RECORD,    // u32 1: keep a copy of the requests that follow (still running them); 0: stop (vla/x2's vk_server)
   OP_REPLAY,    // u32 count: run the kept requests `count` times more -> f64 milliseconds on the server's clock,
                 // through a final wait: the GPU's time for them without the transport (vla/x2's vk_server)
+  // π0's Gemma prefix on the executor's NPU (npu/pi0_prefix.cpp inside vla/x2's vk_server_npu): its K/V go straight
+  // into the GPU's buffers, without crossing the transport.
+  OP_NPU_OPEN,    // path of the compiled graphs -> f64 ms to load them, i32 rows, i32 graphs
+  OP_NPU_ROPE,    // u32 n, f32 rope [2][1024][128], i32 pos [n], i32 valid [n]: the rows' positions and key mask -> -
+  OP_NPU_PREFIX,  // u64 x buffer, u64 x offset, u64 n, then per layer u64 K buffer, K offset, V buffer, V offset:
+                  // when the GPU is done, x (n rows of 2048 fp32) through the graphs; as each graph finishes, its
+                  // layers' K and V (fp32 [n][256]) written there. Not answered: the launches after it queue behind it
+  OP_NPU_TIME,    // -> f64 x 3: the last prefix's ms: x to fp16, the graphs, all of it through the last K/V written
+  OP_LAST = OP_NPU_TIME,
 };
 
 // A kernel launch: storage buffers at bindings 0..nbind-1, then the params buffer (if any).

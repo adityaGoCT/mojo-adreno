@@ -47,19 +47,19 @@ const char *env(const char *name) {
 }
 
 const char *opNames[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync",
-                         "file", "gather", "record", "replay"};
+                         "file", "gather", "record", "replay", "npu_open", "npu_rope", "npu_prefix", "npu_time"};
 
 // VK_DRIVER_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
 // received, printed at exit.
 struct Profile {
   struct Entry { uint64_t count = 0, sent = 0, received = 0; double seconds = 0; };
-  Entry ops[16];
+  Entry ops[OP_LAST + 1];
   bool on = env("PROFILE") != nullptr;
   ~Profile() {
     if (!on)
       return;
     fprintf(stderr, "vulkan driver profile (%s):\n", transportKind());
-    for (int op = 1; op <= OP_REPLAY; ++op)
+    for (int op = 1; op <= OP_LAST; ++op)
       if (ops[op].count)
         fprintf(stderr, "  %-7s %6llu requests %9.3f s  sent %8.2f MB  received %8.2f MB\n", opNames[op],
                 static_cast<unsigned long long>(ops[op].count), ops[op].seconds, ops[op].sent / 1e6,
@@ -75,7 +75,7 @@ bool call(uint32_t op, const void *a, size_t na, const void *b = nullptr, size_t
   std::lock_guard<std::mutex> guard(lock);
   auto start = std::chrono::steady_clock::now();
   if (env("DEBUG") && op != OP_LAUNCH) {  // every request but launches (logged in full)
-    fprintf(stderr, "vulkan driver: %s", op <= OP_REPLAY ? opNames[op] : "?");
+    fprintf(stderr, "vulkan driver: %s", op <= OP_LAST ? opNames[op] : "?");
     for (size_t i = 0; i < std::min<size_t>(na / 8, 5); ++i)
       fprintf(stderr, " %llx", static_cast<unsigned long long>(static_cast<const uint64_t *>(a)[i]));
     fprintf(stderr, " (+%zu bytes)\n", nb);
@@ -86,7 +86,7 @@ bool call(uint32_t op, const void *a, size_t na, const void *b = nullptr, size_t
     fprintf(stderr, "vulkan driver: %s\n", lastError.c_str());
     return false;
   }
-  if (profile.on && op < 16) {
+  if (profile.on && op <= OP_LAST) {
     Profile::Entry &e = profile.ops[op];
     e.count++;
     e.sent += na + nb;
@@ -1025,6 +1025,75 @@ __attribute__((visibility("default"))) double M_driver_remote_replay(int count) 
   double ms;
   memcpy(&ms, out.data(), 8);
   return ms;
+}
+
+// π0's Gemma prefix on the NPU of the device running vla/x2's vk_server_npu (npu/pi0_prefix.cpp there), its K/V
+// written straight into this plugin's device memory, so they never cross the transport (pi0/pi0npu.mojo built for
+// vla/x2). M_driver_remote_npu_open loads the compiled graphs in `dir` (a path there): *ms the time it took, *rows the
+// rows of a prefix, *parts the graphs. Returns 0, or -1.
+__attribute__((visibility("default"))) int M_driver_remote_npu_open(const char *dir, double *ms, int32_t *rows,
+                                                                     int32_t *parts) {
+  std::string out;
+  if (!dir || !call(OP_NPU_OPEN, dir, strlen(dir), nullptr, 0, &out) || out.size() != 16)
+    return -1;
+  memcpy(ms, out.data(), 8);
+  memcpy(rows, out.data() + 8, 4);
+  memcpy(parts, out.data() + 12, 4);
+  return 0;
+}
+
+// The n prefix rows' positions and key mask: `rope` is transformers' table ([2][1024][128] fp32: cos, then sin),
+// pos[r] row r's position, valid[r] whether keys may attend to it. Returns 0, or -1.
+__attribute__((visibility("default"))) int M_driver_remote_npu_rope(const float *rope, const int32_t *pos,
+                                                                     const int32_t *valid, int32_t n) {
+  constexpr size_t table = 2 * 1024 * 128;
+  std::string payload(4 + table * 4 + 8 * static_cast<size_t>(n), '\0');
+  uint32_t rows = static_cast<uint32_t>(n);
+  memcpy(payload.data(), &rows, 4);
+  memcpy(payload.data() + 4, rope, table * 4);
+  memcpy(payload.data() + 4 + table * 4, pos, 4 * static_cast<size_t>(n));
+  memcpy(payload.data() + 4 + table * 4 + 4 * n, valid, 4 * static_cast<size_t>(n));
+  return call(OP_NPU_ROPE, payload.data(), payload.size(), nullptr, 0, nullptr) ? 0 : -1;
+}
+
+// The prefix: once the work before it is done, the n rows of 2048 fp32 at device address x through the graphs, and
+// layer l's K and V (after RoPE; fp32 [n][256]) into the device memory at k[l] and v[l], l < layers, as each graph
+// finishes. Not waited for: the requests after it run when it is done, and its errors come with the next answer.
+// Returns 0, or -1 for addresses this plugin did not hand out.
+__attribute__((visibility("default"))) int M_driver_remote_npu_prefix(uint64_t x, int32_t n, const uint64_t *k,
+                                                                       const uint64_t *v, int32_t layers) {
+  std::vector<uint64_t> request;  // x's buffer and offset, n, then each layer's K and V
+  auto place = [&](uint64_t address, uint64_t size) {
+    uint64_t offset = 0;
+    Memory *m = memoryAt(address, offset);
+    if (!m || m->host || offset + size > m->size) {
+      fprintf(stderr, "vulkan driver: NPU prefix with unknown device memory %llx (+%llu bytes)\n",
+              static_cast<unsigned long long>(address), static_cast<unsigned long long>(size));
+      return false;
+    }
+    request.push_back(m->buffer);
+    request.push_back(m->base + offset);
+    return true;
+  };
+  if (!place(x, 2048ull * 4 * n))
+    return -1;
+  request.push_back(static_cast<uint64_t>(n));
+  for (int l = 0; l < layers; ++l)
+    if (!place(k[l], 256ull * 4 * n) || !place(v[l], 256ull * 4 * n))
+      return -1;
+  return call(OP_NPU_PREFIX, request.data(), request.size() * 8) ? 0 : -1;
+}
+
+// The last prefix's times on the server's clock (ms): converting x to fp16, the graphs, and all of it through the last
+// K/V written. Waits for the work before it. Returns 0, or -1.
+__attribute__((visibility("default"))) int M_driver_remote_npu_time(double *convert, double *graphs, double *total) {
+  std::string out;
+  if (!call(OP_NPU_TIME, nullptr, 0, nullptr, 0, &out) || out.size() != 24)
+    return -1;
+  memcpy(convert, out.data(), 8);
+  memcpy(graphs, out.data() + 8, 8);
+  memcpy(total, out.data() + 16, 8);
+  return 0;
 }
 
 }  // extern "C"

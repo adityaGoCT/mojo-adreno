@@ -79,7 +79,8 @@ bool transportCall(uint32_t op, const void *a, size_t na, const void *b, size_t 
   if (!connectServer(error))
     return false;
   uint32_t header[2] = {op, static_cast<uint32_t>(na + nb)};
-  bool answered = op == OP_INFO || op == OP_READ || op == OP_SYNC || op == OP_REPLAY;
+  bool answered = op == OP_INFO || op == OP_READ || op == OP_SYNC || op == OP_REPLAY || op == OP_NPU_OPEN ||
+                  op == OP_NPU_ROPE || op == OP_NPU_TIME;
   if (!sendAll(header, sizeof header) || (na && !sendAll(a, na)) || (nb && !sendAll(b, nb)))
     return lost(error);
   if (!answered)

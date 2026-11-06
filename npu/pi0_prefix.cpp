@@ -13,6 +13,8 @@
 //
 // It also builds for Windows on ARM (a Snapdragon X2 Elite laptop's Hexagon NPU, the same V81 HTP), with Zig's clang
 // for aarch64-windows-gnu against ONNX Runtime's QNN NuGet package: npu/build_win.sh.
+#include "pi0_prefix.h"
+
 #include <onnxruntime_cxx_api.h>
 
 #include <sys/stat.h>

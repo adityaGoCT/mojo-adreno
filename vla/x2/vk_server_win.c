@@ -7,6 +7,10 @@
 // VK_SERVER_SEGMENTS=1 prints, at each synchronize or read, the time from the first request after the previous one
 // to its answer, and the launches in between: the GPU's time for that stretch of work without the network's round
 // trip, which through an SSH tunnel is a few hundred ms (the requests still stream in at the tunnel's rate).
+//
+// Built with -DVK_SERVER_NPU (vk_server_npu.exe, linked with npu/pi0_prefix.cpp and ONNX Runtime's QNN package, and run
+// from the directory of its DLLs), it also runs π0's Gemma prefix on the laptop's Hexagon NPU (OP_NPU_*): the K/V that
+// the NPU computes go straight into the GPU's buffers, instead of 30 MB a prefix through the tunnel.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdint.h>
@@ -64,6 +68,102 @@ static void answer(void* ctx, int status, const void* data, uint32_t n) {
   if (n) send_all(data, n);
 }
 
+static void answer_error(const char* message) { answer(NULL, 1, message, (uint32_t)strlen(message)); }
+
+// VK_SERVER_SEGMENTS: an answer ends a segment, which began at the first request after the previous answer.
+static double segment_start = -1;
+static int launches, prefixes;  // in the segment: OP_LAUNCH, OP_NPU_PREFIX
+
+static void end_segment(int segments) {
+  if (segments && (launches || prefixes))
+    fprintf(stderr, "segment: %d launches%s, %.1f ms\n", launches, prefixes ? " and the NPU prefix" : "",
+            now_ms() - segment_start);
+  segment_start = -1;
+  launches = 0;
+  prefixes = 0;
+}
+
+#ifdef VK_SERVER_NPU
+#include "../../npu/pi0_prefix.h"
+
+char* vkx_host(uint64_t id, uint64_t offset, uint64_t size);  // executor_win.c
+void vkx_fail(const char* message);
+
+enum { NPU_D = 2048, NPU_HD = 256, NPU_L = 18 };
+static double npu_times[3];  // the last prefix (ms): x to fp16, the graphs, all of it through the last K/V written
+
+// The prefix (OP_NPU_PREFIX): once the GPU is done, x from its buffer through the graphs; as each graph finishes, its
+// layers' K and V converted to fp32 into the GPU's buffers, while the NPU runs the next graph. Errors go to the next
+// answer.
+static void npu_prefix(const char* p, uint32_t n, int segments) {
+  const uint64_t* w = (const uint64_t*)p;
+  if (n != 24 + 32 * NPU_L) return vkx_fail("malformed NPU prefix");
+  int rows = (int)w[2];
+  const float* x = (const float*)vkx_host(w[0], w[1], (uint64_t)rows * NPU_D * 4);  // waits for the GPU
+  if (!x) return vkx_fail("NPU prefix: x out of range");
+  double t0 = now_ms();
+  if (pi0npu_set_x(x, rows)) return vkx_fail(pi0npu_error());
+  double t1 = now_ms();
+  if (pi0npu_start()) return vkx_fail(pi0npu_error());
+  for (int i = 0; i < pi0npu_parts(); i++) {
+    if (pi0npu_part_wait(i)) break;
+    for (int l = pi0npu_part_first(i); l < pi0npu_part_first(i + 1); l++)
+      for (int which = 0; which < 2; which++) {
+        const uint64_t* kv = w + 3 + 4 * l + 2 * which;
+        float* dst = (float*)vkx_host(kv[0], kv[1], (uint64_t)rows * NPU_HD * 4);
+        if (!dst) {
+          pi0npu_finish(NULL);
+          return vkx_fail("NPU prefix: K/V out of range");
+        }
+        pi0npu_kv(l, which, dst, rows);
+      }
+  }
+  double graphs = 0;
+  if (pi0npu_finish(&graphs)) return vkx_fail(pi0npu_error());
+  npu_times[0] = t1 - t0;
+  npu_times[1] = graphs;
+  npu_times[2] = now_ms() - t0;
+  if (segments)
+    fprintf(stderr, "npu prefix: x to fp16 %.1f ms, graphs %.1f ms, through the last K/V %.1f ms\n", npu_times[0],
+            npu_times[1], npu_times[2]);
+}
+
+// OP_NPU_OPEN, OP_NPU_ROPE and OP_NPU_TIME, answered.
+static void npu_answered(uint32_t op, const char* p, uint32_t n) {
+  if (op == OP_NPU_OPEN) {
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%.*s", (int)n, p);
+    double ms = 0;
+    pi0npu_close();  // a client before this one may have opened them
+    if (pi0npu_open(dir, &ms)) {
+      answer_error(pi0npu_error());
+      pi0npu_close();
+      return;
+    }
+    char out[16];
+    int32_t rows = pi0npu_rows(), parts = pi0npu_parts();
+    memcpy(out, &ms, 8);
+    memcpy(out + 8, &rows, 4);
+    memcpy(out + 12, &parts, 4);
+    fprintf(stderr, "npu: %d graphs loaded in %.2f s, %d rows\n", parts, ms / 1e3, rows);
+    answer(NULL, 0, out, 16);
+  } else if (op == OP_NPU_ROPE) {
+    uint32_t rows = 0;
+    const size_t table = 2 * 1024 * 128 * 4;
+    if (n >= 4) memcpy(&rows, p, 4);
+    if (n < 4 || n != 4 + table + 8 * (size_t)rows) return answer_error("malformed NPU rope");
+    if (pi0npu_set_rope((const float*)(p + 4), (const int32_t*)(p + 4 + table),
+                        (const int32_t*)(p + 4 + table + 4 * (size_t)rows), (int)rows))
+      return answer_error(pi0npu_error());
+    answer(NULL, 0, NULL, 0);
+  } else {  // OP_NPU_TIME, or the prefix's error
+    const char* e = vkx_take_error();
+    if (e) return answer_error(e);
+    answer(NULL, 0, npu_times, sizeof npu_times);
+  }
+}
+#endif
+
 int main(int argc, char** argv) {
   int port = argc > 1 ? atoi(argv[1]) : DEFAULT_PORT;
   WSADATA wsa;
@@ -97,15 +197,28 @@ int main(int argc, char** argv) {
     char* payload = NULL;
     const char* env = getenv("VK_SERVER_SEGMENTS");
     int segments = env && *env && *env != '0';
-    double first = -1;
-    int launches = 0;
+    end_segment(0);
     char* kept = NULL;  // OP_RECORD's copy of the requests: {u32 op, u32 n, n bytes} each
     size_t nkept = 0, capkept = 0;
     int recording = 0;
     while (!recv_all(header, sizeof header)) {
-      if (first < 0) first = now_ms();
+      if (segment_start < 0) segment_start = now_ms();
       payload = realloc(payload, header[1] ? header[1] : 1);
       if (recv_all(payload, header[1])) break;
+      if (header[0] >= OP_NPU_OPEN && header[0] <= OP_NPU_TIME) {
+#ifdef VK_SERVER_NPU
+        if (header[0] == OP_NPU_PREFIX) {
+          npu_prefix(payload, header[1], segments);
+          prefixes++;
+          continue;
+        }
+        npu_answered(header[0], payload, header[1]);
+#else
+        if (header[0] != OP_NPU_PREFIX) answer_error("no NPU in this vk_server (vk_server_npu.exe has one)");
+#endif
+        end_segment(segments);
+        continue;
+      }
       if (header[0] == OP_RECORD) {
         recording = header[1] == 4 && *(uint32_t*)payload;
         if (recording) nkept = 0;
@@ -139,11 +252,7 @@ int main(int argc, char** argv) {
       }
       if (header[0] == OP_LAUNCH) launches++;
       vkx_handle(header[0], payload, header[1], NULL, 0, answer, NULL);
-      if (header[0] == OP_SYNC || header[0] == OP_READ) {
-        if (segments && launches) fprintf(stderr, "segment: %d launches, %.1f ms\n", launches, now_ms() - first);
-        first = -1;
-        launches = 0;
-      }
+      if (header[0] == OP_SYNC || header[0] == OP_READ) end_segment(segments);
     }
     vkx_reset();
     free(kept);
