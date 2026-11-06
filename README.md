@@ -43,6 +43,12 @@ the laptop's Hexagon NPU, for comparison: accurate in fp16, but its static graph
 **[A 30B mixture of experts on a Snapdragon laptop](docs/presentation-qwen3moe/qwen3moe-on-the-x2-elite.pdf)**
 (6 slides, PDF). [View it online](https://claude.ai/artifact/THLm8oGyVrqYs6X2d9P2iq).
 
+**[TurboVLA on a Snapdragon X2 Elite laptop: GPU, GPU+NPU and NPU](turbovla/README.md)**: the 216M LIBERO
+policy computes a 12 × 7 action chunk from two views, an instruction and a state, checked stage by stage against
+the official PyTorch model. On the laptop's clock, a chunk takes 136 ms on the GPU in fp32 (actions within 1.2e-6)
+and 66 ms with fp16 matrix units (1.1e-2). With DINOv3 on the Hexagon NPU and the rest on the GPU it takes 65 ms
+(1.9e-2), and all on the NPU 39 ms (2.2e-2). Medians, without BERT, which runs once per instruction.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -570,6 +576,8 @@ llama/             Llama 3.2 1B: seven Mojo kernels, llama_vk.c (Vulkan runtime)
 qwen3/             Ternary Qwen3-8B on the Adreno 840: qwen3k.mojo, qwen3_vk.c, export.py, run.py
 qwen3moe/          Qwen3-30B-A3B (MoE, int4) on the X2 Elite laptop's GPU: moek.mojo, model.mojo, convert.c,
                    reference.py (transformers' layers, a layer at a time), run.py
+turbovla/          TurboVLA on the X2 Elite laptop: model.mojo (GPU), export_npu.py (NPU graphs), reference.py,
+                   npu_check.py
 qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLSL; runners load them
                    when a driver has the extension; see its README)
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,

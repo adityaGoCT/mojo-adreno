@@ -8,6 +8,9 @@
 #
 # A chunk's stages, each synchronized: vision (DINOv3 and the projection), text (BERT; once per instruction, so the
 # chunk is timed without it too), fusion, action (state, decoder, MLP); then the whole chunk with one synchronize.
+# TURBOVLA_REPLAY=<k>: then a chunk on the laptop's own clock, without the tunnel: the server keeps one chunk's
+# requests (OP_RECORD, NPU graph runs included) and runs them k more times (OP_REPLAY), five times over, with and
+# without BERT.
 from std.os import getenv
 from std.sys import argv
 from std.time import perf_counter_ns
@@ -24,6 +27,30 @@ def rows_of(view_rows: Int) -> List[Int]:
         for p in range(NPATCH):
             r.append(v * view_rows + PREFIX + p)
     return r^
+
+
+def replay(mut m: TurboVLA, ctx: DeviceContext, k: Int, with_text: Bool) raises -> Float64:
+    """One chunk kept by the server and run k more times there: its milliseconds a chunk on the server's clock."""
+    ctx.synchronize()
+    if m.lib.call["M_driver_remote_record", Int32](Int32(1)) != 0:
+        raise Error("M_driver_remote_record failed")
+    m.chunk(with_text)
+    _ = m.lib.call["M_driver_remote_record", Int32](Int32(0))
+    ctx.synchronize()
+    var ms = m.lib.call["M_driver_remote_replay", Float64](Int32(k))
+    if ms < 0:
+        raise Error("M_driver_remote_replay failed")
+    return ms / Float64(k)
+
+
+def replays(mut m: TurboVLA, ctx: DeviceContext) raises:
+    var k = Int(getenv("TURBOVLA_REPLAY"))
+    for with_text in [False, True]:
+        var line = String("replay: chunk ") + ("with" if with_text else "without") + " text, " + String(k) + \
+                   " chunks a replay, ms a chunk (server clock):"
+        for _ in range(5):
+            line += " " + String(round(replay(m, ctx, k, with_text), 1))
+        print(line)
 
 
 def main() raises:
@@ -67,6 +94,8 @@ def main() raises:
             ctx.synchronize()
             print("run", r, ": chunk without text", round(now_ms() - a, 1), "ms (Mac clock); NPU vision",
                   round(m.npu_time(), 1), "ms")
+        if getenv("TURBOVLA_REPLAY"):
+            replays(m, ctx)
         print("done")
         return
     if getenv("TURBOVLA_DEBUG"):  # DINOv3 layer by layer against build/turbovla/ref/dbg (dino_layers.py)
@@ -150,6 +179,8 @@ def main() raises:
         var f = now_ms()
         print("run", r, ": vision", round(b - a, 1), "ms, text (BERT)", round(c - b, 1), "ms, fusion", round(d - c, 1),
               "ms, action", round(e - d, 1), "ms; chunk without text", round(f - e, 1), "ms")
+    if getenv("TURBOVLA_REPLAY"):
+        replays(m, ctx)
     if getenv("TURBOVLA_PROFILE"):  # one more chunk, synchronized after each operation: VK_SERVER_SEGMENTS times each
         ctx.enqueue_copy(m.l, m.l0)
         ctx.synchronize()

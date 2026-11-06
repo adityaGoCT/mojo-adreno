@@ -7,6 +7,9 @@
 //   graph_tool run <context.onnx> <runs> <input files...> [-o <dir>]
 //                                                           inputs as raw fp32 / int32 files in the graph's input
 //                                                           order; times each run; writes the outputs (fp32) to dir
+//   graph_tool chain <runs> <context.onnx> <inputs...> [+ <context.onnx> <inputs...>]... [-o <dir>]
+//                                                           graphs back to back, timed end to end; an input @g:i is
+//                                                           graph g's output i (the same host buffer)
 // Environment: NPU_LOG=v (ONNX Runtime's verbose log), NPU_FALLBACK=1 (allow nodes on the CPU; otherwise every node
 // must run on the HTP), NPU_OPT=<0..3> (QNN's graph finalization optimization mode, default 3).
 //
@@ -60,6 +63,7 @@ const std::string& ort_path(const std::string& p) { return p; }
 #endif
 
 struct Graph {
+  std::string path;
   Ort::Session session{nullptr};
   std::vector<std::string> in_names, out_names;
   std::vector<std::vector<int64_t>> in_shapes, out_shapes;
@@ -134,9 +138,16 @@ int npug_compile(const char* model, const char* ctx_out, double* ms) {
 }
 
 int npug_open(const char* ctx, double* ms) {
+  // A context already open (by a server's earlier client) is shared, not loaded again.
+  for (size_t i = 0; i < graphs.size(); i++)
+    if (graphs[i]->path == ctx) {
+      if (ms) *ms = 0;
+      return int(i);
+    }
   try {
     double t0 = now_ms();
     auto g = new Graph();
+    g->path = ctx;
     g->session = Ort::Session(get_env(), ort_path(ctx).c_str(), options(""));
     Ort::AllocatorWithDefaultOptions alloc;
     for (size_t i = 0; i < g->session.GetInputCount(); i++) {
@@ -223,7 +234,91 @@ int main(int argc, char** argv) {
   _Exit(rc);  // skip ONNX Runtime's teardown (see env above)
 }
 
+// graph_tool chain <runs> <context.onnx> <inputs...> [+ <context.onnx> <inputs...>]... [-o <dir>]
+// Graphs run back to back in one process, each run timed end to end; an input "@g:i" is output i of graph g (0-based,
+// in chain order), passed as the same host buffer. Outputs (fp32) written as <dir>/<g>_<name>.f32.
+static int chain(int argc, char** argv) {
+  int runs = atoi(argv[2]);
+  struct Step {
+    int h;
+    std::vector<std::string> args;
+  };
+  std::vector<Step> steps;
+  std::string outdir;
+  for (int a = 3; a < argc; a++) {
+    std::string s = argv[a];
+    if (s == "-o" && a + 1 < argc) {
+      outdir = argv[++a];
+    } else if (s == "+" || steps.empty()) {
+      if (s == "+" && a + 1 >= argc) return fail("+ needs a context"), 1;
+      if (s == "+") s = argv[++a];
+      double ms = 0;
+      int h = npug_open(s.c_str(), &ms);
+      if (h < 0) return 1;
+      printf("graph %zu: %s opened in %.1f ms\n", steps.size(), s.c_str(), ms);
+      steps.push_back({h, {}});
+    } else {
+      steps.back().args.push_back(s);
+    }
+  }
+  std::vector<std::vector<std::vector<float>>> out(steps.size());
+  std::vector<std::vector<char>> files;
+  files.reserve(256);
+  std::vector<std::vector<const void*>> ip(steps.size());
+  std::vector<std::vector<float*>> op(steps.size());
+  for (size_t g = 0; g < steps.size(); g++) {
+    int h = steps[g].h;
+    out[g].resize(npug_count(h, 1));
+    for (int i = 0; i < int(out[g].size()); i++) {
+      out[g][i].resize(npug_numel(h, 1, i));
+      op[g].push_back(out[g][i].data());
+    }
+    if (int(steps[g].args.size()) != npug_count(h, 0))
+      return fail("graph " + std::to_string(g) + " needs " + std::to_string(npug_count(h, 0)) + " inputs"), 1;
+    for (int i = 0; i < int(steps[g].args.size()); i++) {
+      auto& s = steps[g].args[i];
+      int64_t bytes;
+      if (s[0] == '@') {
+        size_t c = s.find(':');
+        int src = atoi(s.substr(1, c - 1).c_str()), k = atoi(s.substr(c + 1).c_str());
+        if (src < 0 || src >= int(g) || k < 0 || k >= int(out[src].size())) return fail("bad reference " + s), 1;
+        ip[g].push_back(out[src][k].data());
+        bytes = int64_t(out[src][k].size()) * 4;
+      } else {
+        files.push_back(read_file(s));
+        ip[g].push_back(files.back().data());
+        bytes = int64_t(files.back().size());
+      }
+      if (bytes != npug_numel(h, 0, i) * 4)
+        return fail("graph " + std::to_string(g) + " input " + std::to_string(i) + ": " + std::to_string(bytes) +
+                    " bytes, want " + std::to_string(npug_numel(h, 0, i) * 4)), 1;
+    }
+  }
+  for (int r = 0; r < runs; r++) {
+    double t0 = now_ms(), ms = 0;
+    std::string each;
+    for (size_t g = 0; g < steps.size(); g++) {
+      if (npug_run(steps[g].h, ip[g].data(), op[g].data(), &ms)) return 1;
+      char b[32];
+      snprintf(b, sizeof b, "%s%.2f", g ? " + " : "", ms);
+      each += b;
+    }
+    printf("run %d: %.2f ms (%s)\n", r, now_ms() - t0, each.c_str());
+  }
+  if (!outdir.empty()) {
+    for (size_t g = 0; g < steps.size(); g++)
+      for (int i = 0; i < int(out[g].size()); i++) {
+        std::ofstream f(outdir + "/" + std::to_string(g) + "_" + graphs[steps[g].h]->out_names[i] + ".f32",
+                        std::ios::binary);
+        f.write((const char*)out[g][i].data(), out[g][i].size() * 4);
+      }
+    printf("outputs in %s\n", outdir.c_str());
+  }
+  return 0;
+}
+
 static int tool(int argc, char** argv) {
+  if (argc >= 4 && std::string(argv[1]) == "chain") return chain(argc, argv);
   if (argc == 4 && std::string(argv[1]) == "compile") {
     double ms = 0;
     if (npug_compile(argv[2], argv[3], &ms)) return 1;
@@ -232,6 +327,7 @@ static int tool(int argc, char** argv) {
   }
   if (argc < 4 || std::string(argv[1]) != "run") {
     fprintf(stderr, "usage: graph_tool compile <model.onnx> <context.onnx> | run <context.onnx> <runs> <inputs...> "
+                    "[-o <dir>] | chain <runs> <context.onnx> <inputs...> [+ <context.onnx> <inputs...>]... "
                     "[-o <dir>]\n");
     return 2;
   }

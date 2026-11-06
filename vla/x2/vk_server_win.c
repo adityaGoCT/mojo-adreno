@@ -11,6 +11,8 @@
 // Built with -DVK_SERVER_NPU (vk_server_npu.exe, linked with npu/pi0_prefix.cpp and ONNX Runtime's QNN package, and run
 // from the directory of its DLLs), it also runs π0's Gemma prefix on the laptop's Hexagon NPU (OP_NPU_*): the K/V that
 // the NPU computes go straight into the GPU's buffers, instead of 30 MB a prefix through the tunnel.
+// And any static graph that npu/graph.cpp compiled (OP_NPUG_*): its inputs read from GPU buffers, its outputs written
+// into them. OP_RECORD / OP_REPLAY keep and rerun those graph runs too, in order with the launches.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdint.h>
@@ -255,6 +257,13 @@ int main(int argc, char** argv) {
       if (header[0] >= OP_NPU_OPEN && header[0] <= OP_NPUG_TIME) {
 #ifdef VK_SERVER_NPU
         if (header[0] == OP_NPU_PREFIX || header[0] == OP_NPUG_RUN) {
+          if (recording && header[0] == OP_NPUG_RUN) {  // kept for OP_REPLAY, in order with the launches
+            size_t need = nkept + 8 + ((header[1] + 7) & ~7u);
+            if (need > capkept) kept = realloc(kept, capkept = need * 2);
+            memcpy(kept + nkept, header, 8);
+            memcpy(kept + nkept + 8, payload, header[1]);
+            nkept = need;
+          }
           if (header[0] == OP_NPU_PREFIX)
             npu_prefix(payload, header[1], segments);
           else
@@ -286,7 +295,17 @@ int main(int argc, char** argv) {
         for (uint32_t k = 0; k < count && !failed; ++k)
           for (size_t at = 0; at < nkept;) {
             uint32_t* h = (uint32_t*)(kept + at);
-            vkx_handle(h[0], kept + at + 8, h[1], NULL, 0, keep_answer, NULL);
+#ifdef VK_SERVER_NPU
+            if (h[0] == OP_NPUG_RUN) {  // an NPU graph between the launches: it waits for the GPU, as streamed
+              npug_run_request(kept + at + 8, h[1], 0);
+              const char* e = vkx_take_error();
+              if (e) {
+                kept_status = 1;
+                snprintf(kept_error, sizeof kept_error, "%s", e);
+              }
+            } else
+#endif
+              vkx_handle(h[0], kept + at + 8, h[1], NULL, 0, keep_answer, NULL);
             at += 8 + ((h[1] + 7) & ~7u);
           }
         vkx_handle(OP_SYNC, NULL, 0, NULL, 0, keep_answer, NULL);
