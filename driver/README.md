@@ -39,8 +39,12 @@ through functions the plugin exports (`dlopen`/`dlsym` of the plugin; Mojo: `Own
 - `M_driver_remote_record` / `M_driver_remote_replay` (`OP_RECORD`, `OP_REPLAY`, `vla/x2/vk_server_win.c` only): the
   server keeps a copy of the requests that follow, then runs them n more times and answers with its own clock's time.
   That times GPU work without the transport.
+- `M_driver_remote_npu_open` / `_rope` / `_prefix` / `_time` (`OP_NPU_*`, `vla/x2`'s `vk_server_npu.exe` only):
+  π0's Gemma prefix on the NPU of the device running the server (`npu/pi0_prefix.cpp`). The prefix request names the
+  buffers of the embeddings and of every layer's K and V. Once the GPU is done, the server reads the embeddings from
+  the first, and as each graph finishes it writes K and V into the others, so they never cross the transport.
 
-[`../qwen3moe`](../qwen3moe) uses all four on the X2 Elite laptop.
+[`../qwen3moe`](../qwen3moe) uses the first four on the X2 Elite laptop; [`../pi0`](../pi0) uses the NPU's.
 
 **Launch arguments.** Each module carries a launch description, `OpModuleProcessed
 "mojo.vulkan.abi {json}"`. It says which argument and byte offset each storage buffer's pointer

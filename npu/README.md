@@ -190,7 +190,7 @@ token's logits.
 | `run.py` | reference in PyTorch, push, NPU K/V check (`--kv`), hybrid run, all-GPU baseline (`--baseline`), all-NPU run (`--all-npu`) |
 | `export_pi0.py` | π0's Gemma 2B prefix as fp16 graphs in 6 parts, and the recipe for their `gemma.bin` ([`../pi0`](../pi0/README.md#the-prefix-on-the-hexagon-npu)) |
 | `pi0_f16.c` | `gemma.bin` from π0's fp32 checkpoint (fp16), on the phone |
-| `pi0_prefix.cpp` | π0's prefix through ONNX Runtime + QNN HTP (C interface for `pi0/pi0npu.mojo`); `-DNPU_TOOL` builds `pi0npu_tool` (compile a part, time, dump K/V) |
+| `pi0_prefix.cpp`, `pi0_prefix.h` | π0's prefix through ONNX Runtime + QNN HTP (C interface for `pi0/pi0npu.mojo` on the phone, and for `vla/x2`'s `vk_server_npu.exe` on the X2 Elite laptop); `-DNPU_TOOL` builds `pi0npu_tool` (compile a part, time, dump K/V) |
 | `pi0_check.py` | π0's prefix graphs on the Mac's CPU, or the phone's K/V dump, against PyTorch's cache |
 
 ## Run

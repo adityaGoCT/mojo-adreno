@@ -23,7 +23,8 @@ run 0 : vision 529.9 ms, projector+embed 2.6 ms, prefix 2560.7 ms, 10 steps 778.
 ```
 
 With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.05–2.16 s instead of 3.6 s**, with the
-actions within 3.2e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)).
+actions within 3.2e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)). On a Snapdragon X2 Elite laptop, the same
+split takes **1.82–1.85 s instead of 3.1–3.9 s** ([below](#the-chunk-with-the-npu-prefix)).
 
 **The action chunk matches PyTorch fp32 within 1.1e-5.** The stated tolerance is 2e-5 absolute on the actions.
 Before the split kernels below it was 7.2e-6: splitting sums over k and over keys reorders fp32 additions.
@@ -176,12 +177,83 @@ The laptop's Hexagon NPU is the same V81 HTP as the phone's. [`../npu/build_win.
 - **The prefix takes 0.80–0.84 s on the NPU** (`pi0npu_tool`, two processes of 10 runs), against 2.13–2.15 s on the
   laptop's GPU: 2.6× faster. The phone's NPU takes 0.79–0.92 s.
 - Its K/V is within 0.085 (K) and 0.16 (V) of PyTorch's, relative 4.8e-3 and 6.0e-3 (layer 17). PyTorch's 10 steps
-  from it (`reference.py --kv`) give actions within 1.95e-3 of the fp32 model's (mean 1.7e-4), against 3.2e-3 from
-  the phone's. The two HTPs' K/V are not bit-identical (27% of the values match, the rest within 0.07 and 0.2):
-  ONNX Runtime 1.24.4's QNN libraries here, QNN 2.42 on the phone.
+  from it (`reference.py --kv`) give actions within 1.95e-3 of the fp32 model's (mean 1.7e-4). `pi0npu_tool` feeds
+  the graphs `reference.py`'s embeddings. From the GPU's own embeddings (below), the laptop's K/V are the phone's,
+  bit for bit: the two HTPs compute the same thing, with ONNX Runtime 1.24.4's QNN libraries here and QNN 2.42 on the
+  phone.
 
-The laptop's chunk with the NPU prefix is not measured: the Mac drives the laptop's GPU through the tunnel, so
-handing it the K/V would need the NPU inside `vk_server` (writing into its mapped buffers).
+### The chunk with the NPU prefix
+
+The Mac drives the laptop's GPU through the tunnel, and the NPU's K/V (30 MB a prefix) cannot cross it every chunk.
+So the laptop's Vulkan server runs the prefix itself. `vk_server_npu.exe` is
+[`../vla/x2/vk_server_win.c`](../vla/x2/vk_server_win.c) built with `npu/pi0_prefix.cpp` and ONNX Runtime's QNN
+package (`vla/x2/build_mac.sh`). `pi0npu` built for the laptop (`-D PI0NPU_REMOTE`) asks for the prefix with one
+request (`M_driver_remote_npu_prefix`) that names the GPU buffers: the embeddings (`tx`) and every layer's `kc` and
+`vc`. Once the GPU has written the embeddings, the server:
+1. converts them to fp16 from the buffer's mapped memory;
+2. runs the six graphs on the NPU;
+3. as each graph finishes, writes its three layers' K and V (fp32) into the mapped memory of `kc` and `vc`, while the
+   NPU runs the next graph.
+
+The request is not answered, so the expert's launches queue behind it. Only the buffers' names cross the tunnel.
+
+One process, 4 runs after the checks. The times are on the laptop's clock (`VK_SERVER_SEGMENTS=1`); the all-GPU
+column is `pi0`'s ([`../vla/x2`](../vla/x2/README.md)):
+
+| Stage | NPU prefix (`pi0npu`) | All on the GPU (`pi0`) |
+|---|---|---|
+| Vision | 378–383 ms | 378–389 ms |
+| Projector + language rows | 49–92 ms | not reported |
+| **Prefix** | **0.81 s** (the graphs 0.81 s; 0.78–0.79 s inside the chunk) | 2.13–2.15 s |
+| 10 steps | 674–701 ms (67–70 ms/step) | 0.70–0.74 s |
+| Stages, added | 1.92–1.97 s | 3.2–3.3 s |
+| **Action chunk** | **1.82–1.85 s** | 3.1–3.9 s |
+
+- **The prefix runs 2.6× faster on the NPU:** 0.81 s against 2.13–2.15 s on the laptop's GPU, the same as
+  `pi0npu_tool` alone (0.80–0.84 s).
+- **The chunk is 1.7–2.1× faster:** 1.82–1.85 s against 3.1–3.9 s. Its stages add up to 1.92–1.97 s against
+  3.2–3.3 s.
+- **The handoff costs 2.4–3.3 ms beyond the graphs.** Converting the embeddings takes 1.2–1.6 ms, and the last
+  graph's K/V are written 1.1–1.7 ms after it finishes. The first 15 layers' K/V reach the GPU's buffers while the
+  NPU is still running.
+- **The chunk comes out under the sum of its stages.** It is one stretch, synchronized once: vision, the language
+  rows, the prefix and the steps' 3,020 launches. While the NPU runs, those launches queue at the server instead of
+  arriving at the tunnel's rate. The 48 language rows (393 KB) cross the tunnel while the GPU runs vision. The
+  all-GPU chunk synchronizes after each of Gemma's 18 layers.
+- On the Mac's clock, with the tunnel's round trip and the launches streaming in, a chunk takes 2.11–2.19 s.
+- The server loads the graphs in 2.0–2.6 s. The GPU's 1.4 GB of weights (no Gemma 2B) take 7 minutes through the
+  tunnel, instead of 20 minutes for the all-GPU program's 5.4 GB.
+
+The checks match the phone's NPU run:
+
+| | Laptop (`pi0npu`, NPU prefix) | Phone (`pi0npu`, NPU prefix) |
+|---|---|---|
+| Prefix K, worst layer | 0.078 (layer 17), relative 4.9e-3 | 0.078, relative 4.9e-3 |
+| Prefix V, worst layer | 0.17 (layer 17), relative 6.2e-3 | 0.17, relative 6.2e-3 |
+| `v_t` of the 10 steps | 2.5e-3 … 4.6e-3 | 2.5e-3 … 4.6e-3 |
+| **Actions (50 × 32)** | **3.2e-3** (mean 1.6e-4) | 3.2e-3 (mean 1.6e-4) |
+
+- **The K/V are the phone's, bit for bit.** Both come from the GPU's embeddings, and the two HTPs give the same values.
+- **The handoff and the expert are exact.** PyTorch's 10 steps from the K/V the laptop handed its expert (`PI0_KV`)
+  give actions within 1.4e-6 of the laptop's.
+- **The prefix's input explains 3.2e-3 against `pi0npu_tool`'s 1.95e-3.** The GPU's embeddings are within 1.2e-4 of
+  `reference.py`'s (values up to 492). Through the fp16 graphs, that difference moves the K/V by up to 0.20 (27% of
+  the values stay equal), and the actions land 3.25e-3 from the fp32 model's instead of 1.95e-3.
+
+To run it, stage `C:\Users\HCKTest\pi0npu` as for `pi0npu_tool` (`runtimes\win-arm64\native`: ONNX Runtime's and
+QNN's DLLs; `model\`: `gemma.bin` and the compiled parts). Start the server in the DLLs' directory:
+`pi0_prefix.cpp` loads `QnnHtp.dll` from next to the program.
+
+```bash
+vla/x2/build_mac.sh pi0npu          # build/vla/x2: vk_server_npu.exe, the plugin, pi0npu
+X2="ssh -p 2222 -i <QDC key> HCKTest@localhost"
+N='C:\Users\HCKTest\pi0npu'
+scp -P 2222 -i <QDC key> build/vla/x2/vk_server_npu.exe HCKTest@localhost:pi0npu/runtimes/win-arm64/native/
+$X2 -L 7795:127.0.0.1:7795 "cd /d $N\runtimes\win-arm64\native & set VK_SERVER_SEGMENTS=1& set VK_PIPELINE_CACHE=$N\pipelines.bin& vk_server_npu.exe 7795"   # leave running
+VK_REMOTE_PORT=7795 MODULAR_DRIVER_PLUGINS=vulkan@$PWD/build/vla/x2/libM_driver_vulkan_remote.dylib \
+    PI0_KV=kv.f32 PI0_OUT=actions.f32 build/vla/x2/pi0npu build/vla/hf/pi0_base/model.safetensors build/vla/pi0/ref "$N\model" 4
+build/vla/venv/bin/python pi0/reference.py --kv kv.f32 --actions actions.f32
+```
 
 ## How it is computed
 

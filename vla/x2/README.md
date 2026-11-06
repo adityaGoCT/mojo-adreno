@@ -17,14 +17,14 @@ bit: SmolVLA's actions within 1.37e-6 of PyTorch.
 
 | File | What |
 |---|---|
-| `vk_server_win.c` | `remote/vk_server.c` with Winsock. `VK_SERVER_SEGMENTS=1` times each stretch between synchronizes on the laptop's clock, without the network round trip. |
-| `executor_win.c`, `shim/dlfcn.h` | `driver/executor.c` unchanged: `dlopen` loads `vulkan-1.dll`, and `rename` replaces the pipeline cache file. |
-| `build_mac.sh` | the server, cross-compiled by Zig 0.15.1 (`zig cc -target aarch64-windows-gnu`), the remote plugin, and the programs for the Mac (`mojo build --emit object --target-accelerator adreno840`, linked against the fork's host runtime) |
+| `vk_server_win.c` | `remote/vk_server.c` with Winsock. `VK_SERVER_SEGMENTS=1` times each stretch between synchronizes on the laptop's clock, without the network round trip. Built with `-DVK_SERVER_NPU` (`vk_server_npu.exe`), it also runs π0's Gemma prefix on the laptop's Hexagon NPU (`npu/pi0_prefix.cpp`) and writes its K/V into the GPU's buffers ([`../../pi0`](../../pi0/README.md#the-chunk-with-the-npu-prefix)). |
+| `executor_win.c`, `shim/dlfcn.h` | `driver/executor.c` unchanged: `dlopen` loads `vulkan-1.dll`, and `rename` replaces the pipeline cache file. It adds the mapped memory of a buffer for the server's own requests. |
+| `build_mac.sh` | the servers, cross-compiled by Zig 0.15.1 (`zig cc -target aarch64-windows-gnu`; `vk_server_npu.exe` against ONNX Runtime's QNN NuGet package), the remote plugin, and the programs for the Mac (`mojo build --emit object --target-accelerator adreno840`, linked against the fork's host runtime; `pi0npu` with `-D PI0NPU_REMOTE`) |
 
 ## Run it
 
 ```bash
-vla/x2/build_mac.sh                                   # build/vla/x2/: vk_server.exe, the plugin, smolvla, pi0
+vla/x2/build_mac.sh                                   # build/vla/x2/: vk_server.exe, vk_server_npu.exe, the plugin, smolvla, pi0
 X2="ssh -p 2222 -i <QDC key> HCKTest@localhost"       # through the QDC tunnel to the laptop's port 22
 scp -P 2222 -i <QDC key> build/vla/x2/vk_server.exe HCKTest@localhost:vla/
 $X2 -L 7790:127.0.0.1:7788 "cd vla & set VK_SERVER_SEGMENTS=1& vk_server.exe 7788"   # leave running
@@ -70,3 +70,8 @@ slower here too (the version without that is what `pi0` now does).
 The laptop's π0 chunk includes 0.1–0.2 s for the 48 language rows (393 KB, gathered on the Mac) to cross the
 tunnel, and π0 synchronizes after each prefix layer. Its stages add up to 3.2–3.3 s. The expert's steps gain
 least: 2,840 small launches a chunk, streamed at the tunnel's rate.
+
+With Gemma 2B's prefix on the laptop's Hexagon NPU, inside the server (`vk_server_npu.exe`, `pi0npu`), the chunk takes
+**1.82–1.85 s** on the laptop's clock: vision 378–383 ms, the prefix 0.81 s, 10 steps 674–701 ms. The NPU's K/V go
+into the GPU's buffers on the laptop and never cross the tunnel. Details in
+[`../../pi0`](../../pi0/README.md#the-chunk-with-the-npu-prefix).
