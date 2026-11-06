@@ -16,7 +16,7 @@
 <p style="font-size:36px;font-weight:600;color:#2563C9;width:40px">3</p>
 <p style="font-size:24px;line-height:1.35;flex:1"><b>Prefill</b>: tokens grouped by expert (about 25 each of 404); each expert’s weights read once, a grouped GEMM.</p>
 </div>
-<table style="font-size:24px;color:#18212F;margin-top:8px">
+<table style="font-size:24px;color:#18212F">
 <tr><th style="width:30%">GPU prefill</th><th style="width:35%">Experts grouped</th><th style="width:35%">A token at a time</th></tr>
 <tr><td>128 tokens</td><td><b>1.66–1.71 s</b></td><td>4.02–4.25 s</td></tr>
 <tr style="background:#EEF1F5"><td>256 tokens</td><td><b>2.57–2.66 s</b></td><td>7.48–7.80 s</td></tr>
@@ -37,7 +37,7 @@
 <p style="font-size:36px;font-weight:600;color:#B4501A;width:40px">3</p>
 <p style="font-size:24px;line-height:1.35;flex:1"><b>All 128 experts</b> run for every token, weighted: 16× the useful arithmetic.</p>
 </div>
-<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:20px 22px;margin-top:8px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:20px 22px">
 <h3 style="font-size:28px;font-weight:600">And it does not fit as fp16</h3>
 <p style="font-size:24px;color:#4A5568;line-height:1.4">The whole model is 61 GB in fp16, against the laptop’s 33.6 GB. On the HTP it would need the quantized path (w4a16) and contexts of a few layers each.</p>
 </div>
