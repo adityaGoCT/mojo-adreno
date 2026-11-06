@@ -64,6 +64,13 @@ Five slides on the Adreno backend itself: **[Adreno in Modular](docs/presentatio
 (subgroup shuffles and cooperative matrices), the C runners, prefill and decode rates for every model,
 and what bringing MAX to the phone would take. [View it online](https://claude.ai/artifact/KGCduYsofd5m8pzQtXjJZ4).
 
+The GPU against the Hexagon NPU, in measured times: **[GPU or NPU? What we measured on Snapdragon](docs/presentation-gpu-npu/gpu-or-npu-on-snapdragon.pdf)**
+(11 slides, PDF): Qwen3-30B-A3B's experts on the X2 Elite laptop's GPU and NPU (static graphs compute all 128),
+where the NPU's prefill helps (Llama 3.2 1B 4.1×, π0's Gemma prefix 2.6–2.9×, w8a16 and w4a16 graphs), and Gemma 4
+E2B and E4B on the Adreno 840 in int4, int8 and mixed storage. Also as an
+[HTML slide viewer](docs/presentation-gpu-npu/gpu-or-npu-on-snapdragon.html) (←/→, N for notes) with
+[speaker notes](docs/presentation-gpu-npu/gpu-or-npu-on-snapdragon-speaker-notes.md).
+
 [![Mojo and MAX on Adreno, title slide](docs/presentation/cover.png)](docs/presentation/mojo-and-max-on-adreno.pdf)
 
 | backend | path |

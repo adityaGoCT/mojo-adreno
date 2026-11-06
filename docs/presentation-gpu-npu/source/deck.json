@@ -1,0 +1,55 @@
+{
+  "v": 4,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-06T07:30:00Z"
+  },
+  "lists": "css",
+  "title": "GPU or NPU on Snapdragon",
+  "order": [
+    "cover",
+    "routes",
+    "moe-how",
+    "moe-numbers",
+    "llama",
+    "quant",
+    "pi0",
+    "scoreboard",
+    "gemma4",
+    "gemma4-int8",
+    "end"
+  ],
+  "sections": {
+    "intro": {
+      "description": "The Adreno GPU and the Hexagon NPU: what runs where",
+      "start": "cover"
+    },
+    "moe": {
+      "description": "A mixture of experts (Qwen3-30B-A3B) on the X2 Elite laptop’s GPU and NPU",
+      "start": "moe-how"
+    },
+    "npu": {
+      "description": "Where the Hexagon NPU helps: Llama, quantized graphs, π0, and a scoreboard",
+      "start": "llama"
+    },
+    "gemma": {
+      "description": "Gemma 4 E2B and E4B on the Adreno 840: int4, int8 and mixed",
+      "start": "gemma4"
+    },
+    "end": {
+      "description": "What decides GPU or NPU, and what comes next",
+      "start": "end"
+    }
+  },
+  "faces": {
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    },
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    }
+  },
+  "designSystems": []
+}
