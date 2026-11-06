@@ -1,7 +1,7 @@
 """Where a TurboVLA chunk's time goes on the laptop: pairs turbovla's profile marks (TURBOVLA_PROFILE=1: each operation
 synchronized alone) with vk_server's segments (VK_SERVER_SEGMENTS=1, the laptop's clock), in order, and sums them.
 
-  python3 turbovla/profile.py <turbovla's output> <vk_server's log>
+  python3 turbovla/profile_chunk.py <turbovla's output> <vk_server's log>
 """
 import collections
 import re

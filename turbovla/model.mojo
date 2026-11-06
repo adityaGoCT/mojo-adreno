@@ -164,6 +164,9 @@ struct TurboVLA(Movable):
     var mma16: Bool  # TURBOVLA_MMA16: DINOv3's projections on the fp16 matrix units (fp16 sums)
     var profiling: Bool  # synchronize after each operation and print its label, for the server's segments
     var tag: String
+    var lib: OwnedDLHandle  # the driver plugin: M_driver_remote_file, M_driver_remote_npug_*
+    var npu_vision: Int  # TURBOVLA_NPU_VISION (the compiled vision graph on the laptop): its handle there, or -1
+    var npu_ms: Float64  # the NPU's time for the last vision run (server clock)
 
     def __init__(out self, ctx: DeviceContext, path: String) raises:
         self.ctx = ctx
@@ -232,11 +235,23 @@ struct TurboVLA(Movable):
         self.f16 = getenv("TURBOVLA_F16") != "" and getenv("TURBOVLA_F16") != "0"
         self.mma16 = getenv("TURBOVLA_MMA16") != "" and getenv("TURBOVLA_MMA16") != "0"
         self.tag = ""
+        self.lib = OwnedDLHandle(plugin_path())
+        self.npu_vision = -1
+        self.npu_ms = 0
         for buf in [self.x, self.xn, self.att, self.tx, self.tatt, self.l, self.lnb, self.tatt2, self.st, self.stn,
                     self.mem, self.xd, self.xdn, self.datt]:
             ctx.enqueue_memset(buf, Float32(0))
         self.load(path)
         self.tables()
+        var graph = getenv("TURBOVLA_NPU_VISION")
+        if graph:
+            var ms = Float64(0)
+            var h = self.lib.call["M_driver_remote_npug_open", Int32](graph.as_c_string_span().unsafe_ptr(),
+                                                                      Pointer(to=ms))
+            if h < 0:
+                raise Error("M_driver_remote_npug_open failed: is the server vk_server_npu.exe, run from its DLLs?")
+            self.npu_vision = Int(h)
+            print("NPU: the vision graph", graph, "opened in", round(ms, 1), "ms")
 
     def load(mut self, path: String) raises:
         """Every tensor of the checkpoint (fp32) as a device buffer; the MultiheadAttention's in_proj split into
@@ -247,7 +262,6 @@ struct TurboVLA(Movable):
         for e in ck.sizes.items():
             names.append(e.key)
         if remote:
-            var lib = OwnedDLHandle(plugin_path())
             for name in names:
                 if "pooler" in name or "mask_token" in name:
                     continue
@@ -255,7 +269,7 @@ struct TurboVLA(Movable):
                     raise Error(name + ": not fp32")
                 var n = ck.sizes[name]
                 var buf = self.ctx.enqueue_create_buffer[DType.float32](n // 4)
-                if lib.call["M_driver_remote_file", Int32](UInt64(Int(buf.unsafe_ptr())), UInt64(n),
+                if self.lib.call["M_driver_remote_file", Int32](UInt64(Int(buf.unsafe_ptr())), UInt64(n),
                                                           remote.as_c_string_span().unsafe_ptr(),
                                                           UInt64(ck.offsets[name])) != 0:
                     raise Error("M_driver_remote_file failed for " + name)
@@ -697,10 +711,32 @@ struct TurboVLA(Movable):
         ctx.enqueue_function[tk.tanh_rows](self.a, self.actions, Int32(NQ * ADIM), grid_dim=1, block_dim=128)
         self.tick("tanh")
 
+    def vision_npu(mut self) raises:
+        """GPU+NPU: the vision graph (DINOv3, the projection, the view embedding) on the laptop's NPU, inside
+        vk_server_npu: the pixels read from the GPU's buffer, the 512 vision tokens written into mem."""
+        var ins = [UInt64(Int(self.pix.unsafe_ptr()))]
+        var inb = [UInt64(NV * 3 * IMG * IMG * 4)]
+        var outs = [UInt64(Int(self.v.unsafe_ptr()))]
+        var outb = [UInt64(NVT * HID * 4)]
+        if self.lib.call["M_driver_remote_npug_run", Int32](Int32(self.npu_vision), Int32(1), ins.unsafe_ptr(),
+                                                            inb.unsafe_ptr(), Int32(1), outs.unsafe_ptr(),
+                                                            outb.unsafe_ptr()) != 0:
+            raise Error("M_driver_remote_npug_run failed")
+        self.tick("NPU vision graph")
+
+    def npu_time(mut self) raises -> Float64:
+        var ms = Float64(0)
+        if self.lib.call["M_driver_remote_npug_time", Int32](Pointer(to=ms)) != 0:
+            raise Error("the NPU graph failed (M_driver_remote_npug_time)")
+        return ms
+
     def chunk(mut self, with_text: Bool) raises:
         """One action chunk: vision, (text,) fusion, action. Enqueued only; the caller synchronizes."""
-        self.vision()
-        self.project()
+        if self.npu_vision >= 0:
+            self.vision_npu()
+        else:
+            self.vision()
+            self.project()
         if with_text:
             self.text()
         else:

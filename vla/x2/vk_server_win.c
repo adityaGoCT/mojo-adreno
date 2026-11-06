@@ -84,6 +84,7 @@ static void end_segment(int segments) {
 }
 
 #ifdef VK_SERVER_NPU
+#include "../../npu/graph.h"
 #include "../../npu/pi0_prefix.h"
 
 char* vkx_host(uint64_t id, uint64_t offset, uint64_t size);  // executor_win.c
@@ -126,6 +127,52 @@ static void npu_prefix(const char* p, uint32_t n, int segments) {
   if (segments)
     fprintf(stderr, "npu prefix: x to fp16 %.1f ms, graphs %.1f ms, through the last K/V %.1f ms\n", npu_times[0],
             npu_times[1], npu_times[2]);
+}
+
+// A graph run (OP_NPUG_RUN): once the GPU is done, its inputs straight from the GPU's memory and its outputs into it.
+static double npug_ms;
+static void npug_run_request(const char* p, uint32_t n, int segments) {
+  const uint32_t* h = (const uint32_t*)p;
+  if (n < 16) return vkx_fail("malformed NPU graph run");
+  int handle = (int)h[0], nin = (int)h[1], nout = (int)h[2];
+  if (nin > 16 || nout > 16 || n != 16 + 24 * (uint32_t)(nin + nout)) return vkx_fail("malformed NPU graph run");
+  if (npug_count(handle, 0) != nin || npug_count(handle, 1) != nout) return vkx_fail("NPU graph: wrong arity");
+  const uint64_t* w = (const uint64_t*)(p + 16);
+  const void* in[16];
+  float* out[16];
+  for (int i = 0; i < nin + nout; i++) {
+    const uint64_t* b = w + 3 * i;
+    int output = i >= nin;
+    if ((int64_t)b[2] != 4 * npug_numel(handle, output, output ? i - nin : i))
+      return vkx_fail("NPU graph: a buffer's size is not the graph's");
+    char* ptr = vkx_host(b[0], b[1], b[2]);  // the first waits for the GPU
+    if (!ptr) return vkx_fail("NPU graph: buffer out of range");
+    if (output)
+      out[i - nin] = (float*)ptr;
+    else
+      in[i] = ptr;
+  }
+  if (npug_run(handle, in, out, &npug_ms)) return vkx_fail(npug_error());
+  if (segments) fprintf(stderr, "npu graph %d: %.1f ms\n", handle, npug_ms);
+}
+
+// OP_NPUG_OPEN and OP_NPUG_TIME, answered.
+static void npug_answered(uint32_t op, const char* p, uint32_t n) {
+  if (op == OP_NPUG_OPEN) {
+    char path[1024];
+    snprintf(path, sizeof path, "%.*s", (int)n, p);
+    double ms = 0;
+    int32_t handle = npug_open(path, &ms);
+    if (handle < 0) return answer_error(npug_error());
+    char out[12];
+    memcpy(out, &handle, 4);
+    memcpy(out + 4, &ms, 8);
+    answer(NULL, 0, out, sizeof out);
+  } else {
+    const char* e = vkx_take_error();
+    if (e) return answer_error(e);
+    answer(NULL, 0, &npug_ms, 8);
+  }
 }
 
 // OP_NPU_OPEN, OP_NPU_ROPE and OP_NPU_TIME, answered.
@@ -205,16 +252,23 @@ int main(int argc, char** argv) {
       if (segment_start < 0) segment_start = now_ms();
       payload = realloc(payload, header[1] ? header[1] : 1);
       if (recv_all(payload, header[1])) break;
-      if (header[0] >= OP_NPU_OPEN && header[0] <= OP_NPU_TIME) {
+      if (header[0] >= OP_NPU_OPEN && header[0] <= OP_NPUG_TIME) {
 #ifdef VK_SERVER_NPU
-        if (header[0] == OP_NPU_PREFIX) {
-          npu_prefix(payload, header[1], segments);
+        if (header[0] == OP_NPU_PREFIX || header[0] == OP_NPUG_RUN) {
+          if (header[0] == OP_NPU_PREFIX)
+            npu_prefix(payload, header[1], segments);
+          else
+            npug_run_request(payload, header[1], segments);
           prefixes++;
           continue;
         }
-        npu_answered(header[0], payload, header[1]);
+        if (header[0] >= OP_NPUG_OPEN)
+          npug_answered(header[0], payload, header[1]);
+        else
+          npu_answered(header[0], payload, header[1]);
 #else
-        if (header[0] != OP_NPU_PREFIX) answer_error("no NPU in this vk_server (vk_server_npu.exe has one)");
+        if (header[0] != OP_NPU_PREFIX && header[0] != OP_NPUG_RUN)
+          answer_error("no NPU in this vk_server (vk_server_npu.exe has one)");
 #endif
         end_segment(segments);
         continue;

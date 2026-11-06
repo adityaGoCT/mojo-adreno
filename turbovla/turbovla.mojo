@@ -48,6 +48,27 @@ def main() raises:
 
     # the check, stage by stage (the first run also creates the pipelines)
     var tc = now_ms()
+    if m.npu_vision >= 0:  # GPU+NPU: check the NPU's vision tokens, then fusion and action on the GPU
+        m.vision_npu()
+        show("vision tokens from the NPU (512 x 256)", compare(fetch(ctx, m.mem, NVT * HID), HID,
+                                                               read_f32(refdir + "/vision_tokens.f32"), HID, span(NVT),
+                                                               HID))
+        print("NPU vision graph:", round(m.npu_time(), 1), "ms (server clock)")
+        m.text()
+        ctx.enqueue_copy(m.l, m.l0)
+        for i in range(NF):
+            m.fusion(i)
+        m.action()
+        show("actions (12 x 7), GPU+NPU", compare(fetch(ctx, m.actions, NQ * ADIM), ADIM,
+                                                  read_f32(refdir + "/actions.f32"), ADIM, span(NQ), ADIM))
+        for r in range(runs):
+            var a = now_ms()
+            m.chunk(False)
+            ctx.synchronize()
+            print("run", r, ": chunk without text", round(now_ms() - a, 1), "ms (Mac clock); NPU vision",
+                  round(m.npu_time(), 1), "ms")
+        print("done")
+        return
     if getenv("TURBOVLA_DEBUG"):  # DINOv3 layer by layer against build/turbovla/ref/dbg (dino_layers.py)
         var vrows = List[Int]()
         for v in range(NV):

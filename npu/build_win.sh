@@ -18,4 +18,7 @@ mkdir -p $OUT
 "$ZIG" c++ -target aarch64-windows-gnu -O2 -std=c++17 -DNPU_TOOL -I "$ORT/build/native/include" \
     -o $OUT/pi0npu_tool.exe npu/pi0_prefix.cpp "$ORT/runtimes/win-arm64/native/onnxruntime.lib"
 "$ZIG" cc -target aarch64-windows-gnu -O2 -o $OUT/pi0_f16.exe npu/pi0_f16.c
+# graph_tool: any static ONNX graph on the HTP (npu/graph.cpp): compile a context, time it, dump its outputs
+"$ZIG" c++ -target aarch64-windows-gnu -O2 -std=c++17 -DNPU_TOOL -I "$ORT/build/native/include" \
+    -o $OUT/graph_tool.exe npu/graph.cpp "$ORT/runtimes/win-arm64/native/onnxruntime.lib"
 ls -la $OUT

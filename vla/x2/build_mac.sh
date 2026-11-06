@@ -24,8 +24,9 @@ fi
 "$ZIG" cc -target aarch64-windows-gnu -O2 $VK -c -o $OUT/executor_win.o vla/x2/executor_win.c
 "$ZIG" c++ -target aarch64-windows-gnu -O2 -std=c++17 -I "$ORT/build/native/include" -c -o $OUT/pi0_prefix.o \
     npu/pi0_prefix.cpp
+"$ZIG" c++ -target aarch64-windows-gnu -O2 -std=c++17 -I "$ORT/build/native/include" -c -o $OUT/graph.o npu/graph.cpp
 "$ZIG" c++ -target aarch64-windows-gnu -o $OUT/vk_server_npu.exe $OUT/vk_server_npu.o $OUT/executor_win.o \
-    $OUT/pi0_prefix.o "$ORT/runtimes/win-arm64/native/onnxruntime.lib" -lws2_32
+    $OUT/pi0_prefix.o $OUT/graph.o "$ORT/runtimes/win-arm64/native/onnxruntime.lib" -lws2_32
 clang++ -std=c++17 -O1 -shared -fPIC -I"$MOJO_SRC/SDK/include" -o $OUT/libM_driver_vulkan_remote.dylib \
     driver/plugin.cpp remote/transport.cpp
 for name in ${@:-smolvla pi0}; do

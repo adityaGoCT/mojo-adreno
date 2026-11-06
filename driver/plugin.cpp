@@ -47,7 +47,8 @@ const char *env(const char *name) {
 }
 
 const char *opNames[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync",
-                         "file", "gather", "record", "replay", "npu_open", "npu_rope", "npu_prefix", "npu_time"};
+                         "file", "gather", "record", "replay", "npu_open", "npu_rope", "npu_prefix", "npu_time",
+                         "npug_open", "npug_run", "npug_time"};
 
 // VK_DRIVER_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
 // received, printed at exit.
@@ -1093,6 +1094,60 @@ __attribute__((visibility("default"))) int M_driver_remote_npu_time(double *conv
   memcpy(convert, out.data(), 8);
   memcpy(graphs, out.data() + 8, 8);
   memcpy(total, out.data() + 16, 8);
+  return 0;
+}
+
+// Any static ONNX graph on the NPU of the device running vla/x2's vk_server_npu (npu/graph.cpp there).
+// M_driver_remote_npug_open loads the compiled graph at `path` (a path there): returns its handle, *ms the time it
+// took; or -1.
+__attribute__((visibility("default"))) int M_driver_remote_npug_open(const char *path, double *ms) {
+  std::string out;
+  if (!path || !call(OP_NPUG_OPEN, path, strlen(path), nullptr, 0, &out) || out.size() != 12)
+    return -1;
+  int32_t handle;
+  memcpy(&handle, out.data(), 4);
+  memcpy(ms, out.data() + 4, 8);
+  return handle;
+}
+
+// Graph `handle` on nin inputs at the device addresses in[i] (in_bytes[i] each: fp32 or int32, as the graph takes
+// them), its nout fp32 outputs written to the device memory at out[i], once the work before it is done. Not waited
+// for: the requests after it run when it is done, and its errors come with the next answer. Returns 0, or -1 for
+// addresses this plugin did not hand out.
+__attribute__((visibility("default"))) int M_driver_remote_npug_run(int32_t handle, int32_t nin, const uint64_t *in,
+                                                                     const uint64_t *in_bytes, int32_t nout,
+                                                                     const uint64_t *out, const uint64_t *out_bytes) {
+  std::vector<uint64_t> request(2, 0);
+  uint32_t head[4] = {static_cast<uint32_t>(handle), static_cast<uint32_t>(nin), static_cast<uint32_t>(nout), 0};
+  memcpy(request.data(), head, 16);
+  auto place = [&](uint64_t address, uint64_t size) {
+    uint64_t offset = 0;
+    Memory *m = memoryAt(address, offset);
+    if (!m || m->host || offset + size > m->size) {
+      fprintf(stderr, "vulkan driver: NPU graph with unknown device memory %llx (+%llu bytes)\n",
+              static_cast<unsigned long long>(address), static_cast<unsigned long long>(size));
+      return false;
+    }
+    request.push_back(m->buffer);
+    request.push_back(m->base + offset);
+    request.push_back(size);
+    return true;
+  };
+  for (int i = 0; i < nin; ++i)
+    if (!place(in[i], in_bytes[i]))
+      return -1;
+  for (int i = 0; i < nout; ++i)
+    if (!place(out[i], out_bytes[i]))
+      return -1;
+  return call(OP_NPUG_RUN, request.data(), request.size() * 8) ? 0 : -1;
+}
+
+// The last graph run's time on the server's clock (ms). Waits for the work before it. Returns 0, or -1.
+__attribute__((visibility("default"))) int M_driver_remote_npug_time(double *ms) {
+  std::string out;
+  if (!call(OP_NPUG_TIME, nullptr, 0, nullptr, 0, &out) || out.size() != 8)
+    return -1;
+  memcpy(ms, out.data(), 8);
   return 0;
 }
 

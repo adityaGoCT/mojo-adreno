@@ -39,7 +39,14 @@ enum {
                   // when the GPU is done, x (n rows of 2048 fp32) through the graphs; as each graph finishes, its
                   // layers' K and V (fp32 [n][256]) written there. Not answered: the launches after it queue behind it
   OP_NPU_TIME,    // -> f64 x 3: the last prefix's ms: x to fp16, the graphs, all of it through the last K/V written
-  OP_LAST = OP_NPU_TIME,
+  // Any static ONNX graph on the executor's NPU (npu/graph.cpp inside vla/x2's vk_server_npu), reading its inputs from
+  // and writing its outputs to the GPU's buffers: the VLA ports' NPU parts (turbovla/ first).
+  OP_NPUG_OPEN,   // path of a compiled graph (an HTP context: npu/graph.cpp's graph_tool compile) -> i32 handle, f64 ms
+  OP_NPUG_RUN,    // u32 handle, u32 inputs, u32 outputs, u32 0, then per input and per output u64 buffer, offset, bytes:
+                  // when the GPU is done, the graph on its inputs (fp32 or int32 in the GPU's memory), its fp32 outputs
+                  // written there. Not answered: the launches after it queue behind it; errors come with the next answer
+  OP_NPUG_TIME,   // -> f64: the last run's ms on the server's clock
+  OP_LAST = OP_NPUG_TIME,
 };
 
 // A kernel launch: storage buffers at bindings 0..nbind-1, then the params buffer (if any).
