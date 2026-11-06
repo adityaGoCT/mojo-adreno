@@ -211,3 +211,18 @@ def attn_small[MK: Int](q: F32P, k: F32P, v: F32P, o: F32P, mask: I32P, ldq: Int
         for j in range(n):
             acc += s[j] * vp[j * Int(ldv)]
         o[i * Int(ldo) + Int(ocol) + h * d + c] = acc * inv
+
+
+def scale_rows(w: F32P, g: F32P, k: Int32, total: Int32):
+    """w[r, :] *= g[r] (rows k long): LayerScale folded into the projection before it (its weight and bias)."""
+    var e = global_idx.x
+    if e >= Int(total):
+        return
+    w[e] = w[e] * g[e // Int(k)]
+
+
+def to_f16(src: F32P, dst: UnsafePointer[Float16, MutAnyOrigin], total: Int32):
+    var e = global_idx.x
+    if e >= Int(total):
+        return
+    dst[e] = src[e].cast[DType.float16]()

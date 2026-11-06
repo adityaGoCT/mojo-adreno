@@ -26,8 +26,9 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 from host import Scratch, Weights, attend, groups, lin
 from safetensors import Checkpoint
 import tk
+import vgemm
 import vrow
-from vgemm import NONE
+from vgemm import GELU_ERF, NONE
 
 comptime IMG = 256
 comptime PATCH = 16
@@ -95,6 +96,8 @@ struct TurboVLA(Movable):
     var ctx: DeviceContext
     var w: Weights[DType.float16, False]  # every tensor fp32, in w.floats
     var s: Scratch
+    var wv: Weights[DType.float16, True]  # TURBOVLA_MMA16: DINOv3's layer weights, for the fp16 matrix units
+    var s16: Scratch
     # inputs
     var pix: DeviceBuffer[DType.float32]  # [2, 3, 256, 256], normalized
     var tids: DeviceBuffer[DType.int32]  # [64]
@@ -156,6 +159,9 @@ struct TurboVLA(Movable):
     var a: DeviceBuffer[DType.float32]
     var actions: DeviceBuffer[DType.float32]  # [12, 7]
     var bytes: Int
+    var opt: Bool  # TURBOVLA_OPT: fused q/k/v, LayerScale folded into the weights
+    var f16: Bool  # TURBOVLA_F16: the projections' weights rounded to fp16 (fp32 matrix units)
+    var mma16: Bool  # TURBOVLA_MMA16: DINOv3's projections on the fp16 matrix units (fp16 sums)
     var profiling: Bool  # synchronize after each operation and print its label, for the server's segments
     var tag: String
 
@@ -163,6 +169,8 @@ struct TurboVLA(Movable):
         self.ctx = ctx
         self.w = Weights[DType.float16, False](ctx)
         self.s = Scratch(ctx, TR * VF, TR * VF * 16, 0, TR)
+        self.wv = Weights[DType.float16, True](ctx)
+        self.s16 = Scratch(ctx, 64, 64, VROWS * VF, TR)
         self.pix = ctx.enqueue_create_buffer[DType.float32](NV * 3 * IMG * IMG)
         self.tids = ctx.enqueue_create_buffer[DType.int32](TR)
         self.tpos = ctx.enqueue_create_buffer[DType.int32](TR)
@@ -220,6 +228,9 @@ struct TurboVLA(Movable):
         self.actions = ctx.enqueue_create_buffer[DType.float32](NQ * ADIM)
         self.bytes = 0
         self.profiling = False
+        self.opt = getenv("TURBOVLA_OPT") != "" and getenv("TURBOVLA_OPT") != "0"
+        self.f16 = getenv("TURBOVLA_F16") != "" and getenv("TURBOVLA_F16") != "0"
+        self.mma16 = getenv("TURBOVLA_MMA16") != "" and getenv("TURBOVLA_MMA16") != "0"
         self.tag = ""
         for buf in [self.x, self.xn, self.att, self.tx, self.tatt, self.l, self.lnb, self.tatt2, self.st, self.stn,
                     self.mem, self.xd, self.xdn, self.datt]:
@@ -262,14 +273,81 @@ struct TurboVLA(Movable):
                 self.ctx.synchronize()
                 self.w.floats[name] = buf
                 self.bytes += len(data)
+        if self.opt:
+            self.fuse()
+        if self.f16:
+            self.halve()
         for l in range(DL):
             var p = DEC + String(l) + ".multihead_attn."
-            var wq = self.w.floats[p + "in_proj_weight"]
             var bq = self.w.floats[p + "in_proj_bias"]
-            self.w.floats[p + "q.weight"] = sub(wq, 0, HID * HID)
-            self.w.floats[p + "kv.weight"] = sub(wq, HID * HID, 2 * HID * HID)
             self.w.floats[p + "q.bias"] = sub(bq, 0, HID)
             self.w.floats[p + "kv.bias"] = sub(bq, HID, 2 * HID)
+            if self.f16:
+                var wq = self.w.halves[p + "in_proj_weight"]
+                self.w.halves[p + "q.weight"] = wq.create_sub_buffer[DType.float16](0, HID * HID)
+                self.w.halves[p + "kv.weight"] = wq.create_sub_buffer[DType.float16](HID * HID, 2 * HID * HID)
+            else:
+                var wq = self.w.floats[p + "in_proj_weight"]
+                self.w.floats[p + "q.weight"] = sub(wq, 0, HID * HID)
+                self.w.floats[p + "kv.weight"] = sub(wq, HID * HID, 2 * HID * HID)
+
+    def cat(mut self, key: String, names: List[String], n: Int) raises:
+        """A device tensor made of the tensors `names` (n floats each, rows concatenated); "" for zeros."""
+        var buf = self.ctx.enqueue_create_buffer[DType.float32](len(names) * n)
+        for i in range(len(names)):
+            if names[i] == "":
+                self.ctx.enqueue_memset(sub(buf, i * n, n), Float32(0))
+            else:
+                self.ctx.enqueue_copy(sub(buf, i * n, n), self.w.floats[names[i]])
+        self.w.floats[key] = buf
+
+    def fold(mut self, wname: String, bname: String, gname: String, n: Int, k: Int) raises:
+        """LayerScale g into the projection's rows: W <- diag(g) W, b <- g b."""
+        var g = self.w.floats[gname]
+        self.ctx.enqueue_function[tk.scale_rows](self.w.floats[wname], g, Int32(k), Int32(n * k),
+                                                 grid_dim=groups(n * k, 256), block_dim=256)
+        self.ctx.enqueue_function[tk.scale_rows](self.w.floats[bname], g, Int32(1), Int32(n),
+                                                 grid_dim=groups(n, 256), block_dim=256)
+
+    def fuse(mut self) raises:
+        """GPU optimized: q/k/v as one projection (DINOv3: k has no bias, zeros), LayerScale folded into o and down."""
+        for i in range(VL):
+            var p = VB + "layer." + String(i) + "."
+            var a = p + "attention."
+            self.cat(a + "qkv.weight", [a + "q_proj.weight", a + "k_proj.weight", a + "v_proj.weight"], VD * VD)
+            self.cat(a + "qkv.bias", [a + "q_proj.bias", "", a + "v_proj.bias"], VD)
+            self.fold(a + "o_proj.weight", a + "o_proj.bias", p + "layer_scale1.lambda1", VD, VD)
+            self.fold(p + "mlp.down_proj.weight", p + "mlp.down_proj.bias", p + "layer_scale2.lambda1", VD, VF)
+        for i in range(BL):
+            var a = TB + "encoder.layer." + String(i) + ".attention.self."
+            self.cat(a + "qkv.weight", [a + "query.weight", a + "key.weight", a + "value.weight"], BD * BD)
+            self.cat(a + "qkv.bias", [a + "query.bias", a + "key.bias", a + "value.bias"], BD)
+        self.ctx.synchronize()
+
+    def halve(mut self) raises:
+        """Every projection's weight to fp16 (w.halves); norms, biases, embeddings and tokens stay fp32."""
+        var names = List[String]()
+        for e in self.w.floats.items():
+            var nm = e.key
+            if not (nm.endswith("weight") or nm.endswith("in_proj_weight")):
+                continue
+            if "norm" in nm or "LayerNorm" in nm or "embeddings." in nm or "action_queries" in nm:
+                if "patch_embeddings" not in nm:
+                    continue
+            if len(e.value) < HID * 8:  # the state's LayerNorm and other vectors
+                continue
+            names.append(nm)
+        for nm in names:
+            var src = self.w.floats[nm]
+            var n = len(src)
+            var dst = self.ctx.enqueue_create_buffer[DType.float16](n)
+            self.ctx.enqueue_function[tk.to_f16](src, dst, Int32(n), grid_dim=groups(n, 256), block_dim=256)
+            if self.mma16 and nm.startswith(VB + "layer."):
+                self.wv.halves[nm] = dst
+            else:
+                self.w.halves[nm] = dst
+            _ = self.w.floats.pop(nm)
+        self.ctx.synchronize()
 
     def tables(mut self) raises:
         """DINOv3's RoPE for the 16 x 16 patches: angle 2 pi coord * 100^(-f / 16) for the patch center's y (f < 16)
@@ -329,11 +407,33 @@ struct TurboVLA(Movable):
             print("mark", self.tag + " | " + what)
 
     # launches
-    def proj[BIAS: Bool, RES: Bool](self, wname: String, bname: String, x: DeviceBuffer[DType.float32],
-                                    y: DeviceBuffer[DType.float32], rows: Int, n: Int, k: Int, ldx: Int, ldy: Int,
-                                    xoff: Int = 0) raises:
-        lin[DType.float16, False, NONE, BIAS, RES](self.w, self.s, wname, bname, x, y, rows, n, k, ldx, ldy, xoff)
+    def proj[BIAS: Bool, RES: Bool, ACT: Int = NONE](self, wname: String, bname: String,
+                                                     x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
+                                                     rows: Int, n: Int, k: Int, ldx: Int, ldy: Int,
+                                                     xoff: Int = 0) raises:
+        """y = act(x) W^T (+ b) (+ y); ACT applies to x as the matmul stages it (GELU_ERF: the GELU before W)."""
+        lin[DType.float16, False, ACT, BIAS, RES](self.w, self.s, wname, bname, x, y, rows, n, k, ldx, ldy, xoff)
         self.tick("proj " + String(rows) + "x" + String(n) + "x" + String(k))
+
+    def proj16[BIAS: Bool, RES: Bool, ACT: Int = NONE](self, wname: String, bname: String,
+                                                       x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
+                                                       rows: Int, n: Int, k: Int, ldx: Int, ldy: Int) raises:
+        """proj on the fp16 matrix units (vgemm.gemm16: X and W in fp16, fp16 sums), for DINOv3's layers; the bias
+        (fp32, in w) and the residual added in fp32."""
+        var b = self.w.floats[bname] if BIAS else self.s16.xa
+        var ctx = self.ctx
+        var w16 = self.wv.halves[wname]
+        ctx.enqueue_function[vgemm.to_half[ACT]](x, self.s16.xh, Int32(k), Int32(ldx), Int32(0), Float32(1),
+                                                 Int32(rows * k), grid_dim=groups(rows * k, 256), block_dim=256)
+        if rows % 128 == 0:
+            ctx.enqueue_function[vgemm.gemm16[2, 2]](self.s16.xh, w16, self.s16.yh, Int32(n), Int32(k), Int32(ldy),
+                                                     grid_dim=Dim(groups(n, 128), rows // 128), block_dim=256)
+        else:
+            ctx.enqueue_function[vgemm.gemm16[1, 2]](self.s16.xh, w16, self.s16.yh, Int32(n), Int32(k), Int32(ldy),
+                                                     grid_dim=Dim(groups(n, 128), rows // 64), block_dim=128)
+        ctx.enqueue_function[vgemm.finish16[BIAS, RES]](self.s16.yh, b, y, Int32(n), Int32(ldy), Int32(rows * n),
+                                                        grid_dim=groups(rows * n, 256), block_dim=256)
+        self.tick("proj16 " + String(rows) + "x" + String(n) + "x" + String(k))
 
     def ln(self, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], name: String, rows: Int, d: Int,
            ldx: Int, ldy: Int, eps: Float32) raises:
@@ -361,6 +461,11 @@ struct TurboVLA(Movable):
             Int32(0), Int32(nk), Int32(hd), scale, grid_dim=Dim(heads, nq), block_dim=64)
         self.tick("attention " + String(nq) + "x" + String(nk))
 
+    def scale_add(self, gname: String) raises:
+        self.ctx.enqueue_function[tk.scale_add](self.x, self.xn, self.w.floats[gname], Int32(VD), Int32(VROWS * VD),
+                                                grid_dim=groups(VROWS * VD, 256), block_dim=256)
+        self.tick("layerscale + residual")
+
     def vision(mut self) raises:
         """DINOv3 on both views, its final LayerNorm in xn (rows v * 320 + 5 + p are the patches)."""
         self.tag = "vision"
@@ -387,12 +492,19 @@ struct TurboVLA(Movable):
         if True:
             var p = VB + "layer." + String(i) + "."
             self.ln(self.x, self.xn, p + "norm1", VROWS, VD, VD, VD, EPS)
-            self.proj[True, False](p + "attention.q_proj.weight", p + "attention.q_proj.bias", self.xn,
-                                   sub(self.qkv, 0, VROWS * 3 * VD), VROWS, VD, VD, VD, 3 * VD)
-            self.proj[False, False](p + "attention.k_proj.weight", "", self.xn,
-                                    sub(self.qkv, VD, VROWS * 3 * VD - VD), VROWS, VD, VD, VD, 3 * VD)
-            self.proj[True, False](p + "attention.v_proj.weight", p + "attention.v_proj.bias", self.xn,
-                                   sub(self.qkv, 2 * VD, VROWS * 3 * VD - 2 * VD), VROWS, VD, VD, VD, 3 * VD)
+            if self.mma16:
+                self.proj16[True, False](p + "attention.qkv.weight", p + "attention.qkv.bias", self.xn, self.qkv,
+                                         VROWS, 3 * VD, VD, VD, 3 * VD)
+            elif self.opt:
+                self.proj[True, False](p + "attention.qkv.weight", p + "attention.qkv.bias", self.xn, self.qkv, VROWS,
+                                       3 * VD, VD, VD, 3 * VD)
+            else:
+                self.proj[True, False](p + "attention.q_proj.weight", p + "attention.q_proj.bias", self.xn,
+                                       sub(self.qkv, 0, VROWS * 3 * VD), VROWS, VD, VD, VD, 3 * VD)
+                self.proj[False, False](p + "attention.k_proj.weight", "", self.xn,
+                                        sub(self.qkv, VD, VROWS * 3 * VD - VD), VROWS, VD, VD, VD, 3 * VD)
+                self.proj[True, False](p + "attention.v_proj.weight", p + "attention.v_proj.bias", self.xn,
+                                       sub(self.qkv, 2 * VD, VROWS * 3 * VD - 2 * VD), VROWS, VD, VD, VD, 3 * VD)
             ctx.enqueue_function[tk.rope_patches](self.qkv, self.rcos, self.rsin, Int32(3 * VD), Int32(VR),
                                                   Int32(PREFIX), Int32(NPATCH), Int32(VD), Int32(HD),
                                                   grid_dim=VROWS, block_dim=64)
@@ -400,20 +512,34 @@ struct TurboVLA(Movable):
             attend[True, HD](ctx, self.qkv, self.qkv, self.qkv, self.att, self.klev, self.qlev, 3 * VD, 3 * VD, VD,
                              VD, 2 * VD, VR, VH, 1, VR, NV, VR, Float32(0.125))
             self.tick("attention (vattn)")
-            self.proj[True, False](p + "attention.o_proj.weight", p + "attention.o_proj.bias", self.att, self.xn,
-                                   VROWS, VD, VD, VD, VD)
-            ctx.enqueue_function[tk.scale_add](self.x, self.xn, self.w.floats[p + "layer_scale1.lambda1"], Int32(VD),
-                                               Int32(VROWS * VD), grid_dim=groups(VROWS * VD, 256), block_dim=256)
-            self.tick("layerscale + residual")
+            if self.mma16:
+                self.proj16[True, True](p + "attention.o_proj.weight", p + "attention.o_proj.bias", self.att, self.x,
+                                        VROWS, VD, VD, VD, VD)
+            elif self.opt:  # LayerScale folded into o: straight onto the residual
+                self.proj[True, True](p + "attention.o_proj.weight", p + "attention.o_proj.bias", self.att, self.x,
+                                      VROWS, VD, VD, VD, VD)
+            else:
+                self.proj[True, False](p + "attention.o_proj.weight", p + "attention.o_proj.bias", self.att, self.xn,
+                                       VROWS, VD, VD, VD, VD)
+                self.scale_add(p + "layer_scale1.lambda1")
             self.ln(self.x, self.xn, p + "norm2", VROWS, VD, VD, VD, EPS)
-            self.proj[True, False](p + "mlp.up_proj.weight", p + "mlp.up_proj.bias", self.xn, self.hbuf, VROWS, VF, VD,
-                                   VD, VF)
-            self.gelu(self.hbuf, VROWS, VF, VF)
-            self.proj[True, False](p + "mlp.down_proj.weight", p + "mlp.down_proj.bias", self.hbuf, self.xn, VROWS,
-                                   VD, VF, VF, VD)
-            ctx.enqueue_function[tk.scale_add](self.x, self.xn, self.w.floats[p + "layer_scale2.lambda1"], Int32(VD),
-                                               Int32(VROWS * VD), grid_dim=groups(VROWS * VD, 256), block_dim=256)
-            self.tick("layerscale + residual")
+            if self.mma16:
+                self.proj16[True, False](p + "mlp.up_proj.weight", p + "mlp.up_proj.bias", self.xn, self.hbuf, VROWS,
+                                         VF, VD, VD, VF)
+            else:
+                self.proj[True, False](p + "mlp.up_proj.weight", p + "mlp.up_proj.bias", self.xn, self.hbuf, VROWS,
+                                       VF, VD, VD, VF)
+            if self.mma16:
+                self.proj16[True, True, GELU_ERF](p + "mlp.down_proj.weight", p + "mlp.down_proj.bias", self.hbuf,
+                                                  self.x, VROWS, VD, VF, VF, VD)
+            elif self.opt:  # the GELU as the down projection stages its input
+                self.proj[True, True, GELU_ERF](p + "mlp.down_proj.weight", p + "mlp.down_proj.bias", self.hbuf,
+                                                self.x, VROWS, VD, VF, VF, VD)
+            else:
+                self.gelu(self.hbuf, VROWS, VF, VF)
+                self.proj[True, False](p + "mlp.down_proj.weight", p + "mlp.down_proj.bias", self.hbuf, self.xn,
+                                       VROWS, VD, VF, VF, VD)
+                self.scale_add(p + "layer_scale2.lambda1")
 
     def project(mut self) raises:
         """The patches through the vision projection, plus the view embedding: rows 0 .. 511 of mem."""
@@ -447,12 +573,16 @@ struct TurboVLA(Movable):
         self.ln(self.tx, self.tx, TB + "embeddings.LayerNorm", TR, BD, BD, BD, EPS_BERT)
         for i in range(BL):
             var p = TB + "encoder.layer." + String(i) + "."
-            self.proj[True, False](p + "attention.self.query.weight", p + "attention.self.query.bias", self.tx,
-                                   sub(self.tq, 0, TR * 3 * BD), TR, BD, BD, BD, 3 * BD)
-            self.proj[True, False](p + "attention.self.key.weight", p + "attention.self.key.bias", self.tx,
-                                   sub(self.tq, BD, TR * 3 * BD - BD), TR, BD, BD, BD, 3 * BD)
-            self.proj[True, False](p + "attention.self.value.weight", p + "attention.self.value.bias", self.tx,
-                                   sub(self.tq, 2 * BD, TR * 3 * BD - 2 * BD), TR, BD, BD, BD, 3 * BD)
+            if self.opt:
+                self.proj[True, False](p + "attention.self.qkv.weight", p + "attention.self.qkv.bias", self.tx, self.tq,
+                                       TR, 3 * BD, BD, BD, 3 * BD)
+            else:
+                self.proj[True, False](p + "attention.self.query.weight", p + "attention.self.query.bias", self.tx,
+                                       sub(self.tq, 0, TR * 3 * BD), TR, BD, BD, BD, 3 * BD)
+                self.proj[True, False](p + "attention.self.key.weight", p + "attention.self.key.bias", self.tx,
+                                       sub(self.tq, BD, TR * 3 * BD - BD), TR, BD, BD, BD, 3 * BD)
+                self.proj[True, False](p + "attention.self.value.weight", p + "attention.self.value.bias", self.tx,
+                                       sub(self.tq, 2 * BD, TR * 3 * BD - 2 * BD), TR, BD, BD, BD, 3 * BD)
             self.small[2](self.tq, self.tq, self.tq, self.tatt, self.tmask, 3 * BD, 3 * BD, 3 * BD, BD, 0, BD, 2 * BD,
                           T, T, 12, 64, Float32(0.125))
             self.proj[True, True](p + "attention.output.dense.weight", p + "attention.output.dense.bias", self.tatt,

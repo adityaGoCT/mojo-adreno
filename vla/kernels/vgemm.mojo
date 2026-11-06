@@ -27,6 +27,7 @@ comptime GELU = 1
 comptime SILU = 2
 comptime SILU_MUL = 3
 comptime GELU_MUL = 4
+comptime GELU_ERF = 5  # exact GELU, 0.5 x (1 + erf(x / sqrt 2)) (TurboVLA's DINOv3, BERT, projections)
 comptime BK = 16
 comptime KC = 8  # the 840's fp32 product: 64 x 64 x 8
 comptime SHARED = 4096  # floats, 16 KB: the X and W slices, then the residual's 64 x 64 identity
@@ -51,6 +52,19 @@ def gelu_tanh[width: SIMDLength](x: SIMD[DType.float32, width]) -> SIMD[DType.fl
     """gelu_pytorch_tanh: 0.5 x (1 + tanh(sqrt(2 / pi) (x + 0.044715 x^3))), tanh through exp."""
     var u = Float32(0.7978845608028654) * (x + Float32(0.044715) * x * x * x)
     return Float32(0.5) * x * (2 - 2 / (exp(2 * u) + 1))
+
+
+@always_inline
+def gelu_erf[width: SIMDLength](x: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
+    """Exact GELU: erf through erfc's Chebyshev fit (Numerical Recipes' erfcc, relative error below 1.2e-7)."""
+    var z = abs(x) * Float32(0.7071067811865476)
+    var t = 1 / (1 + Float32(0.5) * z)
+    var r = t * exp(-z * z - Float32(1.26551223) + t * (Float32(1.00002368) + t * (Float32(0.37409196) + t * (
+        Float32(0.09678418) + t * (Float32(-0.18628806) + t * (Float32(0.27886807) + t * (Float32(-1.13520398) + t * (
+        Float32(1.48851587) + t * (Float32(-0.82215223) + t * Float32(0.17087277))))))))))
+    var erf_abs = 1 - r
+    var sgn = min(max(x * Float32(1e30), Float32(-1)), Float32(1))  # sign(x); x near 0 contributes ~0 anyway
+    return Float32(0.5) * x * (1 + sgn * erf_abs)
 
 
 @always_inline
@@ -107,6 +121,8 @@ def gemm[WT: DType, WM: Int, WN: Int, ACT: Int, BIAS: Bool, RES: Bool, SPLIT: Bo
                     xv = silu(xv) * x.unsafe_load[width=4](xi + Int(xoff))
                 elif ACT == GELU_MUL:
                     xv = gelu_tanh(xv) * x.unsafe_load[width=4](xi + Int(xoff))
+                elif ACT == GELU_ERF:
+                    xv = gelu_erf(xv)
             sa.unsafe_store(r * BK + c, xv * alpha)
         comptime for i in range(BN * BK // 4 // THREADS):
             var v = i * THREADS + t
@@ -184,6 +200,8 @@ def to_half[ACT: Int](x: F32P, xh: F16P, k: Int32, ldx: Int32, xoff: Int32, alph
         v = silu(v) * x[xi + Int(xoff)]
     elif ACT == GELU_MUL:
         v = gelu_tanh(v) * x[xi + Int(xoff)]
+    elif ACT == GELU_ERF:
+        v = gelu_erf(v)
     xh[e] = (v[0] * alpha).cast[DType.float16]()
 
 
@@ -242,6 +260,8 @@ def act_rows[ACT: Int](x: F32P, y: F32P, k: Int32, ldx: Int32, xoff: Int32, tota
         v = silu(v) * x[xi + Int(xoff)]
     elif ACT == GELU_MUL:
         v = gelu_tanh(v) * x[xi + Int(xoff)]
+    elif ACT == GELU_ERF:
+        v = gelu_erf(v)
     y[e] = v[0]
 
 
