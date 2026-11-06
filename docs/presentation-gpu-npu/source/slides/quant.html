@@ -1,0 +1,27 @@
+<section id="quant" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:30px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Quantized weights on the NPU: per channel, not blocks</h2>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:30%">Llama 3.2 1B on the HTP, 431 tokens</th><th style="width:13%">Prefill</th><th style="width:11%">Contexts</th><th style="width:19%">K/V error vs the fp16 model</th><th style="width:27%">Tokens vs PyTorch (fp16)</th></tr>
+<tr><td>fp16</td><td>168 ms</td><td>2.5 GB</td><td>2.2e-3</td><td>80 of 80</td></tr>
+<tr style="background:#EEF1F5"><td><b>w8a16: int8 per channel</b></td><td><b>116 ms</b></td><td>1.29 GB</td><td>3.1e-2</td><td>29 of 80, then a paraphrase</td></tr>
+<tr><td>w4a16: int4 per channel</td><td><b>111 ms</b></td><td>0.68 GB</td><td>0.60</td><td>14 of 79</td></tr>
+<tr style="background:#EEF1F5"><td>w4a16: int4 blocks of 64 (LPBQ)</td><td>495 ms</td><td>0.72 GB</td><td>0.35</td><td>16 of 71; 71 of 71 vs the int4 model</td></tr>
+</table>
+<div style="display:flex;gap:40px">
+<div style="flex:1.15;display:flex;flex-direction:column;gap:12px">
+<h3 style="font-size:30px;font-weight:600">Ternary Qwen3-8B, 408 tokens, w4a16 per channel</h3>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:36%"></th><th style="width:30%">Prompt</th><th style="width:16%">Decode</th><th style="width:18%">Tokens</th></tr>
+<tr><td><b>NPU prefill + GPU decode</b></td><td><b>1.64 s</b> = 1.37 + 0.23</td><td>48.0 ms</td><td>the same 80</td></tr>
+<tr style="background:#EEF1F5"><td>All on the GPU</td><td>3.60 s</td><td>45.4 ms</td><td>80</td></tr>
+</table>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">2.6× faster prefill; the int4 weights approximate the ternary group scales (K/V 9.7e-2 vs the exact model) and still give all 80 tokens.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Why blocks lose</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">ORT 1.29’s QNN provider maps block int4 only as LPBQ. On 448 × 2048 × 16384: fp16 4.25 ms, int8 per channel 3.94, int4 per channel 3.75; LPBQ as MatMul 23.4 ms, as FullyConnected a crash except at 2048 × 2048.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Source: npu/README.md on branch npu-quant (7906a53) and its session notes · Llama: Galaxy S26 Ultra · Qwen3-8B: Galaxy Z Fold</p>
+<aside>Can quantized weights make the NPU faster still? Partly. With weights quantized per output channel and 16-bit activations, Llama’s prefill drops from 168 to 116 milliseconds with int8, and 111 with int4: 1.45 and 1.5 times faster than fp16, and about six times the Adreno. But accuracy suffers. The w8a16 graph’s K/V are within 3 percent of the fp16 model’s, and the text stays coherent but becomes a paraphrase after 29 tokens. Int4 per channel is too coarse for Llama. The accurate int4 form, with a scale per block of 64, only reaches QNN as low-power block quantization, and on this stack that is slow as a MatMul, 495 milliseconds, and crashes QNN as a FullyConnected for every shape but 2048 by 2048. The ternary Qwen3-8B fits the per-channel path better: its weights are already coarse, and with int4 per channel on the HTP its 408-token prompt prefills in 1.37 seconds against 3.60 on the GPU, 2.6 times faster, and all 80 generated tokens match the GPU’s exact-ternary run. These results are on the npu-quant branch, not yet merged.</aside>
+</section>

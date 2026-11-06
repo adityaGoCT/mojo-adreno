@@ -1,0 +1,48 @@
+<section id="moe-how" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">An MoE: dynamic on the GPU, static on the NPU</h2>
+<p style="font-size:28px;color:#4A5568;line-height:1.4">Qwen3-30B-A3B, int4: 48 layers, each with 128 experts; a router picks 8 per token, so a token uses 3.3B of 30.5B parameters. Snapdragon X2 Elite laptop.</p>
+<div style="display:flex;gap:40px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px">
+<h3 style="font-size:32px;font-weight:600;color:#2563C9">GPU: reads only the chosen experts</h3>
+<div style="display:flex;flex-direction:row;gap:18px;align-items:center;background:#FFFFFF;border-radius:12px;padding:14px 22px">
+<p style="font-size:36px;font-weight:600;color:#2563C9;width:40px">1</p>
+<p style="font-size:24px;line-height:1.35;flex:1"><b>Router</b>: top 8 of 128; ids and weights stay in GPU memory.</p>
+</div>
+<div style="display:flex;flex-direction:row;gap:18px;align-items:center;background:#FFFFFF;border-radius:12px;padding:14px 22px">
+<p style="font-size:36px;font-weight:600;color:#2563C9;width:40px">2</p>
+<p style="font-size:24px;line-height:1.35;flex:1"><b>Decode</b>: expert kernels find their int4 rows by those ids. 1.63 GB of weights a token.</p>
+</div>
+<div style="display:flex;flex-direction:row;gap:18px;align-items:center;background:#FFFFFF;border-radius:12px;padding:14px 22px">
+<p style="font-size:36px;font-weight:600;color:#2563C9;width:40px">3</p>
+<p style="font-size:24px;line-height:1.35;flex:1"><b>Prefill</b>: tokens grouped by expert (about 25 each of 404); each expert’s weights read once, a grouped GEMM.</p>
+</div>
+<table style="font-size:24px;color:#18212F">
+<tr><th style="width:30%">GPU prefill</th><th style="width:35%">Experts grouped</th><th style="width:35%">A token at a time</th></tr>
+<tr><td>128 tokens</td><td><b>1.66–1.71 s</b></td><td>4.02–4.25 s</td></tr>
+<tr style="background:#EEF1F5"><td>256 tokens</td><td><b>2.57–2.66 s</b></td><td>7.48–7.80 s</td></tr>
+<tr><td>404 tokens</td><td><b>4.24–4.31 s</b></td><td>11.8–13.1 s</td></tr>
+</table>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px">
+<h3 style="font-size:32px;font-weight:600;color:#B4501A">NPU: a static graph computes them all</h3>
+<div style="display:flex;flex-direction:row;gap:18px;align-items:center;background:#FFFFFF;border-radius:12px;padding:14px 22px">
+<p style="font-size:36px;font-weight:600;color:#B4501A;width:40px">1</p>
+<p style="font-size:24px;line-height:1.35;flex:1"><b>No gather</b>: a QNN graph cannot select weights by an index computed inside it.</p>
+</div>
+<div style="display:flex;flex-direction:row;gap:18px;align-items:center;background:#FFFFFF;border-radius:12px;padding:14px 22px">
+<p style="font-size:36px;font-weight:600;color:#B4501A;width:40px">2</p>
+<p style="font-size:24px;line-height:1.35;flex:1"><b>TopK as a dense weight</b> per token: 8 non-zero of 128.</p>
+</div>
+<div style="display:flex;flex-direction:row;gap:18px;align-items:center;background:#FFFFFF;border-radius:12px;padding:14px 22px">
+<p style="font-size:36px;font-weight:600;color:#B4501A;width:40px">3</p>
+<p style="font-size:24px;line-height:1.35;flex:1"><b>All 128 experts</b> run for every token, weighted: 16× the useful arithmetic.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:20px 22px">
+<h3 style="font-size:28px;font-weight:600">And it does not fit as fp16</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">The whole model is 61 GB in fp16, against the laptop’s 33.6 GB. On the HTP it would need the quantized path (w4a16) and contexts of a few layers each.</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Source: qwen3moe/README.md (“How a token runs”, “Prefill”, “On the Hexagon NPU”) · ranges over two laptop sessions</p>
+<aside>Qwen3-30B-A3B is a mixture of experts: 48 layers, each with 128 experts, of which a router picks 8 per token. That choice depends on the token, and it is made on the device. On the GPU that is easy. The router’s top 8 ids and weights stay in GPU memory, and the expert kernels read them and find their int4 rows, so a token reads only 1.63 gigabytes of weights. In prefill, the tokens are grouped by expert, about 25 tokens per expert for a 404-token prompt, and each expert runs once over its tokens, reading its weights once: a grouped GEMM. That reads a 404-token prompt in 4.24 to 4.31 seconds instead of 11.8 to 13.1 a token at a time. On the NPU, the graph is static. It cannot select weights by an index it computed, so the router’s top 8 become a dense weight per token, and the graph runs all 128 experts for every token and weights their outputs. That is sixteen times the useful arithmetic. And the model would not fit anyway: in fp16 it is 61 gigabytes against the laptop’s 33.6, so on the HTP it would need quantized weights.</aside>
+</section>

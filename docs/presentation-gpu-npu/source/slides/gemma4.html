@@ -1,0 +1,33 @@
+<section id="gemma4" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:32px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Gemma 4 E2B and E4B on the Adreno 840, int4</h2>
+<div style="display:flex;gap:44px">
+<div style="flex:1.6;display:flex;flex-direction:column;gap:16px">
+<table style="font-size:25px;color:#18212F">
+<tr><th style="width:36%">Galaxy Z Fold, int4</th><th style="width:32%">E2B</th><th style="width:32%">E4B</th></tr>
+<tr><td>Layers × hidden</td><td>35 × 1536</td><td>42 × 2560</td></tr>
+<tr style="background:#EEF1F5"><td>gemma4.bin, on the GPU</td><td>1.21 GB</td><td>2.47 GB</td></tr>
+<tr><td><b>Decode</b></td><td><b>28.1 ms</b> · 35.6 tok/s</td><td><b>53.8 ms</b> · 18.6 tok/s</td></tr>
+<tr style="background:#EEF1F5"><td><b>960-token prompt</b>, batched (vs a token at a time)</td><td><b>2.36 s</b> · 406 tok/s (13×)</td><td><b>4.71 s</b> · 204 tok/s (15×)</td></tr>
+<tr><td>Logits vs transformers, same weights</td><td>within 1.7e-4</td><td>within 1.7e-4</td></tr>
+<tr style="background:#EEF1F5"><td>bf16’s greedy choice agrees (short, long)</td><td>42 of 47, 49 of 64</td><td>39 of 48, 55 of 64</td></tr>
+</table>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:18px">
+<div style="display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border-left:6px solid #2563C9;border-radius:12px;padding:20px 24px">
+<h3 style="font-size:28px;font-weight:600">Decode reads every weight</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">1.21 GB in 28.1 ms (43 GB/s), 2.47 GB in 53.8 ms (46 GB/s); 425 and 509 launches a token.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border-left:6px solid #2563C9;border-radius:12px;padding:20px 24px">
+<h3 style="font-size:28px;font-weight:600">Prefill on the matrix units</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">int4 projections on cooperative matrices are 80–86% of a prompt, at 1.7–2.1 TFLOP/s. Attention there: 0.28 s, was 1.70 s scalar.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;background:#FFFFFF;border-left:6px solid #6B7280;border-radius:12px;padding:20px 24px">
+<h3 style="font-size:28px;font-weight:600">What is new in Gemma 4</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Later layers reuse earlier K/V (the last 20 / 18); per-layer inputs from a 4.7 GB table (E2B) left in the checkpoint, a row a token; sliding window 512.</p>
+</div>
+</div>
+</div>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">The gap to bf16 is int4 rounding, not the kernels: the phone matches transformers on its own weights, and the error is spread over every kind of matrix.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Source: gemma4/README.md, branch gemma4 (52c2951, not merged) · Galaxy Z Fold SM-F976U · bf16 teacher-forced on the phone’s tokens</p>
+<aside>The third part is Gemma 4, Google’s new on-device models, on the Adreno 840 alone. Both E2B and E4B run as Mojo programs on a Galaxy Z Fold, with int4 weights: 1.21 and 2.47 gigabytes on the GPU. E2B decodes a token in 28.1 milliseconds, E4B in 53.8. Decode reads every weight each token, at 43 and 46 gigabytes a second. A 960-token prompt is prefilled in batches on the cooperative-matrix units in 2.36 and 4.71 seconds, 13 and 15 times faster than a token at a time; the int4 projections are most of that time, at about 2 teraflops. Gemma 4 has new structure: its later layers reuse earlier layers’ K/V caches, and every layer takes a per-layer input from a second embedding table, 4.7 gigabytes for E2B, which stays in the checkpoint file while the program reads one row per token. The phone’s logits are within 1.7e-4 of transformers’ own Gemma 4 layers on the same int4 weights, and every greedy token matches. But against the original bf16 models, the greedy choice agrees at only 39 to 55 of 48 to 64 positions. That gap is int4 rounding, spread over every kind of matrix, which is what the next slide fixes.</aside>
+</section>

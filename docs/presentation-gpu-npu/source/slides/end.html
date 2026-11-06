@@ -1,0 +1,30 @@
+<section id="end" data-transition="fade" style="background:#18212F;color:#F6F5F1;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15;color:#F6F5F1">What decides GPU or NPU</h2>
+<div style="display:flex;gap:48px">
+<div style="flex:1.2;display:flex;flex-direction:column;gap:18px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#222D3E;border-left:6px solid #E0864F;border-radius:12px;padding:22px">
+<h3 style="font-size:30px;font-weight:600;color:#F6F5F1">Dense, fixed-shape prefill: the NPU</h3>
+<p style="font-size:25px;color:#C9D3E0;line-height:1.4">2.6–4.1× on Llama, ternary Qwen3-8B and π0. Overlapped with the NPU, the K/V handoff leaves 0.8–2.0 ms (Llama), 2.4–3.3 ms (π0, laptop).</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#222D3E;border-left:6px solid #9AA8BC;border-radius:12px;padding:22px">
+<h3 style="font-size:30px;font-weight:600;color:#F6F5F1">Memory-bound decode: a tie in fp16</h3>
+<p style="font-size:25px;color:#C9D3E0;line-height:1.4">38.8 against 39.8 ms. With int4 weights the GPU is 3× faster; the NPU would need quantized graphs.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#222D3E;border-left:6px solid #5B8DEF;border-radius:12px;padding:22px">
+<h3 style="font-size:30px;font-weight:600;color:#F6F5F1">Routing, run-time shapes: the GPU</h3>
+<p style="font-size:25px;color:#C9D3E0;line-height:1.4">An MoE’s static graph computes all 128 experts; the GPU reads the 8 chosen and groups tokens by expert.</p>
+</div>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px">
+<h3 style="font-size:30px;font-weight:600;color:#E0864F">Next</h3>
+<ul style="font-size:27px;color:#F6F5F1;line-height:1.45;display:flex;flex-direction:column;gap:14px">
+<li>QNN graphs that gather experts by index, or the NPU taking the MoE’s attention.</li>
+<li>Chunked NPU graphs with a K/V input, for any prompt length without recompiling.</li>
+<li>Gemma 4’s prefill on the HTP, as for π0’s prefix.</li>
+<li>Between int4 and int8 for Gemma 4: 5–6 bits, or GPTQ-style rounding for mixed’s int4 MLPs.</li>
+</ul>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#9AA8BC">github.com/adityaGoCT/mojo-adreno · npu/ · qwen3moe/ · pi0/ · vla/x2/ · gemma4/ on branch gemma4 · npu/ quantized graphs on branch npu-quant</p>
+<aside>So what decides where a model runs? Dense prefill over a fixed shape goes to the NPU: 2.6 to 4.1 times faster for Llama, the ternary Qwen3-8B and π0’s prefix, and when the handoff of the K/V cache overlaps the NPU’s work, only 0.8 to 2 milliseconds of it remain for Llama, and 2.4 to 3.3 for π0 on the laptop. Decode is memory-bound: in fp16 the two tie, and with int4 weights the GPU is three times faster, because int4 on the HTP needs quantized graphs. Anything decided at run time stays on the GPU, above all a mixture of experts, whose routing a static graph cannot follow. What comes next follows from that. On the NPU: graphs that gather experts by index, or the NPU taking an MoE’s dense attention; chunked graphs that take a K/V input, so any prompt length runs without recompiling; and Gemma 4’s prefill on the HTP, the way π0’s prefix runs there. On the GPU: something between int4 and int8 for Gemma 4, either 5 or 6 bits or better int4 rounding for the matrices the mixed storage leaves in int4.</aside>
+</section>

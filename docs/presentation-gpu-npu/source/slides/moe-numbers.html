@@ -1,0 +1,30 @@
+<section id="moe-numbers" data-transition="fade" style="background:#F6F5F1;color:#18212F;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-size:60px;font-weight:600;line-height:1.15">Qwen3-30B-A3B: the GPU wins both phases</h2>
+<table style="font-size:28px;color:#18212F">
+<tr><th style="width:22%">Qwen3-30B-A3B</th><th style="width:24%">NPU: one layer, fp16</th><th style="width:26%">NPU: 48 × that layer</th><th style="width:28%">GPU: int4, all 48 layers</th></tr>
+<tr><td>Decode, a token</td><td>10.7–14 ms</td><td>0.5–0.7 s</td><td><b>27–32 ms</b> (31–37 tokens/s)</td></tr>
+<tr style="background:#EEF1F5"><td>Prefill, 128 tokens</td><td>213–218 ms</td><td>10.3 s</td><td><b>1.66–1.71 s</b></td></tr>
+<tr><td>Prefill, 256 tokens</td><td>95–97 ms</td><td>4.6 s</td><td><b>2.57–2.66 s</b></td></tr>
+</table>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">The hardware is fast</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">The HTP streams fp16 weights at about 100 GB/s, against 55–60 GB/s for our GPU kernels, and runs 3.4 TFLOP/s of fp16 matrix work.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">The graph is the limit</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">A decode token moves all 128 experts’ 1.2 GB a layer. Reading only 8 would be about 0.8 ms a layer (README’s estimate).</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #2563C9;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Accurate in fp16</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">Median token within 1.2e-3 of transformers’ fp32 layer. QK norms written as L2 norms: QNN’s RmsNorm refuses heads of 128.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;border-top:6px solid #B4501A;border-radius:12px;padding:24px">
+<h3 style="font-size:30px;font-weight:600">Shape-dependent plans</h3>
+<p style="font-size:24px;color:#4A5568;line-height:1.4">QNN compiled the 128-token graph to a slower plan than the 256-token one: 213–218 against 95–97 ms.</p>
+</div>
+</div>
+<p style="font-size:26px;color:#4A5568;line-height:1.4">So for this MoE the GPU decodes and prefills. The NPU could take the dense attention, or a prefill with expert gathering, once QNN graphs can select weights by index.</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6B7280">Source: qwen3moe/README.md (“On the Hexagon NPU”) · layer 0, real weights · “48 × that layer” is the README’s scaling, not a run</p>
+<aside>Here are the measurements. We ran one real layer of Qwen3-30B-A3B, layer 0 in fp16, on the laptop’s HTP: attention, the router and all 128 experts. A decode token takes 10.7 to 14 milliseconds through that one layer; scaled to 48 layers, half a second or more per token, against 27 to 32 milliseconds for the whole token on the GPU in int4. A 256-token prefill takes 95 milliseconds a layer, 4.6 seconds for 48, against 2.6 seconds on the GPU. At 128 tokens QNN compiled a worse plan, 213 milliseconds a layer. The 48-layer column is the README’s scaling of the one-layer time, not a run of the whole model, which would not fit in fp16. The interesting part is that the hardware itself is fast: it streams fp16 weights at about 100 gigabytes a second, faster than our GPU kernels’ 55 to 60, and does 3.4 teraflops of fp16 matrix work. What loses is the static graph, which must move all 128 experts’ weights. The README estimates that reading only the 8 chosen ones would take about 0.8 milliseconds a layer. The layer is also accurate, once the QK norms are written as L2 normalizations. So for this model the GPU does both phases, and the NPU becomes interesting when its graphs can gather by index.</aside>
+</section>
