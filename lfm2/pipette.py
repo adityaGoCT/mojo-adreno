@@ -28,6 +28,10 @@ spec is the int4 GPU with the DSpark drafter (speculative decoding: the same gre
 whole generation's decode time, so each of its repetitions is two runs: 1024 -> 100 for the decode throughput, 1024 ->
 256 for E2E; its TTFT includes the drafter's context of the prompt.
   build/vla/venv/bin/python lfm2/pipette.py --table                            # all results against Pipette's
+
+--model 8b measures LFM2.5-8B-A1B (Liquid AI's mixture of experts, lfm2moe/) the same way, on the GPU only, from
+Pipette's LFM2.5-8B-A1B-Q4_0.gguf in /data/local/tmp/lfm2/plain8b; results in build/lfm2moe/pipette/.
+  build/vla/venv/bin/python lfm2/pipette.py gpu --model 8b --input 1024
 """
 
 import argparse
@@ -43,8 +47,11 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lfm2"))
-OUT = pathlib.Path(os.environ.get("PIPETTE_OUT", ROOT / "build/lfm2/pipette"))  # another phone: another directory
+MODEL = "2.6b"  # --model: 2.6b (lfm2/: gpu, hybrid, npu, spec) or 8b (LFM2.5-8B-A1B, lfm2moe/: gpu)
+BASES = {"2.6b": ROOT / "build/lfm2/pipette", "8b": ROOT / "build/lfm2moe/pipette"}
+OUT = BASES[MODEL]  # PIPETTE_OUT: another phone's directory (set in main)
 D = "/data/local/tmp/lfm2"
+D8 = f"{D}/plain8b"  # the 8B: bin/ (build/android/lfm2moe), q4_0.gguf, rope.f32, q4/{manifest,recipe}.txt, lfm2moe_q4.bin
 P = 1024  # input tokens (--input)
 DECODE = 100
 E2E = 256  # output tokens a timed run generates (--new); decode is timed over outputs 1 .. 100 of it
@@ -65,6 +72,19 @@ PIPETTE = [
 PIPETTE_SWEEP = {256: (184.50, 1387.52, 36.56, 8578.80, 1832.50), 512: (174.35, 2936.65, 35.00, 10290.06, 1887.60),
                  1024: (149.62, 6844.13, 34.00, 13994.56, 1919.14), 2048: (136.31, 15024.80, 26.66, 22124.44, 2033.54),
                  4096: (112.40, 36442.26, 22.67, 44138.78, 2261.37)}
+
+# The same for LFM2.5-8B-A1B (8,468M parameters, 1,500M active; LiquidAI/LFM2.5-8B-A1B-GGUF): its S26 Ultra rows and
+# the iPhone 17 Pro's (llama.cpp:ios, q4_0), at 1,024 tokens, and the q4_0 sweep (the leaderboard's data, read
+# 2026-11-08; llama.cpp b11988). Peak RAM in GiB, as Pipette shows it.
+PIPETTE_8B = [
+    ("Galaxy S26 Ultra", "llama.cpp CPU", "q4_0", 49, 96, 10664, 15178, 4.90),
+    ("Galaxy S26 Ultra", "llama.cpp CPU", "q4_k_m", 39, 77, 13284, 19089, 5.19),
+    ("Galaxy S26 Ultra", "llama.cpp CPU", "q5_k_m", 29, 50, 20520, 27228, 6.00),
+    ("iPhone 17 Pro", "llama.cpp GPU", "q4_0", 56, 1320, 776, 5521, 4.88),
+]
+PIPETTE_SWEEP_8B = {256: (111.29, 2300.38, 52.79, 7401.36, 4919.68), 512: (108.92, 4700.80, 51.62, 9814.17, 4964.08),
+                    1024: (96.03, 10663.50, 49.15, 15177.85, 5014.15), 2048: (88.35, 23180.92, 37.16, 28422.35, 5124.52),
+                    4096: (76.88, 53275.43, 32.64, 58486.64, 5344.66)}
 
 
 def adb(*args, check=True):
@@ -122,6 +142,10 @@ def ready(last_end):
 
 
 def command(config, new, ids_file, peak=False):
+    if MODEL == "8b":
+        return (f"cd {D8}; LD_LIBRARY_PATH={D8}/bin MODULAR_DRIVER_PLUGINS=vulkan@{D8}/bin/libM_driver_vulkan.so "
+                f"LFM2MOE_PREFILL=1 LFM2MOE_WARM={0 if peak else 1} ./bin/lfm2moe {D8}/q4 {D8}/lfm2moe_q4.bin {new} "
+                f"@{ids_file}")
     env = f"LFM2_PREFILL=1 LFM2_WARM={0 if peak else 1}"
     if config in ("gpu", "spec"):
         if config == "spec":
@@ -139,10 +163,11 @@ def command(config, new, ids_file, peak=False):
 
 
 def others_running():
-    """Model processes on the phone that are not this benchmark's (ours read from .../plain/)."""
+    """Model processes on the phone that are not this benchmark's (ours read from .../plain/ or .../plain8b/)."""
     out = adb("shell", "ps -A -o PID,ARGS", check=False)  # a bracketed name with no arguments: one of ours exiting
-    return [l for l in out.splitlines() if re.search(r"lfm2|graph_tool|vk_server|hybrid", l) and "/plain/" not in l
-            and "ps -A" not in l and not re.fullmatch(r"\s*\d+ \[(lfm2|lfm2_hybrid|lfm2_npu)\]\s*", l)]
+    return [l for l in out.splitlines() if re.search(r"lfm2|graph_tool|vk_server|hybrid", l)
+            and not re.search(r"/plain8?b?/", l) and "ps -A" not in l
+            and not re.fullmatch(r"\s*\d+ \[(lfm2|lfm2_hybrid|lfm2_npu|lfm2moe)\]\s*", l)]
 
 
 def npu_graphs():
@@ -271,7 +296,7 @@ def peak_memory(config, ids_file):
     stop = threading.Event()
 
     hwm = [0, 0]  # VmHWM, VmSwap (kB), sampled
-    name = {"gpu": "lfm2", "spec": "lfm2", "hybrid": "lfm2_hybrid", "npu": "lfm2_npu"}[config]
+    name = "lfm2moe" if MODEL == "8b" else {"gpu": "lfm2", "spec": "lfm2", "hybrid": "lfm2_hybrid", "npu": "lfm2_npu"}[config]
 
     def sample():
         """One adb call a second (a lab bridge drops under a stream of adb calls during a long GPU run)."""
@@ -324,17 +349,17 @@ PHONES = [("", "Galaxy Z Fold SM-F976U"), ("qrd", "SM8850 QRD (Qualcomm Device C
 
 def results(c, n):
     """(phone, result) for every phone with a <c>_<n>.json, in PHONES' order."""
-    base = ROOT / "build/lfm2/pipette"
+    base = BASES[MODEL]
     return [(name, json.loads((base / d / f"{c}_{n}.json").read_text())) for d, name in PHONES
             if (base / d / f"{c}_{n}.json").exists()]
 
 
 def sweep_table():
-    names = {"gpu": "GPU (int4)", "hybrid": "GPU + NPU prefill", "npu": "NPU"}
+    names = {"gpu": "GPU (int4)"} if MODEL == "8b" else {"gpu": "GPU (int4)", "hybrid": "GPU + NPU prefill", "npu": "NPU"}
     print("| Input tokens | Phone | llama.cpp CPU (Pipette, S26 Ultra): TTFT, decode, E2E (→256) | " +
           " | ".join(f"{v}: TTFT, decode, E2E (→256)" for v in names.values()) + " |")
     print("|---|---|---|" + "---|" * len(names))
-    for n, (pre, ttft, dec, e2e, ram) in PIPETTE_SWEEP.items():
+    for n, (pre, ttft, dec, e2e, ram) in (PIPETTE_SWEEP_8B if MODEL == "8b" else PIPETTE_SWEEP).items():
         for d, phone in PHONES:
             cells = []
             for c in names:
@@ -351,7 +376,7 @@ def table():
              "npu": "Hexagon NPU (w8a16)", "spec": "Mojo GPU (int4) + DSpark speculative decoding"}
     print("| Device, engine | Quant | Decode (1024→100) | Prefill (1024) | TTFT (1024) | E2E (1024→256) | Peak RAM |")
     print("|---|---|---|---|---|---|---|")
-    for dev, eng, q, dec, pre, ttft, e2e, ram in PIPETTE:
+    for dev, eng, q, dec, pre, ttft, e2e, ram in (PIPETTE_8B if MODEL == "8b" else PIPETTE):
         print(f"| {dev}, {eng} (Pipette) | {q} | {dec} tok/s | {pre} tok/s | {ttft:,} ms | {e2e:,} ms | {ram:.2f} GB |")
     for c in ("gpu", "hybrid", "npu", "spec"):
         for phone, r in results(c, 1024):
@@ -371,12 +396,14 @@ def main():
     ap.add_argument("--memory-only", action="store_true", help="redo only the peak-memory run of <config>_<input>.json")
     ap.add_argument("--input", type=int, default=1024)
     ap.add_argument("--new", type=int, default=256)
+    ap.add_argument("--model", choices=["2.6b", "8b"], default="2.6b")
     a = ap.parse_args()
-    global P, E2E
-    P, E2E = a.input, a.new
+    global P, E2E, MODEL, OUT
+    P, E2E, MODEL = a.input, a.new, a.model
+    OUT = pathlib.Path(os.environ["PIPETTE_OUT"]) if os.environ.get("PIPETTE_OUT") else BASES[MODEL]
     for c in a.configs:
-        if c not in ("gpu", "hybrid", "npu", "spec"):
-            sys.exit(f"unknown configuration {c}")
+        if c not in (("gpu",) if MODEL == "8b" else ("gpu", "hybrid", "npu", "spec")):
+            sys.exit(f"unknown configuration {c} for {MODEL}")
     if a.table:
         table()
         print()

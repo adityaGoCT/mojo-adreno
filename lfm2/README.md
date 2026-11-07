@@ -350,6 +350,9 @@ What the numbers say:
   1.87 GB. But 1.50 GB of that is the mapped weights file. The GPU's own pages are outside it: 2.14 GB for the
   weights, an 8,192-position cache and the prefill's buffers. All-NPU's 0.69–0.89 GB leaves out its HTP contexts in
   the same way.
+- **LFM2.5-8B-A1B**, Liquid AI's mixture of experts (1.5B of its 8.5B parameters active), is measured the same way in
+  [`../lfm2moe/README.md`](../lfm2moe/README.md#lfm25-8b-a1b-against-pipette-liquid-ais-on-device-benchmark): on the
+  GPU, 3.39 s to the first token and 8.26 s end to end at 1,024 tokens, against llama.cpp's 10.66 and 15.18 s.
 
 ## Checks
 
