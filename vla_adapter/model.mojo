@@ -307,7 +307,7 @@ struct VLAAdapter(Movable):
                     ioff[String(parts[0])] = Int(String(parts[2]))
         var rdir = String("")
         if len(remotes) > 0:
-            var cut = remotes[0].rfind("\\")
+            var cut = max(remotes[0].rfind("\\"), remotes[0].rfind("/"))  # the laptop's \\ or the phone's /
             rdir = String(remotes[0][byte=0:cut + 1]) if cut >= 0 else String("")
         for fi in range(len(files)):
             var path = String(files[fi])

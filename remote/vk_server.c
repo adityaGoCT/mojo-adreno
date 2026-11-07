@@ -5,16 +5,23 @@
 //   LD_LIBRARY_PATH=/data/local/tmp/turnip vk_server [port]
 //
 // Protocol (little-endian, driver/protocol.h): a request is {u32 op, u32 length, payload}. Only
-// INFO, READ and SYNC are answered, with {i32 status, u32 length, payload}; status 0 is success,
-// otherwise the payload is the first error since the last answer. The plugin names buffers and
-// modules itself, so it streams everything else without waiting.
+// INFO, READ, SYNC and REPLAY are answered, with {i32 status, u32 length, payload}; status 0 is
+// success, otherwise the payload is the first error since the last answer. The plugin names buffers
+// and modules itself, so it streams everything else without waiting.
+//
+// OP_RECORD (1 / 0) keeps the requests between the two (not READ, SYNC or INFO); OP_REPLAY (count)
+// runs them count times more, then waits, and answers the phone's time for them (fp64 ms): a chunk
+// on the device's own clock, without adb's forwarding (as vla/x2's Windows server does).
+// VK_SERVER_SEGMENTS=1: each answer prints the launches since the previous one and their time.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../driver/executor.h"
@@ -51,6 +58,30 @@ static void answer(void* ctx, int status, const void* data, uint32_t n) {
   if (n) send_all(data, n);
 }
 
+static double now_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
+}
+
+static int kept_status;  // the replay's waits: their status and error, not sent
+static char kept_error[512];
+
+static void keep_answer(void* ctx, int status, const void* data, uint32_t n) {
+  (void)ctx;
+  kept_status = status;
+  if (status) snprintf(kept_error, sizeof kept_error, "%.*s", (int)n, (const char*)data);
+}
+
+static double segment_start = -1;  // VK_SERVER_SEGMENTS: an answer ends a segment
+static int launches;
+
+static void end_segment(int segments) {
+  if (segments && launches) fprintf(stderr, "segment: %d launches, %.1f ms\n", launches, now_ms() - segment_start);
+  segment_start = -1;
+  launches = 0;
+}
+
 int main(int argc, char** argv) {
   int port = argc > 1 ? atoi(argv[1]) : DEFAULT_PORT;
   // One command a submission: a ResNet's worth of slow kernels in one outlasts the driver's timeout.
@@ -75,12 +106,61 @@ int main(int argc, char** argv) {
     setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     uint32_t header[2];
     char* payload = NULL;
+    const char* env = getenv("VK_SERVER_SEGMENTS");
+    int segments = env && *env && *env != '0';
+    end_segment(0);
+    char* kept = NULL;  // OP_RECORD's copy of the requests: {u32 op, u32 n, n bytes, padded to 8} each
+    size_t nkept = 0, capkept = 0;
+    int recording = 0;
     while (!recv_all(header, sizeof header)) {
+      if (segment_start < 0) segment_start = now_ms();
       payload = realloc(payload, header[1] ? header[1] : 1);
       if (recv_all(payload, header[1])) break;
+      if (header[0] >= OP_NPU_OPEN && header[0] <= OP_NPUG_TIME) {  // the NPU is vla/x2's Windows server's
+        if (header[0] != OP_NPU_PREFIX && header[0] != OP_NPUG_RUN) {
+          const char* m = "no NPU in this vk_server";
+          answer(NULL, 1, m, (uint32_t)strlen(m));
+        }
+        continue;
+      }
+      if (header[0] == OP_RECORD) {
+        recording = header[1] == 4 && *(uint32_t*)payload;
+        if (recording) nkept = 0;
+        continue;
+      }
+      if (header[0] == OP_REPLAY) {
+        uint32_t count = header[1] == 4 ? *(uint32_t*)payload : 0;
+        kept_status = 0;
+        vkx_handle(OP_SYNC, NULL, 0, NULL, 0, keep_answer, NULL);
+        int failed = kept_status;
+        double t0 = now_ms();
+        for (uint32_t k = 0; k < count && !failed; ++k)
+          for (size_t at = 0; at < nkept;) {
+            uint32_t* h = (uint32_t*)(kept + at);
+            vkx_handle(h[0], kept + at + 8, h[1], NULL, 0, keep_answer, NULL);
+            at += 8 + ((h[1] + 7) & ~7u);
+          }
+        vkx_handle(OP_SYNC, NULL, 0, NULL, 0, keep_answer, NULL);
+        double ms = now_ms() - t0;
+        if (failed || kept_status)
+          answer(NULL, 1, kept_error, (uint32_t)strlen(kept_error));
+        else
+          answer(NULL, 0, &ms, 8);
+        continue;
+      }
+      if (recording && header[0] != OP_SYNC && header[0] != OP_READ && header[0] != OP_INFO) {
+        size_t need = nkept + 8 + ((header[1] + 7) & ~7u);
+        if (need > capkept) kept = realloc(kept, capkept = need * 2);
+        memcpy(kept + nkept, header, 8);
+        memcpy(kept + nkept + 8, payload, header[1]);
+        nkept = need;
+      }
+      if (header[0] == OP_LAUNCH) launches++;
       vkx_handle(header[0], payload, header[1], NULL, 0, answer, NULL);
+      if (header[0] == OP_SYNC || header[0] == OP_READ) end_segment(segments);
     }
     vkx_reset();
+    free(kept);
     free(payload);
     close(client);
     client = -1;

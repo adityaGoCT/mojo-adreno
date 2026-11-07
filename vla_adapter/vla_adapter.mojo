@@ -13,7 +13,7 @@ from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
 
-from check import Check, compare, fetch, now_ms, read_f32, read_i32, show, span
+from check import cool_down, Check, compare, fetch, now_ms, read_f32, read_i32, show, span
 from model import (ADIM, D, DPRE, DR, DV, LL, NIMG, NPATCH, SV, TAP, VROWS, VLAAdapter)
 
 
@@ -91,6 +91,7 @@ def gpu_npu(mut m: VLAAdapter, ctx: DeviceContext, r: String, L: Int, S: Int, ru
         ctx.synchronize()
         print("run", run, ": chunk", round(now_ms() - a0, 1), "ms (Mac clock)")
     if getenv("VLA_REPLAY"):
+        cool_down()
         var k = Int(getenv("VLA_REPLAY"))
         var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
         for _ in range(5):
@@ -193,6 +194,7 @@ def main() raises:
         print("run", run, ": vision", round(b - a0, 1), "ms, projector", round(c - b, 1), "ms, LLM", round(d - c, 1),
               "ms, policy", round(e - d, 1), "ms; chunk", round(f - e, 1), "ms")
     if getenv("VLA_REPLAY"):
+        cool_down()
         var k = Int(getenv("VLA_REPLAY"))
         var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
         for _ in range(5):

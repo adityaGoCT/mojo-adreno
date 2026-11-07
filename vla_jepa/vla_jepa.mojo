@@ -13,7 +13,7 @@ from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
 
-from check import Check, compare, fetch, now_ms, read_f32, read_i32, show, span
+from check import cool_down, Check, compare, fetch, now_ms, read_f32, read_i32, show, span
 from model import (AH, AX, D, DD, HD, LL, NE, NP, NV, SP, STEPS, VD, VLAJEPA, sub)
 
 
@@ -75,6 +75,7 @@ def gpu_npu(mut m: VLAJEPA, ctx: DeviceContext, r: String, runs: Int) raises:
         ctx.synchronize()
         print("run", run, ": chunk", round(now_ms() - a0, 1), "ms (Mac clock)")
     if getenv("VJ_REPLAY"):
+        cool_down()
         var k = Int(getenv("VJ_REPLAY"))
         var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
         for _ in range(5):
@@ -181,6 +182,7 @@ def main() raises:
         print("run", run, ": ViT", round(b - a0, 1), "ms, LLM", round(c2 - b, 1), "ms, head (4 steps)", round(d - c2, 1),
               "ms (Mac clock)")
     if getenv("VJ_REPLAY"):
+        cool_down()
         var k = Int(getenv("VJ_REPLAY"))
         var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
         for _ in range(5):

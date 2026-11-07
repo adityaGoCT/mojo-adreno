@@ -1,10 +1,24 @@
 # Reading a reference's tensors and checking device buffers against them, for the vla/ programs.
-from std.time import perf_counter_ns
+from std.os import getenv
+from std.time import perf_counter_ns, sleep
 from max.gpu.host import DeviceBuffer, DeviceContext
 
 
 def now_ms() -> Float64:
     return Float64(perf_counter_ns()) / 1e6
+
+
+def cool_down():
+    """REPLAY_SLEEP=<seconds>: wait before the replay timing (a phone's clocks drop 5-12% while it is hot from the
+    checks before it)."""
+    var s = getenv("REPLAY_SLEEP")
+    if s:
+        try:
+            var secs = Float64(Int(s))
+            print("cooling down", Int(secs), "s before the replays")
+            sleep(secs)
+        except:
+            pass
 
 
 def read_f32(path: String) raises -> List[Float32]:

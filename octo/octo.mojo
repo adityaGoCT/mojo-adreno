@@ -15,7 +15,7 @@ from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
 
-from check import Check, compare, fetch, now_ms, read_f32, read_i32, show, span
+from check import cool_down, Check, compare, fetch, now_ms, read_f32, read_i32, show, span
 from model import (AD, D, EMB, N, NP, NPR, NT, NWR, PER, READOUT, STEPS, TD, TDIM, W, L, Octo, sub)
 
 
@@ -61,6 +61,7 @@ def replay(mut m: Octo, ctx: DeviceContext, k: Int, with_text: Bool) raises -> F
 
 
 def replays(mut m: Octo, ctx: DeviceContext) raises:
+    cool_down()
     var k = Int(getenv("OCTO_REPLAY"))
     for with_text in [False, True]:
         var line = String("replay: chunk ") + ("with" if with_text else "without") + " T5, " + String(k) + \

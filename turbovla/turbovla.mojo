@@ -16,7 +16,7 @@ from std.sys import argv
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceContext
 
-from check import Check, compare, fetch, now_ms, read_f32, read_i32, show, span
+from check import cool_down, Check, compare, fetch, now_ms, read_f32, read_i32, show, span
 from model import (ADIM, BD, HD, HID, MEM, NF, NPATCH, NQ, NV, NVT, PREFIX, T, VD, VR, VTOK, TurboVLA)
 
 
@@ -44,6 +44,7 @@ def replay(mut m: TurboVLA, ctx: DeviceContext, k: Int, with_text: Bool) raises 
 
 
 def replays(mut m: TurboVLA, ctx: DeviceContext) raises:
+    cool_down()
     var k = Int(getenv("TURBOVLA_REPLAY"))
     for with_text in [False, True]:
         var line = String("replay: chunk ") + ("with" if with_text else "without") + " text, " + String(k) + \
