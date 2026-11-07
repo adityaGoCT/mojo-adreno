@@ -37,7 +37,9 @@ VM, ML, LM, AH = ("embedder.model.vision_model.", "embedder.model.mlp1.", "embed
 S, D, VD = 1024, 896, 1024
 PT = "mp_rank_00_model_states.pt"
 sys.path.insert(0, str(ROOT / "vla_adapter"))
+sys.path.insert(0, str(ROOT / "npu"))
 from export_npu import check, precision, Half  # noqa: E402
+from htp_norms import ln16, rms16  # noqa: E402
 
 
 class W(nn.Module):
@@ -58,35 +60,37 @@ def lin(x, w, name, bias=True):
 
 
 class Vision(nn.Module):
-    """InternViT-300M on the 3 views (residual kept / 16, keys centered), the pixel shuffle, mlp1."""
+    """InternViT-300M on one view (keys centered), the pixel shuffle, mlp1: run once a view (all three views in one
+    graph failed QNN's finalization, error 1002). fp16-safe norms: ln16 (the HTP flushes subnormals; a residual
+    divided by 16 made small activations' squares vanish)."""
 
-    C = 16.0
+    C = 1.0
 
     def __init__(self, w):
         super().__init__()
         self.w = w
 
-    def forward(self, pix):  # [3, 3, 448, 448] -> [768, 896]
+    def forward(self, pix):  # [n, 3, 448, 448] -> [n 256, 896] (the graph: n = 1)
         w, C = self.w, self.C
+        nv = int(pix.shape[0])
         pe = VM + "embeddings."
         x = F.conv2d(pix, w(pe + "patch_embedding.weight"), w(pe + "patch_embedding.bias"), stride=14)
-        x = torch.cat([w(pe + "class_embedding").expand(3, -1, -1), x.flatten(2).transpose(1, 2)], 1)
+        x = torch.cat([w(pe + "class_embedding").expand(nv, -1, -1), x.flatten(2).transpose(1, 2)], 1)
         x = (x + w(pe + "position_embedding")) * (1.0 / C)
-        eps = 1e-6 / C / C
         for i in range(24):
             p = VM + f"encoder.layers.{i}."
-            y = F.layer_norm(x, (VD,), w(p + "norm1.weight"), w(p + "norm1.bias"), eps)
-            qkv = lin(y, w, p + "attn.qkv").view(3, 1025, 3, 16, 64).permute(2, 0, 3, 1, 4)
+            y = ln16(x, w(p + "norm1.weight"), w(p + "norm1.bias"))
+            qkv = lin(y, w, p + "attn.qkv").view(nv, 1025, 3, 16, 64).permute(2, 0, 3, 1, 4)
             k = qkv[1] - qkv[1].mean(2, keepdim=True)
             o = torch.softmax((qkv[0] * 0.125) @ k.transpose(-1, -2), -1) @ qkv[2]
-            x = x + lin(o.transpose(1, 2).reshape(3, 1025, VD), w, p + "attn.proj") * (w(p + "ls1") / C)
-            y = F.layer_norm(x, (VD,), w(p + "norm2.weight"), w(p + "norm2.bias"), eps)
+            x = x + lin(o.transpose(1, 2).reshape(nv, 1025, VD), w, p + "attn.proj") * (w(p + "ls1") / C)
+            y = ln16(x, w(p + "norm2.weight"), w(p + "norm2.bias"))
             x = x + lin(F.gelu(lin(y, w, p + "mlp.fc1")), w, p + "mlp.fc2") * (w(p + "ls2") / C)
-        x = (x * C)[:, 1:].reshape(3, 32, 32, VD)
+        x = (x * C)[:, 1:].reshape(nv, 32, 32, VD)
         # InternVL's pixel_shuffle (v2, 0.5): [n, 32, 32, c] -> [n, 16, 16, 4c]
-        x = x.reshape(3, 32, 16, 2 * VD).permute(0, 2, 1, 3).reshape(3, 16, 16, 4 * VD).permute(0, 2, 1, 3)
-        x = x.reshape(768, 4 * VD)
-        x = F.layer_norm(x, (4 * VD,), w(ML + "0.weight"), w(ML + "0.bias"), 1e-5)
+        x = x.reshape(nv, 32, 16, 2 * VD).permute(0, 2, 1, 3).reshape(nv, 16, 16, 4 * VD).permute(0, 2, 1, 3)
+        x = x.reshape(nv * 256, 4 * VD)
+        x = ln16(x, w(ML + "0.weight"), w(ML + "0.bias"), 1e-5)
         return lin(F.gelu(lin(x, w, ML + "1")), w, ML + "3")
 
 
@@ -96,13 +100,15 @@ def rms(x, g, eps):
 
 class LLM(nn.Module):
     """Qwen2.5-0.5B's first 14 layers over the 1024 rows, FlashAttention-2's masking (masked rows' attention output
-    zeroed), residual kept / 64, keys centered; the final RMSNorm."""
+    zeroed), keys centered; the final RMSNorm. fp16-safe norms: rms16 (a residual divided by 64 made small
+    activations' squares subnormal, which the HTP flushes)."""
 
-    C = 64.0
+    C = 1.0
 
-    def __init__(self, w):
+    def __init__(self, w, slots0):
         super().__init__()
         self.w = w
+        self.slots0 = slots0  # each view's first image row (256 rows a view)
         inv = 1.0 / (1e6 ** (torch.arange(0, 64, 2).float() / 64))
         f = torch.arange(S).float()[:, None] * inv[None]
         emb = torch.cat([f, f], -1)
@@ -111,13 +117,18 @@ class LLM(nn.Module):
     def rope(self, x):
         return x * self.cos + torch.cat([-x[..., 32:], x[..., :32]], -1) * self.sin
 
-    def forward(self, emb, mask_add, rowmask):
+    def forward(self, emb, v0, v1, v2, mask_add, rowmask):
+        """emb: the prompt's embedded rows (image rows ignored), v0 .. v2: each view's 256 tokens (the vision
+        graph's output, once a view)."""
         w, C = self.w, self.C
-        eps = 1e-6 / C / C
-        x = emb * (1.0 / C)
+        parts, at = [], 0
+        for v, vis in enumerate((v0, v1, v2)):
+            parts += [emb[at:self.slots0[v]], vis]
+            at = self.slots0[v] + 256
+        x = torch.cat(parts + [emb[at:]], 0) * (1.0 / C)
         for l in range(14):
             p = LM + f"layers.{l}."
-            y = rms(x, w(p + "input_layernorm.weight"), eps)
+            y = rms16(x, w(p + "input_layernorm.weight"))
             q = lin(y, w, p + "self_attn.q_proj").view(S, 14, 64).transpose(0, 1)
             k = lin(y, w, p + "self_attn.k_proj").view(S, 2, 64).transpose(0, 1)
             v = lin(y, w, p + "self_attn.v_proj").view(S, 2, 64).transpose(0, 1)
@@ -127,11 +138,11 @@ class LLM(nn.Module):
             o = torch.softmax((q * 0.125) @ k.transpose(-1, -2) + mask_add, -1) @ v
             o = o.transpose(0, 1).reshape(S, D) * rowmask
             x = x + F.linear(o, w(p + "self_attn.o_proj.weight")) * (1.0 / C)
-            y = rms(x, w(p + "post_attention_layernorm.weight"), eps)
+            y = rms16(x, w(p + "post_attention_layernorm.weight"))
             g = F.linear(y, w(p + "mlp.gate_proj.weight"))
             u = F.linear(y, w(p + "mlp.up_proj.weight"))
             x = x + F.linear(F.silu(g) * u, w(p + "mlp.down_proj.weight")) * (1.0 / C)
-        return rms(x, w(LM + "norm.weight"), eps)
+        return rms16(x, w(LM + "norm.weight"))
 
 
 class Head(nn.Module):
@@ -162,15 +173,15 @@ class Head(nn.Module):
             temb = w(AH + "time_pos_enc.pe")[0, self.tindex[i]]
             for b in range(8):
                 p = AH + f"transformer_blocks.{b}."
-                y = F.layer_norm(t, (D,), w(p + "norm1.weight"), w(p + "norm1.bias"), 1e-5)
+                y = ln16(t, w(p + "norm1.weight"), w(p + "norm1.bias"), 1e-5)
                 ip = w(p + "attn.in_proj_weight")
                 ib = w(p + "attn.in_proj_bias")
                 q = F.linear(y, ip[:D], ib[:D]).view(50, 8, 112).transpose(0, 1)
                 o = torch.softmax(q @ kv[b][0].transpose(-1, -2) / math.sqrt(112), -1) @ kv[b][1]
                 t = t + lin(o.transpose(0, 1).reshape(50, D), w, p + "attn.out_proj")
-                y = F.layer_norm(t, (D,), w(p + "norm2.weight"), w(p + "norm2.bias"), 1e-5) + temb
+                y = ln16(t, w(p + "norm2.weight"), w(p + "norm2.bias"), 1e-5) + temb
                 t = t + lin(F.gelu(lin(y, w, p + "ff.0")), w, p + "ff.2")
-            y = F.layer_norm(t, (D,), w(AH + "norm_out.weight"), w(AH + "norm_out.bias"), 1e-5)
+            y = ln16(t, w(AH + "norm_out.weight"), w(AH + "norm_out.bias"), 1e-5)
             pooled = lin(y.reshape(1, 50 * D), w, AH + "seq_pool_proj")
             v = lin(F.relu(lin(pooled, w, AH + "mlp_head.fc1.linear")), w, AH + "mlp_head.fc2.linear")
             x = x + v.reshape(50, 24) * (1.0 / 32)
@@ -234,22 +245,29 @@ def main():
     noise = rd("noise.f32").reshape(50, 24)
     amask = rd("action_mask.i32", np.int32).astype(np.float32).reshape(1, 24)
     tindex = [int(v) for v in rd("time_index.i32", np.int32)]
-    vision, llm, head = Vision(w), LLM(w), Head(w, tindex)
+    slots0 = [int(v) for v in rd("image_slots.i32", np.int32).reshape(3, 256)[:, 0]]
+    vis_ref = rd("mlp1_out.f32").reshape(768, D)
+    vision, llm, head = Vision(w), LLM(w, slots0), Head(w, tindex)
     t = torch.from_numpy
     with torch.no_grad():
         print("fp32 PyTorch modules against the official model's tensors:")
         check("views' tokens (mlp1)", vision(t(pix)), rd("mlp1_out.f32"))
-        check("LLM final norm (the context rows)", llm(t(emb), t(mask), t(rowmask)), ctx_ref[:S])
+        check("LLM final norm (the context rows)", llm(t(emb), *(t(vis_ref[v * 256:(v + 1) * 256]) for v in range(3)),
+                                                       t(mask), t(rowmask)), ctx_ref[:S])
         x = head(t(ctx_ref[:S]), t(state), t(noise), t(amask)).numpy()
         check("actions (normalized, the 7 used dims)", x[:, :7], rd("actions_norm.f32").reshape(50, 24)[:, :7])
     with torch.no_grad():
-        export(Half(precision(vision, torch.float16)), (t(pix),), ["pixels"], ["tokens"], OUT / "vision.onnx")
-        export(Half(precision(llm, torch.float16)), (t(emb), t(mask), t(rowmask)), ["embeds", "mask", "rowmask"],
-               ["context"], OUT / "llm.onnx")
+        export(Half(precision(vision, torch.float16)), (t(pix[:1]),), ["pixels"], ["tokens"], OUT / "vision.onnx")
+        export(Half(precision(llm, torch.float16)),
+               (t(emb), *(t(vis_ref[v * 256:(v + 1) * 256]) for v in range(3)), t(mask), t(rowmask)),
+               ["embeds", "vision0", "vision1", "vision2", "mask", "rowmask"], ["context"], OUT / "llm.onnx")
         export(Half(precision(head, torch.float16)), (t(ctx_ref[:S]), t(state), t(noise), t(amask)),
                ["context", "state", "noise", "amask"], ["x"], OUT / "head.onnx")
     for name, arr in (("pixels", pix), ("embeds", emb), ("mask", mask), ("rowmask", rowmask), ("state", state),
-                      ("noise", noise), ("amask", amask), ("ref_context", ctx_ref[:S].copy())):
+                      ("noise", noise), ("amask", amask), ("ref_context", ctx_ref[:S].copy()),
+                      ("ref_vision", vis_ref), ("pixels0", pix[0:1].copy()), ("pixels1", pix[1:2].copy()),
+                      ("pixels2", pix[2:3].copy())) + tuple((f"ref_vision{v}", vis_ref[v * 256:(v + 1) * 256].copy())
+                                                            for v in range(3)):
         arr.tofile(OUT / "in" / (name + ".f32"))
     print("inputs in", OUT / "in")
 

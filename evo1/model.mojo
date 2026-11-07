@@ -68,6 +68,7 @@ comptime STEPS = 32
 comptime EPS6: Float32 = 1e-6
 comptime EPS5: Float32 = 1e-5
 comptime INF: Float32 = 1e30
+comptime NEG: Float32 = -30000.0  # the NPU graphs' masked logit (fp16)
 
 comptime VM = "embedder.model.vision_model."
 comptime ML = "embedder.model.mlp1."
@@ -174,6 +175,11 @@ struct Evo1(Movable):
     var xs: DeviceBuffer[DType.float32]  # x after each step (32 x 1200), for the check
     var record: Bool
     var tindex: List[Int]
+    # GPU+NPU (evo1/export_npu.py's graphs, compiled on the laptop, run inside vk_server_npu on these buffers)
+    var npu_vision: Int  # EVO1_NPU_VISION (vision_ctx.onnx on the laptop): its handle there, or -1
+    var npu_llm: Int  # EVO1_NPU_LLM (llm_ctx.onnx)
+    var mask_add: DeviceBuffer[DType.float32]  # the LLM graph's additive mask (S x S) and valid rows (S)
+    var rowmask: DeviceBuffer[DType.float32]
 
     def __init__(out self, ctx: DeviceContext, path: String) raises:
         self.ctx = ctx
@@ -185,7 +191,7 @@ struct Evo1(Movable):
         self.s16 = Scratch(ctx, 64, 64, VROWS * VF if self.mma16 else 64, 64)
         self.lib = OwnedDLHandle(plugin_path())
         self.bytes = 0
-        self.profiling = False
+        self.profiling = flag("EVO1_PROFILE")  # each launch waited for and marked
         self.tag = ""
         self.slots = List[Int]()
         self.record = True
@@ -240,12 +246,18 @@ struct Evo1(Movable):
         self.mh = ctx.enqueue_create_buffer[DType.float32](HR * MH)
         self.vel = ctx.enqueue_create_buffer[DType.float32](HR * OUT)
         self.xs = ctx.enqueue_create_buffer[DType.float32](STEPS * OUT)
+        self.mask_add = ctx.enqueue_create_buffer[DType.float32](S * S)
+        self.rowmask = ctx.enqueue_create_buffer[DType.float32](S)
+        self.npu_vision = -1
+        self.npu_llm = -1
         for buf in [self.vx, self.vxn, self.vqkv, self.vatt, self.vh, self.x, self.xn, self.qkv, self.att, self.gu,
                     self.ctxb, self.sh, self.act, self.ain, self.ax, self.axn, self.aq, self.aatt, self.aff, self.flat,
                     self.pooled, self.mh, self.vel, self.state]:
             ctx.enqueue_memset(buf, Float32(0))
         self.load(path)
         self.tables()
+        self.npu_vision = self.npug_open("EVO1_NPU_VISION")
+        self.npu_llm = self.npug_open("EVO1_NPU_LLM")
 
     # weights
     def load(mut self, path: String) raises:
@@ -395,6 +407,20 @@ struct Evo1(Movable):
             ql[i] = Float32(i) if mask[i] != 0 else Float32(-1)
         self.ctx.enqueue_copy(self.lklev, kl.unsafe_ptr())
         self.ctx.enqueue_copy(self.lqlev, ql.unsafe_ptr())
+        # the NPU LLM graph's forms of the same mask (export_npu.py): valid rows see valid keys causally; masked rows
+        # see key 0 (finite) and their attention output is zeroed by rowmask
+        var ma = List[Float32](length=S * S, fill=NEG)
+        var rm = List[Float32](length=S, fill=0)
+        for i in range(S):
+            if mask[i] != 0:
+                rm[i] = 1
+                for j in range(i + 1):
+                    if mask[j] != 0:
+                        ma[i * S + j] = 0
+            else:
+                ma[i * S] = 0
+        self.ctx.enqueue_copy(self.mask_add, ma.unsafe_ptr())
+        self.ctx.enqueue_copy(self.rowmask, rm.unsafe_ptr())
         var st = List[Float32](length=HR * AD, fill=0)
         for i in range(AD):
             st[i] = state[i]
@@ -402,6 +428,54 @@ struct Evo1(Movable):
         self.ctx.enqueue_copy(self.noise, noise.unsafe_ptr())
         self.ctx.enqueue_copy(self.amask, amask.unsafe_ptr())
         self.ctx.synchronize()
+
+    def npug_open(self, env: String) raises -> Int:
+        var graph = getenv(env)
+        if not graph:
+            return -1
+        var ms = Float64(0)
+        var h = self.lib.call["M_driver_remote_npug_open", Int32](graph.as_c_string_span().unsafe_ptr(), Pointer(to=ms))
+        if h < 0:
+            raise Error("M_driver_remote_npug_open failed for " + graph + ": the server must be vk_server_npu.exe")
+        print("NPU:", graph, "opened in", round(ms, 1), "ms")
+        return Int(h)
+
+    def npug_run(mut self, h: Int, ins: List[UInt64], inb: List[UInt64], outs: List[UInt64],
+                 outb: List[UInt64]) raises:
+        """A compiled graph on the laptop's NPU, inside vk_server_npu: inputs read from and outputs written to GPU
+        buffers (device pointers and byte sizes, in the graph's order)."""
+        if self.lib.call["M_driver_remote_npug_run", Int32](Int32(h), Int32(len(ins)), ins.unsafe_ptr(),
+                                                            inb.unsafe_ptr(), Int32(len(outs)), outs.unsafe_ptr(),
+                                                            outb.unsafe_ptr()) != 0:
+            raise Error("M_driver_remote_npug_run failed")
+        self.tick("NPU graph")
+
+    def npu_time(mut self) raises -> Float64:
+        var ms = Float64(0)
+        if self.lib.call["M_driver_remote_npug_time", Int32](Pointer(to=ms)) != 0:
+            raise Error("the NPU graph failed (M_driver_remote_npug_time)")
+        return ms
+
+    def vision_npu(mut self) raises:
+        """GPU+NPU: InternViT, the pixel shuffle and mlp1 on the NPU, once a view (the graph takes one): the views'
+        768 tokens into mout."""
+        for v in range(NV):
+            var px = self.pix.create_sub_buffer[DType.float32](v * 3 * IMG * IMG, 3 * IMG * IMG)
+            var tok = sub(self.mout, v * MT * D, MT * D)
+            self.npug_run(self.npu_vision, [UInt64(Int(px.unsafe_ptr()))], [UInt64(3 * IMG * IMG * 4)],
+                          [UInt64(Int(tok.unsafe_ptr()))], [UInt64(MT * D * 4)])
+
+    def llm_npu(mut self) raises:
+        """GPU+NPU: the LLM's 14 layers and final norm on the NPU, reading the embedded rows from x and the views'
+        tokens from mout (the graph places them): the head's context rows 0 .. 1023."""
+        var v0 = sub(self.mout, 0, MT * D)
+        var v1 = sub(self.mout, MT * D, MT * D)
+        var v2 = sub(self.mout, 2 * MT * D, MT * D)
+        self.npug_run(self.npu_llm, [UInt64(Int(self.x.unsafe_ptr())), UInt64(Int(v0.unsafe_ptr())),
+                                     UInt64(Int(v1.unsafe_ptr())), UInt64(Int(v2.unsafe_ptr())),
+                                     UInt64(Int(self.mask_add.unsafe_ptr())), UInt64(Int(self.rowmask.unsafe_ptr()))],
+                      [UInt64(S * D * 4), UInt64(MT * D * 4), UInt64(MT * D * 4), UInt64(MT * D * 4),
+                       UInt64(S * S * 4), UInt64(S * 4)], [UInt64(Int(self.ctxb.unsafe_ptr()))], [UInt64(S * D * 4)])
 
     def tick(self, what: String) raises:
         if self.profiling:
@@ -615,8 +689,15 @@ struct Evo1(Movable):
             self.step(i)
 
     def chunk(mut self) raises:
-        """One action chunk: vision, the prompt rows, the LLM, the head. Enqueued only."""
-        self.vision()
+        """One action chunk: vision, the prompt rows, the LLM, the head (GPU+NPU: vision and the LLM on the NPU).
+        Enqueued only."""
+        if self.npu_vision >= 0:
+            self.vision_npu()
+        else:
+            self.vision()
         self.embed()
-        self.llm()
+        if self.npu_llm >= 0:
+            self.llm_npu()
+        else:
+            self.llm()
         self.head()

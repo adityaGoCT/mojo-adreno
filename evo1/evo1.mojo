@@ -7,7 +7,8 @@
 #       evo1 <evo1.safetensors> <ref dir> [runs]
 #
 # EVO1_MMA16=1: the ViT, mlp1 and the LLM on the fp16 matrix units. EVO1_REPLAY=<k>: a chunk on the laptop's own clock
-# (OP_RECORD / OP_REPLAY), five times over.
+# (OP_RECORD / OP_REPLAY), five times over. GPU+NPU: EVO1_NPU_VISION / EVO1_NPU_LLM name compiled graphs on the laptop
+# (evo1/export_npu.py; the server is vk_server_npu.exe); those stages run on the NPU, the rest on the GPU.
 from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
@@ -27,6 +28,53 @@ def replay(mut m: Evo1, ctx: DeviceContext, k: Int) raises -> Float64:
     if ms < 0:
         raise Error("M_driver_remote_replay failed")
     return ms / Float64(k)
+
+
+def actions_check(ctx: DeviceContext, m: Evo1, r: String, what: String) raises:
+    var a = fetch(ctx, m.act, OUT)
+    var an = read_f32(r + "actions_norm.f32")
+    var c = Check()
+    for j in range(OUT):
+        if j % AD < 7:
+            c.add(a[j], an[j])
+    show("actions (50 x 7, normalized)" + what, c)
+
+
+def gpu_npu(mut m: Evo1, ctx: DeviceContext, r: String, runs: Int) raises:
+    """GPU+NPU: the vision and/or LLM graphs on the NPU, the rest on the GPU; checked, then timed."""
+    if m.npu_vision >= 0:
+        m.vision_npu()
+        show("views' tokens from the NPU (3 x 256 x 896)", compare(fetch(ctx, m.mout, NV * MT * D), D,
+                                                                   read_f32(r + "mlp1_out.f32"), D, span(NV * MT), D))
+        print("NPU vision graph:", round(m.npu_time(), 1), "ms (server clock)")
+    else:
+        m.vision()
+    m.embed()
+    if m.npu_llm >= 0:
+        m.llm_npu()
+        m.head_start()
+        show("head context from the NPU (1025 x 896)", compare(fetch(ctx, m.ctxb, CTX * D), D,
+                                                                read_f32(r + "context.f32"), D, span(CTX), D))
+        print("NPU LLM graph:", round(m.npu_time(), 1), "ms (server clock)")
+        for i in range(STEPS):
+            m.step(i)
+    else:
+        m.llm()
+        m.head()
+    actions_check(ctx, m, r, ", GPU+NPU")
+    m.record = False
+    for run in range(runs):
+        var a0 = now_ms()
+        m.chunk()
+        ctx.synchronize()
+        print("run", run, ": chunk", round(now_ms() - a0, 1), "ms (Mac clock)")
+    if getenv("EVO1_REPLAY"):
+        var k = Int(getenv("EVO1_REPLAY"))
+        var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
+        for _ in range(5):
+            line += " " + String(round(replay(m, ctx, k), 1))
+        print(line)
+    print("done")
 
 
 def main() raises:
@@ -54,6 +102,9 @@ def main() raises:
     for i in range(STEPS):
         if Int(ti[i]) != m.tindex[i]:
             raise Error("time index " + String(i) + ": " + String(m.tindex[i]) + " vs the reference's " + String(ti[i]))
+    if m.npu_vision >= 0 or m.npu_llm >= 0:  # GPU+NPU
+        gpu_npu(m, ctx, r, runs)
+        return
 
     var tc = now_ms()
     var vrows = List[Int]()

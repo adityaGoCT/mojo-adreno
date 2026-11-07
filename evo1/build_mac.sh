@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds evo1 as a macOS program whose kernels are adreno840 SPIR-V, for the remote driver plugin and vla/x2's
-# Vulkan server on the Snapdragon X2 Elite laptop (both from vla/x2/build_mac.sh). Output: build/evo1/x2/octo.
-#   octo/build_mac.sh
+# Vulkan server on the Snapdragon X2 Elite laptop (both from vla/x2/build_mac.sh). Output: build/evo1/x2/evo1.
+#   evo1/build_mac.sh
 set -e
 cd "$(dirname "$0")/.."
 MOJO_SRC=${MOJO_SRC:-../modular}
