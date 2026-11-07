@@ -6,6 +6,7 @@ Face by HTTP range request when it is asked for, a few in parallel, and keeps no
 """
 
 import json
+import os
 import pathlib
 import sys
 import threading
@@ -24,6 +25,7 @@ REV = "e7caca5d835a3901a8e0d63e94009429bafafdfc"
 GGUF = "LFM2.5-2.6B-QAD-Q4_0.gguf"
 GGUF_SHA256 = "a247afd6414918eac8e520a9e6137dc271235461ecbe1180462221d5b8d40b03"
 BUILD = ROOT / "build/lfm2"
+GGUF_PATH = pathlib.Path(os.environ.get("LFM2_GGUF", BUILD / GGUF))  # LFM2_GGUF: another GGUF of the same model
 
 
 def url(path):
@@ -92,7 +94,7 @@ class GGUFWeights:
 
     def __init__(self, path=None, round16=False):
         self.round16 = round16
-        self.path = pathlib.Path(path or BUILD / GGUF)
+        self.path = pathlib.Path(path or GGUF_PATH)
         self.mm = np.memmap(self.path, np.uint8, "r")
         _, self.meta, tensors, _ = gguf_read.parse(memoryview(self.mm[:16 << 20]))
         self.t = {t["name"]: t for t in tensors}

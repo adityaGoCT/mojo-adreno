@@ -12,6 +12,7 @@
 // d<i>_ctx.onnx, head_ctx.onnx (graph_tool compile), and ../rope.f32. The prompt's embedding rows are the GGUF's
 // Q6_K rows, dequantized here as ggml does. The prefill contexts and the decode contexts (3.4 GB each) do not fit in
 // the phone's memory together, so the decode's are loaded after the prefill's are released (the handoff).
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -53,6 +54,15 @@ std::vector<float> x0_;          // the prefill's input rows [R][D]
 int32_t sel_[2];
 std::vector<std::vector<float>> kc_, vc_, st_;  // decode: caches [KVH][C][HD] (attention layers), conv states [2][D]
 std::vector<float> logits_;
+// Graph names: prefill parts <pre><i>, decode parts <dec><i> (LFM2_PGRAPH, LFM2_DGRAPH). A prompt longer than one
+// prefill graph runs in chunks (LFM2_CHUNK rows a chunk, after up to LFM2_PAST earlier positions: export_npu.py's
+// chunk_part): the earlier K/V and conv states are kept here between chunks.
+std::string pre_name_ = "p", dec_name_ = "d";
+int chunk_ = 0, past_ = 0;
+std::vector<std::vector<float>> kp_, vp_, sp_;    // chunks: earlier K, V [KVH][past][HD]; conv states [2][D]
+std::vector<std::vector<float>> kall_, vall_;     // chunks: every prompt position's K, V [KVH][kstride][HD]
+int kstride_ = 0;                                  // the row stride of the K/V lfm2n_k / lfm2n_v return
+std::vector<float> cs_, sn_, pmask_;
 
 int fail(const std::string& s) {
   err_ = s + (npug_error() && *npug_error() ? std::string(": ") + npug_error() : "");
@@ -154,9 +164,16 @@ int lfm2n_open(const char* dir, const char* gguf, int rows, int slots, int parts
   }
   L = int(attn_.size());
   if (L == 0 || emb_off_ == 0) return fail("manifest.txt: no layers or no embed_q6k line");
-  std::ifstream rf(dir_ + "/../rope.f32", std::ios::binary);
-  rope_.assign(2048 * 64, 0);
+  std::ifstream rf(dir_ + "/../rope.f32", std::ios::binary | std::ios::ate);
+  if (!rf) return fail("rope.f32");
+  rope_.assign(size_t(rf.tellg()) / 4, 0);
+  rf.seekg(0);
   if (!rf.read((char*)rope_.data(), rope_.size() * 4)) return fail("rope.f32");
+  if (const char* e = getenv("LFM2_PGRAPH")) pre_name_ = e;
+  if (const char* e = getenv("LFM2_DGRAPH")) dec_name_ = e;
+  chunk_ = getenv("LFM2_CHUNK") ? atoi(getenv("LFM2_CHUNK")) : 0;
+  past_ = getenv("LFM2_PAST") ? atoi(getenv("LFM2_PAST")) : 0;
+  if (chunk_ && chunk_ != R) return fail("LFM2_CHUNK must equal the graphs' rows");
   gguf_ = fopen(gguf, "rb");
   if (!gguf_) return fail(std::string("cannot open ") + gguf);
   logits_.assign(V, 0);
@@ -167,13 +184,22 @@ int lfm2n_prefill_open(double* ms) {
   if (ms) *ms = 0;
   pre_.assign(P, Graph());
   for (int i = 0; i < P; i++)
-    if (open_graph("p" + std::to_string(i), pre_[i], ms)) return -1;
+    if (open_graph(pre_name_ + std::to_string(i), pre_[i], ms)) return -1;
   if (head_.h < 0 && open_graph("head", head_, ms)) return -1;
   return 0;
 }
 
+int prefill_chunks(const int32_t* ids, int n);
+
 // The prompt's n tokens through the prefill parts and the head: K/V, conv states and the last row's logits.
 int lfm2n_prefill(const int32_t* ids, int n, double* ms) {
+  if (chunk_) {
+    double t0 = now_ms();
+    if (prefill_chunks(ids, n)) return -1;
+    if (ms) *ms = now_ms() - t0;
+    return 0;
+  }
+  kstride_ = R;
   if (n < 2 || n > R) return fail("prompt length");
   double t0 = now_ms();
   x0_.assign((size_t)R * D, 0.f);
@@ -195,19 +221,107 @@ int lfm2n_prefill(const int32_t* ids, int n, double* ms) {
   return 0;
 }
 
-// After a prefill: layer l's K or V [KVH][R][HD] (attention layers), its conv state [2][D] (Bx at rows n - 2, n - 1),
-// the last row's logits.
+// A long prompt in chunks of R rows: each chunk's parts see the earlier positions' K/V (kp, vp, masked past the
+// chunk's start) and the conv states the chunk before left (sp); the chunk's K/V go into kall/vall (all positions,
+// for the handoff) and, while they fit, into kp/vp for the chunks after.
+int prefill_chunks(const int32_t* ids, int n) {
+  if (n < 2 || n > past_ + R) return fail("prompt length (chunks)");
+  kstride_ = ((n + R - 1) / R) * R;
+  kp_.assign(L, {});
+  vp_.assign(L, {});
+  sp_.assign(L, {});
+  kall_.assign(L, {});
+  vall_.assign(L, {});
+  for (int l = 0; l < L; l++) {
+    if (attn_[l]) {
+      kp_[l].assign((size_t)KVH * past_ * HD, 0.f);
+      vp_[l].assign((size_t)KVH * past_ * HD, 0.f);
+      kall_[l].assign((size_t)KVH * kstride_ * HD, 0.f);
+      vall_[l].assign((size_t)KVH * kstride_ * HD, 0.f);
+    } else {
+      sp_[l].assign(2 * D, 0.f);
+    }
+  }
+  cs_.assign((size_t)R * 32, 0.f);
+  sn_.assign((size_t)R * 32, 0.f);
+  pmask_.assign(past_, NEG);
+  for (int c0 = 0; c0 < n; c0 += R) {
+    int nk = std::min(R, n - c0);
+    x0_.assign((size_t)R * D, 0.f);
+    for (int i = 0; i < nk; i++)
+      if (embed_row(ids[c0 + i], x0_.data() + (size_t)i * D)) return -1;
+    sel_[0] = nk - 2;
+    sel_[1] = nk - 1;
+    for (int i = 0; i < R; i++) {
+      size_t row = size_t(std::min(c0 + i, int(rope_.size() / 64) - 1)) * 64;
+      memcpy(&cs_[(size_t)i * 32], &rope_[row], 32 * 4);
+      memcpy(&sn_[(size_t)i * 32], &rope_[row + 32], 32 * 4);
+    }
+    for (int j = 0; j < past_; j++) pmask_[j] = j < c0 ? 0.f : NEG;
+    const float* x = x0_.data();
+    for (auto& g : pre_) {
+      set(g, "x", x);
+      set(g, "sel", sel_);
+      set(g, "cos", cs_.data());
+      set(g, "sin", sn_.data());
+      set(g, "pmask", pmask_.data());
+      for (int l = 0; l < L; l++) {
+        auto s = std::to_string(l);
+        if (attn_[l]) {
+          set(g, "kp" + s, kp_[l].data());
+          set(g, "vp" + s, vp_[l].data());
+        } else {
+          set(g, "sp" + s, sp_[l].data());
+        }
+      }
+      if (run_graph(g)) return -1;
+      x = g.outs[0].data();
+    }
+    for (auto& g : pre_)  // this chunk's K/V and conv states, for the chunks after and the handoff
+      for (int l = 0; l < L; l++) {
+        auto s = std::to_string(l);
+        if (attn_[l]) {
+          const float *k = out(g, "k" + s), *v = out(g, "v" + s);
+          if (!k) continue;
+          for (int h = 0; h < KVH; h++) {
+            memcpy(&kall_[l][((size_t)h * kstride_ + c0) * HD], k + (size_t)h * R * HD, (size_t)nk * HD * 4);
+            memcpy(&vall_[l][((size_t)h * kstride_ + c0) * HD], v + (size_t)h * R * HD, (size_t)nk * HD * 4);
+            int fit = std::min(nk, past_ - c0);
+            if (fit > 0) {
+              memcpy(&kp_[l][((size_t)h * past_ + c0) * HD], k + (size_t)h * R * HD, (size_t)fit * HD * 4);
+              memcpy(&vp_[l][((size_t)h * past_ + c0) * HD], v + (size_t)h * R * HD, (size_t)fit * HD * 4);
+            }
+          }
+        } else if (const float* st = out(g, "s" + s)) {
+          memcpy(sp_[l].data(), st, 2 * D * 4);
+        }
+      }
+    if (c0 + nk == n) {
+      set(head_, "x", x);
+      if (run_graph(head_)) return -1;
+      memcpy(logits_.data(), head_.outs[0].data(), V * 4);
+    }
+  }
+  return 0;
+}
+
+// After a prefill: layer l's K or V [KVH][lfm2n_kv_stride()][HD] (attention layers), its conv state [2][D] (Bx at the
+// prompt's last two positions), the last row's logits.
+int lfm2n_kv_stride() { return kstride_; }
 const float* lfm2n_k(int l) {
+  if (chunk_) return l < int(kall_.size()) && !kall_[l].empty() ? kall_[l].data() : nullptr;
   for (auto& g : pre_)
     if (float* p = out(g, "k" + std::to_string(l))) return p;
   return nullptr;
 }
 const float* lfm2n_v(int l) {
+  if (chunk_) return l < int(vall_.size()) && !vall_[l].empty() ? vall_[l].data() : nullptr;
   for (auto& g : pre_)
     if (float* p = out(g, "v" + std::to_string(l))) return p;
   return nullptr;
 }
 const float* lfm2n_state(int l) {
+  if (chunk_) return l < int(sp_.size()) && !sp_[l].empty() ? sp_[l].data() : nullptr;
   for (auto& g : pre_)
     if (float* p = out(g, "s" + std::to_string(l))) return p;
   return nullptr;
@@ -231,7 +345,7 @@ int lfm2n_decode_open(int n, double* ms) {
   if (ms) *ms = 0;
   dec_.assign(P, Graph());
   for (int i = 0; i < P; i++)
-    if (open_graph("d" + std::to_string(i), dec_[i], ms)) return -1;
+    if (open_graph(dec_name_ + std::to_string(i), dec_[i], ms)) return -1;
   if (head_.h < 0 && open_graph("head", head_, ms)) return -1;
   kc_.assign(L, {});
   vc_.assign(L, {});
@@ -244,8 +358,8 @@ int lfm2n_decode_open(int n, double* ms) {
       if (!k || !v) return fail("no prefill K/V");
       for (int g = 0; g < KVH; g++)
         for (int p = 0; p < n; p++) {
-          memcpy(&kc_[l][((size_t)g * C + p) * HD], k + ((size_t)g * R + p) * HD, HD * 4);
-          memcpy(&vc_[l][((size_t)g * C + p) * HD], v + ((size_t)g * R + p) * HD, HD * 4);
+          memcpy(&kc_[l][((size_t)g * C + p) * HD], k + ((size_t)g * kstride_ + p) * HD, HD * 4);
+          memcpy(&vc_[l][((size_t)g * C + p) * HD], v + ((size_t)g * kstride_ + p) * HD, HD * 4);
         }
     } else {
       const float* s = lfm2n_state(l);
@@ -381,6 +495,14 @@ int main(int argc, char** argv) {
     t_dec += step_ms;
   }
   if (lf) fclose(lf);
+  {  // the process's peak and current resident memory and swap: Pipette's Android peak memory
+    std::ifstream st("/proc/self/status");
+    std::string line;
+    while (std::getline(st, line))
+      if (line.rfind("VmHWM", 0) == 0 || line.rfind("VmRSS", 0) == 0 || line.rfind("VmSwap", 0) == 0 ||
+          line.rfind("Rss", 0) == 0)
+        printf("mem: %s\n", line.c_str());
+  }
   if (gen > 1) printf("decode: %d steps, %.2f ms/token ( %.2f tokens/s )\n", gen - 1, t_dec / (gen - 1),
                       (gen - 1) * 1e3 / t_dec);
   fflush(stdout);

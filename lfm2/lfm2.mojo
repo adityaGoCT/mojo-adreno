@@ -7,9 +7,10 @@
 #     LFM2_LOGITS_EVERY=k   only every k-th of those (the 1st, the k+1st, ...): 0.5 MB a row crosses a slow bridge
 #     LFM2_EOS=7,124900     stop after one of these tokens
 #     LFM2_DUMP=<file>      with LFM2_PREFILL: the residual stream after the embedding and after each layer (fp32)
-#     LFM2_WARM=n           run the prompt n times untimed first (the pipelines and clocks warm up)
+#     LFM2_WARM=n           run the prompt and two decode steps n times untimed first (pipelines and clocks warm up)
 #     LFM2_PROFILE=1        decode steps wait after each launch; prints the time per kind of launch (ms a token)
 #     LFM2_PROFILE=prefill  the same for the prompt
+#     LFM2_ATTN=scalar      prefill attention with lk.attention instead of the matrix units (gemma4's g4k kernels)
 #     LFM2_GEMV=word        int4 decode with a word (8 weights) a lane a step instead of a block of 32 (dot_q4b)
 #     LFM2_DSPARK=<dir>     speculative decoding with the DSpark drafter (its manifest.txt and model.safetensors): each
 #                           step drafts up to 9 tokens and the target checks them in one pass (dspark.mojo); the
@@ -31,6 +32,19 @@ from model import LFM2, PMAX
 
 def now_ms() -> Float64:
     return Float64(perf_counter_ns()) / 1e6
+
+
+def print_memory() raises:
+    """The process's peak and current resident memory and swap (/proc/self/status): Pipette's Android peak memory."""
+    var status = open("/proc/self/status", "r").read()
+    for line in status.split("\n"):  # (Mojo's splitlines() also breaks at the tab after each name)
+        if line.startswith("VmHWM") or line.startswith("VmRSS") or line.startswith("VmSwap") or line.startswith("Rss"):
+            print("mem:", String(line))
+    try:  # the GPU's page allocations now, every buffer still held (bytes, system-wide: Pipette's GPU side)
+        var pages = open("/sys/class/kgsl/kgsl/page_alloc", "r").read()
+        print("mem: GpuPages:", String(pages.strip()))
+    except:
+        pass
 
 
 def run_prompt(mut model: LFM2, P: Int, prefill: Bool) raises:
@@ -173,6 +187,7 @@ def main() raises:
     var t_load = now_ms()
     var model = LFM2(ctx, String(args[1]), String(args[2]))
     model.wide = getenv("LFM2_GEMV") != "word"
+    model.attn_mma = getenv("LFM2_ATTN") != "scalar"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", storage", "q4" if model.q4 else "f16", ", context", model.CAP)
     var P = len(prompt)
@@ -189,6 +204,10 @@ def main() raises:
         run_prompt(model, P, prefill)
         ctx.synchronize()
         print("warm-up", w, ":", round(now_ms() - tw, 1), "ms")
+        if P + 2 < model.CAP:  # two decode steps too: their pipelines are built here, not in a timed step
+            model.step(P)
+            model.step(P + 1)
+            ctx.synchronize()
         model.reset()
 
     var logits = List[Float32](length=model.V, fill=0)
@@ -238,6 +257,8 @@ def main() raises:
         t_dec += ms
     if logits_path:
         out.close()
+    print_memory()
+    _ = model.V  # the model (its GPU buffers) lives through that reading: Mojo frees a value after its last use
     if gen > 1:
         print("decode:", gen - 1, "steps,", round(t_dec / Float64(gen - 1), 2), "ms/token (",
               round(Float64(gen - 1) * 1000.0 / t_dec, 2), "tokens/s )")

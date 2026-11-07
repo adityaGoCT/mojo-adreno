@@ -141,7 +141,7 @@ def lfm2hybrid():
     ab = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ab)
     stage_npu()
-    ab.mojo_object(ROOT / "lfm2/hybrid.mojo", OUT / "lfm2_hybrid.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels"])
+    ab.mojo_object(ROOT / "lfm2/hybrid.mojo", OUT / "lfm2_hybrid.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels", ROOT / "gemma4/kernels"])
     sh(CXX, "-O2", "-std=c++17", f"-I{ORT / 'headers'}", ROOT / "lfm2/npu_lfm2.cpp", HERE / "graph.cpp",
        OUT / "lfm2_hybrid.o", f"-L{OUT}", "-lonnxruntime", f"-L{ab.BUILD / 'runtime'}", "-lKGENCompilerRTShared",
        "-ldl", "-Wl,-rpath,$ORIGIN", "-o", OUT / "lfm2_hybrid")

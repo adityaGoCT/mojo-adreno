@@ -187,7 +187,7 @@ def lfm2():
     lfm2_convert (lfm2/convert.c), which writes the weight files on the phone from the downloaded GGUF."""
     out = BUILD / "lfm2"
     out.mkdir(parents=True, exist_ok=True)
-    mojo_object(ROOT / "lfm2/lfm2.mojo", out / "lfm2.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels"])
+    mojo_object(ROOT / "lfm2/lfm2.mojo", out / "lfm2.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels", ROOT / "gemma4/kernels"])
     link(out, "lfm2", [out / "lfm2.o"])
     sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-ffp-contract=off", "-o", out / "lfm2_convert",
        ROOT / "lfm2/convert.c")
@@ -197,7 +197,7 @@ def lfm2bench():
     """lfm2/bench_rows.mojo: the speculative verify's few-row int4 products against the alternatives."""
     out = BUILD / "lfm2bench"
     out.mkdir(parents=True, exist_ok=True)
-    mojo_object(ROOT / "lfm2/bench_rows.mojo", out / "bench_rows.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels"])
+    mojo_object(ROOT / "lfm2/bench_rows.mojo", out / "bench_rows.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels", ROOT / "gemma4/kernels"])
     link(out, "bench_rows", [out / "bench_rows.o"])
 
 

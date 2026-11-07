@@ -26,7 +26,7 @@ comptime I32 = UnsafePointer[Int32, MutAnyOrigin]
 comptime G = 32  # weights per Q4_0 scale
 comptime EPS = Float32(1e-5)
 comptime HD = 64  # head dim
-comptime KMAX = 2048  # keys p_attention holds in shared memory (the context)
+comptime KTILE = 1024  # keys an attention tile holds in shared memory
 
 
 @always_inline
@@ -336,11 +336,12 @@ def qk_norm_rope(qkv: F32, wq: F32, wk: F32, table: F32, kc: F32, vc: F32, p0: I
 
 def attention(qkv: F32, kc: F32, vc: F32, y: F32, p0: Int32, heads: Int32, kvh: Int32):
     """softmax(q K^T) V for query head block_idx.x of row block_idx.y (position p = p0 + row), keys 0 .. p of KV
-    head h / (heads / kvh); q already carries the scale. Scores in shared memory (p < KMAX), a lane a key, then a lane a
-    dimension for the values."""
+    head h / (heads / kvh); q already carries the scale. Keys in tiles of KTILE: a tile's scores in shared memory (a lane
+    a key), then a lane a dimension for its values, with the running maximum and sum carried from tile to tile (online
+    softmax). Up to KTILE keys this is one tile, the arithmetic of a plain softmax."""
     var sq = stack_allocation[64, Float32, address_space=AddressSpace.SHARED]()
     var red = stack_allocation[64, Float32, address_space=AddressSpace.SHARED]()
-    var ss = stack_allocation[KMAX, Float32, address_space=AddressSpace.SHARED]()
+    var ss = stack_allocation[KTILE, Float32, address_space=AddressSpace.SHARED]()
     var h = Int(block_idx.x)
     var t = Int(block_idx.y)
     var lane = Int(thread_idx.x)
@@ -351,40 +352,49 @@ def attention(qkv: F32, kc: F32, vc: F32, y: F32, p0: Int32, heads: Int32, kvh: 
     var krow = kv * HD
     sq[lane] = qkv[t * (nh + 2 * kv) * HD + h * HD + lane]
     barrier()
-    var highest: Float32 = -3.402823e38
-    for j in range(lane, p + 1, 64):
-        var k = kc + (j * krow + g * HD)
-        var acc = SIMD[DType.float32, 4](0)
-        comptime for e in range(0, HD, 4):
-            acc += k.load[width=4](e) * sq.load[width=4](e)
-        var s = acc.reduce_add()
-        ss[j] = s
-        highest = max(highest, s)
-    red[lane] = highest
-    barrier()
-    comptime for stage in range(6):
-        if lane < 32 >> stage:
-            red[lane] = max(red[lane], red[lane + (32 >> stage)])
-        barrier()
-    highest = red[0]
-    barrier()
-    var total: Float32 = 0
-    for j in range(lane, p + 1, 64):
-        var e = exp(ss[j] - highest)
-        ss[j] = e
-        total += e
-    red[lane] = total
-    barrier()
-    comptime for stage in range(6):
-        if lane < 32 >> stage:
-            red[lane] += red[lane + (32 >> stage)]
-        barrier()
-    var inv = 1 / red[0]
-    var value: Float32 = 0
     var vp = vc + (g * HD + lane)
-    for j in range(p + 1):
-        value += ss[j] * vp[j * krow]
-    y[t * nh * HD + h * HD + lane] = value * inv
+    var run_max: Float32 = -3.402823e38
+    var run_sum: Float32 = 0
+    var value: Float32 = 0
+    for t0 in range(0, p + 1, KTILE):
+        var n = min(KTILE, p + 1 - t0)
+        var highest: Float32 = -3.402823e38
+        for j in range(lane, n, 64):
+            var k = kc + ((t0 + j) * krow + g * HD)
+            var acc = SIMD[DType.float32, 4](0)
+            comptime for e in range(0, HD, 4):
+                acc += k.load[width=4](e) * sq.load[width=4](e)
+            var s = acc.reduce_add()
+            ss[j] = s
+            highest = max(highest, s)
+        red[lane] = highest
+        barrier()
+        comptime for stage in range(6):
+            if lane < 32 >> stage:
+                red[lane] = max(red[lane], red[lane + (32 >> stage)])
+            barrier()
+        var new_max = max(run_max, red[0])
+        barrier()
+        var total: Float32 = 0
+        for j in range(lane, n, 64):
+            var e = exp(ss[j] - new_max)
+            ss[j] = e
+            total += e
+        red[lane] = total
+        barrier()
+        comptime for stage in range(6):
+            if lane < 32 >> stage:
+                red[lane] += red[lane + (32 >> stage)]
+            barrier()
+        var shrink = exp(run_max - new_max)  # 0 for the first tile
+        var part: Float32 = 0
+        for j in range(n):
+            part += ss[j] * vp[(t0 + j) * krow]
+        value = value * shrink + part
+        run_sum = run_sum * shrink + red[0]
+        run_max = new_max
+        barrier()  # the next tile's scores overwrite ss
+    y[t * nh * HD + h * HD + lane] = value / run_sum
 
 
 def silu_mul(gu: F32, a: F32, f: Int32, count: Int32):

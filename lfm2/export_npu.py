@@ -30,6 +30,7 @@ Graphs (graph.cpp feeds fp32 / int32 inputs, reads fp32 outputs):
 import argparse
 import json
 import math
+import os
 import pathlib
 import sys
 
@@ -41,9 +42,9 @@ sys.path.insert(0, str(ROOT / "lfm2"))
 sys.path.insert(0, str(ROOT / "npu"))
 from weights import BUILD, GGUFWeights, config  # noqa: E402
 
-NPU = BUILD / "npu"
-R = 416  # prefill rows: the 415-token prompt, padded to a multiple of 32
-C = 512  # decode: cache slots (prompt + generated tokens)
+NPU = pathlib.Path(os.environ.get("LFM2_NPU_DIR", BUILD / "npu"))  # npu_w8.bin's manifest, calib.json, the graphs
+R = int(os.environ.get("LFM2_R", "416"))  # prefill rows: the 415-token prompt, padded to a multiple of 32
+C = int(os.environ.get("LFM2_C", "512"))  # decode: cache slots (prompt + generated tokens)
 PARTS = [(0, 6), (6, 12), (12, 18), (18, 24), (24, 30)]
 HEAD_CHUNKS = 4
 EPS = 1e-5
@@ -239,12 +240,13 @@ class Graph:
         w = self.op("DequantizeLinear", q, c, z, axis=0)
         return self.qdq(self.op("Gemm", self.qdq(x, key + ".in"), w, transB=1), key + ".out")
 
-    def gemm3(self, x3, name, key, k, n):
+    def gemm3(self, x3, name, key, k, n, rows=None):
         """A projection of blocks of rows: x3 [R / 32, 32, k] through a 2-D [R, k] view, back to [R / 32, 32, n]. The
         HTP runs element-wise ops on such blocks several times faster than on one long [R, c] tensor (the gate/up
         product and SiLU of a layer: 3.5 ms against 18 ms)."""
-        y = self.gemm(self.op("Reshape", x3, self.i64(f"shape_r{k}", [R, k])), name, key)
-        return self.op("Reshape", y, self.i64(f"shape_b{n}", [R // 32, 32, n]))
+        rows = rows or R
+        y = self.gemm(self.op("Reshape", x3, self.i64(f"shape_r{k}", [rows, k])), name, key)
+        return self.op("Reshape", y, self.i64(f"shape_b{n}", [rows // 32, 32, n]))
 
     def rms(self, x, w, width, axis=-1):
         """npu/htp_norms.py's rms16 written out: the row scaled to a fixed maximum k first (the HTP flushes fp16
@@ -293,6 +295,16 @@ def mlp(g, x, l, blocks):
     a = g.op("Mul", g.op("Mul", gt, g.op("Sigmoid", gt)), up)
     d = g.gemm3(a, n + "down", n + "down", 10752, 2048) if blocks else g.gemm(a, n + "down", n + "down")
     return g.op("Add", x, d)
+
+
+def mlp_rows(g, x, l, rows):
+    """mlp() over blocks of `rows` rows (a chunk's), not R."""
+    n = f"l{l}."
+    h = g.rms(x, g.wvec(n + "ffn_norm", [2048]), 2048)
+    gu = g.gemm3(h, n + "gu", n + "gu", 2048, 21504, rows)
+    gt, up = g.op("Split", gu, g.i64("split_ff", [10752, 10752]), axis=-1, n_out=2)
+    a = g.op("Mul", g.op("Mul", gt, g.op("Sigmoid", gt)), up)
+    return g.op("Add", x, g.gemm3(a, n + "down", n + "down", 10752, 2048, rows))
 
 
 def conv_taps(g, l):
@@ -349,6 +361,76 @@ def prefill_part(man, calib, cfg, first, last, final):
         g.output("xl", g.op("Gather", x, last_row, axis=0), [1, 2048])
     else:
         g.output("x_out", x, [R, 2048])
+    for name, v, dims in outs:
+        g.output(name, v, dims)
+    return g
+
+
+RC = int(os.environ.get("LFM2_RC", "512"))  # a prefill chunk's rows (long prompts)
+LP = int(os.environ.get("LFM2_LP", "3584"))  # earlier positions a chunk can attend to
+
+
+def chunk_part(man, calib, cfg, first, last, final):
+    """A prefill chunk of RC rows after up to LP earlier positions (prompts longer than one prefill graph): as
+    prefill_part, but each attention layer also attends to the earlier positions' K/V (inputs kp, vp [8, LP, 64], the
+    unused slots masked by pmask [1, LP]: 0 or NEG), RoPE comes from inputs (cos, sin [RC, 32] of the chunk's positions),
+    and each conv layer starts from the state the chunk before left (input sp [2, D]: B x at the two positions before
+    the chunk; zeros for the first)."""
+    g = Graph(man, calib)
+    B = RC // 32
+    x = g.input("x", [RC, 2048])
+    sel = g.input("sel", [2], g.T.INT32)
+    cos = g.input("cos", [RC, 32])
+    sin = g.input("sin", [RC, 32])
+    pmask = g.input("pmask", [1, LP])
+    mask = g.const("mask", np.triu(np.full((RC, RC), NEG, np.float32), 1))
+    outs = []
+    x = g.op("Reshape", x, g.i64("shape_blocks", [B, 32, 2048]))
+    for l in range(first, last):
+        n = f"l{l}."
+        h = g.rms(x, g.wvec(n + "in_norm", [2048]), 2048)
+        if cfg.layer_types[l] == "full_attention":
+            kp = g.input(f"kp{l}", [8, LP, 64])
+            vp = g.input(f"vp{l}", [8, LP, 64])
+            qkv = g.gemm(g.op("Reshape", h, g.i64("shape_r2048", [RC, 2048])), n + "qkv", n + "qkv")
+            q, k, v = g.op("Split", qkv, g.i64("split_qkv", [2048, 512, 512]), axis=1, n_out=3)
+            q = g.op("Transpose", g.op("Reshape", q, g.i64("shape_q", [RC, 32, 64])), perm=[1, 0, 2])
+            k = g.op("Transpose", g.op("Reshape", k, g.i64("shape_k", [RC, 8, 64])), perm=[1, 0, 2])
+            v = g.op("Transpose", g.op("Reshape", v, g.i64("shape_k", [RC, 8, 64])), perm=[1, 0, 2])
+            q = g.rope(g.rms(q, g.wvec(n + "q_norm", [64]), 64), cos, sin)
+            k = g.rope(g.rms(k, g.wvec(n + "k_norm", [64]), 64), cos, sin)
+            outs += [(f"k{l}", k, [8, RC, 64]), (f"v{l}", v, [8, RC, 64])]
+            qg = g.op("Reshape", g.op("Mul", q, g.f(0.125)), g.i64("shape_qg", [8, 4 * RC, 64]))
+            sp_ = g.op("Add", g.op("MatMul", qg, g.op("Transpose", kp, perm=[0, 2, 1])), pmask)  # [8, 4 RC, LP]
+            ss = g.op("MatMul", qg, g.op("Transpose", k, perm=[0, 2, 1]))
+            ss = g.op("Reshape", g.op("Add", g.op("Reshape", ss, g.i64("shape_s4", [8, 4, RC, RC])), mask),
+                      g.i64("shape_s", [8, 4 * RC, RC]))
+            pr = g.op("Softmax", g.op("Concat", sp_, ss, axis=-1), axis=-1)
+            pp = g.op("Slice", pr, g.i64("s0", [0]), g.i64("sLP", [LP]), g.i64("ax_1", [-1]))
+            ps = g.op("Slice", pr, g.i64("sLP", [LP]), g.i64("sLPRC", [LP + RC]), g.i64("ax_1", [-1]))
+            o = g.op("Add", g.op("MatMul", pp, vp), g.op("MatMul", ps, v))  # [8, 4 RC, 64]
+            o = g.op("Reshape", o, g.i64("shape_o", [32, RC, 64]))
+            o = g.op("Reshape", g.op("Transpose", o, perm=[1, 0, 2]), g.i64("shape_x", [RC, 2048]))
+            x = g.op("Add", x, g.op("Reshape", g.gemm(o, n + "o", n + "o"), g.i64("shape_b2048", [B, 32, 2048])))
+        else:
+            st = g.input(f"sp{l}", [2, 2048])
+            bcx = g.gemm3(h, n + "in", n + "in", 2048, 6144, RC)
+            b, c, xx = g.op("Split", bcx, g.i64("split_bcx", [2048, 2048, 2048]), axis=2, n_out=3)
+            bx2 = g.op("Reshape", g.op("Mul", b, xx), g.i64("shape_r2048", [RC, 2048]))
+            outs.append((f"s{l}", g.op("Gather", bx2, sel, axis=0), [2, 2048]))
+            pad = g.op("Concat", st, bx2, axis=0)
+            w0, w1, w2 = conv_taps(g, l)
+            sh = [g.op("Reshape", g.op("Slice", pad, g.i64(f"s{j}", [j]), g.i64(f"e{j}", [RC + j]), g.i64("ax0", [0])),
+                       g.i64("shape_b2048", [B, 32, 2048])) for j in range(3)]
+            conv = g.op("Add", g.op("Add", g.op("Mul", sh[0], w0), g.op("Mul", sh[1], w1)), g.op("Mul", sh[2], w2))
+            x = g.op("Add", x, g.gemm3(g.op("Mul", c, conv), n + "out", n + "out", 2048, 2048, RC))
+        x = mlp_rows(g, x, l, RC)
+    x = g.op("Reshape", x, g.i64("shape_r2048", [RC, 2048]))
+    if final:
+        last_row = g.op("Slice", sel, g.i64("one", [1]), g.i64("two", [2]), g.i64("ax0", [0]))
+        g.output("xl", g.op("Gather", x, last_row, axis=0), [1, 2048])
+    else:
+        g.output("x_out", x, [RC, 2048])
     for name, v, dims in outs:
         g.output(name, v, dims)
     return g
@@ -422,6 +504,28 @@ def export():
         print(f"part {i}: layers {a}..{b - 1}")
     head_graph(man, calib, cfg.vocab_size).save(out / "head.onnx", "lfm2_head")
     print("graphs in", out, [p.name for p in sorted(out.glob("*.onnx"))])
+
+
+def export_sweep():
+    """The graphs for the context sweep, beside export()'s (one directory, one npu_w8.bin; names tell them apart):
+    r256_p*, r512_p* (one-pass prefill of 256 and 512 rows), c_p* (prefill chunks of RC rows after up to LP earlier
+    positions), dl_d* (decode with 4352 cache slots: 4,096 prompt tokens + 256 outputs)."""
+    global R, C
+    cfg = config()
+    man = manifest()
+    calib = {k: tuple(v) for k, v in json.loads((NPU / "calib.json").read_text()).items()}
+    for rows in (256, 512):
+        R = rows
+        for i, (a, b) in enumerate(PARTS):
+            prefill_part(man, calib, cfg, a, b, i == len(PARTS) - 1).save(NPU / f"r{rows}_p{i}.onnx", f"lfm2_r{rows}_p{i}")
+        print(f"r{rows}_p*: prefill of {rows} rows")
+    for i, (a, b) in enumerate(PARTS):
+        chunk_part(man, calib, cfg, a, b, i == len(PARTS) - 1).save(NPU / f"c_p{i}.onnx", f"lfm2_c_p{i}")
+    print(f"c_p*: prefill chunks of {RC} rows after up to {LP} positions")
+    C = 4352
+    for i, (a, b) in enumerate(PARTS):
+        decode_part(man, calib, cfg, a, b).save(NPU / f"dl_d{i}.onnx", f"lfm2_dl_d{i}")
+    print(f"dl_d*: decode with {C} cache slots")
 
 
 def embed_rows(ids, rows=R):
@@ -500,9 +604,9 @@ def check():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("step", choices=["calibrate", "export", "check"])
+    ap.add_argument("step", choices=["calibrate", "export", "check", "export-sweep"])
     a = ap.parse_args()
-    {"calibrate": calibrate, "export": export, "check": check}[a.step]()
+    {"calibrate": calibrate, "export": export, "check": check, "export-sweep": export_sweep}[a.step]()
 
 
 if __name__ == "__main__":

@@ -245,6 +245,108 @@ build/vla/venv/bin/python lfm2/dspark_ref.py --simulate build/lfm2/runs/q4_long_
 python3 android/build.py lfm2bench                             # bench_rows: the few-row products above
 ```
 
+## Against Pipette (Liquid AI's on-device benchmark)
+
+[Pipette](https://pipette.liquid.ai) publishes LFM2.5-2.6B on a Galaxy S26 Ultra (Snapdragon 8 Elite Gen 5, SM8850,
+12 GB) with llama.cpp b11988 on the CPU (4 threads, flash attention off). `pipette.py` measures our configurations by
+its protocol, from Pipette's own weights file, `LFM2.5-2.6B-Q4_0.gguf` (SHA-256 `e1a61bf9…`, not the QAD file above),
+staged in `$D/plain`, on two phones with the same chip:
+
+- **The Galaxy Z Fold SM-F976U** (Samsung Remote Test Lab, build `CP2A.260605.016.F976USQU1AZGI`), a retail phone
+  like Pipette's: every point up to 2,048 input tokens. The lab dropped it as the 4,096-token point began.
+- **An SM8850 QRD** (Qualcomm Device Cloud's "Canoe" reference phone, Android 16 userdebug, 24 GB): the 4,096-token
+  points, DSpark, and the 1,024-token points again, to compare the two. It has no internet, so the Mac pushed it
+  the GGUF and the drafter (the same SHA-256s).
+
+The protocol:
+- **Prompts** are synthesized to an exact token count: the start-of-text token, then the repo's long passages
+  (`gemma4/prompts/long.txt`, `llama/prompts/long.txt`, then `BLOG.md` and `BLOG-COOPMAT.md`), cut. Each shorter
+  prompt is a prefix of the longer; greedy decoding.
+- **TTFT** is the prefill time, as on Pipette's dashboard; **prefill** is the prompt's tokens over it.
+- **Decode** is outputs 1 … 100 of an N → 256 run (for DSpark, a separate N → 100 run), over their time.
+- **E2E** runs from the start of the prefill to the 256th output token, with every handoff: for GPU + NPU, releasing
+  the NPU and loading the GPU's weights (1.3–1.8 s, which the tables above leave out); for all-NPU, the context swap.
+- **5 repetitions** per point, mean ± sample standard deviation, warm-up and model loading excluded. Before each: no
+  other model process on the phone and 20 s idle. On the Fold the battery is at or below 31 °C. The QRD's battery
+  reads a fixed 39.0 °C (a bench supply), so it waits for its GPU's thermal zone (`gpuss-0`) to reach 45 °C (28 °C
+  idle, about 60 °C after a run). Without that wait the QRD's GPU decode at 4,096 tokens swung from 21.5 to 32.6
+  tokens/s between repetitions; with it, 33.0 ± 0.1. A repetition that overlapped another model process was
+  discarded and repeated.
+- **Peak RAM** is one N → 1 run: the process's resident high-water mark plus swap (what Pipette counts on Android),
+  and, apart, the GPU's page allocations above idle (kgsl `page_alloc`; GPU buffers are outside VmHWM). The programs
+  print it before exiting, with every buffer still held. On the Fold, GPU + NPU's figures were only sampled once a
+  second from the Mac, which missed the GPU's weights at the end of the run, so the table gives the QRD's.
+
+The NPU graphs are a set of their own for these lengths (`export_npu.py export-sweep`, beside the QAD set's 416 rows
+and 512 slots):
+- up to 1,024 tokens, one-pass prefill graphs of the prompt's own length (`r256_p*`, `r512_p*`, `p*`) and decode
+  graphs with 1,280 cache slots (`d*`);
+- beyond, 512-row prefill chunks, each after up to 3,584 earlier positions (`c_p*`), and decode graphs with 4,352
+  slots (`dl_d*`: 4,096 prompt tokens and 256 outputs).
+
+At 1,024 input tokens:
+
+| Device, engine | Quant | Decode (1024→100) | Prefill (1024) | TTFT (1024) | E2E (1024→256) | Peak RAM |
+|---|---|---|---|---|---|---|
+| Galaxy S26 Ultra, llama.cpp CPU (Pipette) | q4_0 | 34 tok/s | 150 tok/s | 6,844 ms | 13,995 ms | 1.87 GB |
+| Galaxy S26 Ultra, llama.cpp CPU (Pipette) | q4_k_m | 31 tok/s | 104 tok/s | 9,864 ms | 17,593 ms | 1.95 GB |
+| Galaxy S26 Ultra, llama.cpp CPU (Pipette) | q5_k_m | 22 tok/s | 79 tok/s | 12,998 ms | 24,120 ms | 2.20 GB |
+| iPhone 17 Pro, llama.cpp GPU (Pipette) | q4_0 | 39 tok/s | 967 tok/s | 1,059 ms | 7,687 ms | 1.86 GB |
+| Galaxy Z Fold SM-F976U, Mojo, Adreno 840 GPU (int4) (ours) | q4_0 | 34.7 ± 0.8 tok/s | 368 ± 6 tok/s | 2,787 ± 47 ms | 10,560 ± 324 ms | 1.55 GB host + 2.14 GB GPU |
+| SM8850 QRD (Qualcomm Device Cloud), Mojo, Adreno 840 GPU (int4) (ours) | q4_0 | 36.7 ± 0.1 tok/s | 336 ± 0 tok/s | 3,047 ± 2 ms | 10,034 ± 6 ms | 1.55 GB host + 2.14 GB GPU |
+| Galaxy Z Fold SM-F976U, Mojo GPU + Hexagon NPU prefill (w8a16) (ours) | q4_0 | 35.4 ± 0.3 tok/s | 1545 ± 60 tok/s | 664 ± 27 ms | 9,939 ± 475 ms | not caught (see the QRD) |
+| SM8850 QRD (Qualcomm Device Cloud), Mojo GPU + Hexagon NPU prefill (w8a16) (ours) | q4_0 | 37.0 ± 0.6 tok/s | 1654 ± 15 tok/s | 619 ± 6 ms | 8,382 ± 157 ms | 1.68 GB host + 1.88 GB GPU |
+| Galaxy Z Fold SM-F976U, Hexagon NPU (w8a16) (ours) | q4_0 | 18.2 ± 0.1 tok/s | 1587 ± 85 tok/s | 647 ± 36 ms | 17,423 ± 445 ms | 0.69 GB host + 0.00 GB GPU |
+| SM8850 QRD (Qualcomm Device Cloud), Hexagon NPU (w8a16) (ours) | q4_0 | 19.6 ± 0.0 tok/s | 1655 ± 5 tok/s | 619 ± 2 ms | 15,030 ± 646 ms | 0.69 GB host + 0.00 GB GPU |
+| SM8850 QRD (Qualcomm Device Cloud), Mojo GPU (int4) + DSpark speculative decoding (ours) | q4_0 | 24.0 ± 0.1 tok/s | 318 ± 1 tok/s | 3,218 ± 10 ms | 10,109 ± 20 ms | 2.29 GB host + 3.24 GB GPU |
+
+The sweep (Pipette's line is its leaderboard's data for the S26 Ultra's CPU, q4_0):
+
+| Input tokens | Phone | llama.cpp CPU (Pipette, S26 Ultra): TTFT, decode, E2E (→256) | GPU (int4): TTFT, decode, E2E (→256) | GPU + NPU prefill: TTFT, decode, E2E (→256) | NPU: TTFT, decode, E2E (→256) |
+|---|---|---|---|---|---|
+| 256 | Galaxy Z Fold SM-F976U | 1,388 ms, 36.6 tok/s, 8,579 ms | 703 ms, 36.4 tok/s, 7,961 ms | 109 ms, 35.7 tok/s, 9,177 ms | 111 ms, 17.7 tok/s, 17,568 ms |
+| 512 | Galaxy Z Fold SM-F976U | 2,937 ms, 35.0 tok/s, 10,290 ms | 1,334 ms, 36.1 tok/s, 8,913 ms | 226 ms, 35.9 tok/s, 9,556 ms | 208 ms, 18.3 tok/s, 16,942 ms |
+| 1,024 | Galaxy Z Fold SM-F976U | 6,844 ms, 34.0 tok/s, 13,995 ms | 2,787 ms, 34.7 tok/s, 10,560 ms | 664 ms, 35.4 tok/s, 9,939 ms | 647 ms, 18.2 tok/s, 17,423 ms |
+| 1,024 | SM8850 QRD (Qualcomm Device Cloud) | 6,844 ms, 34.0 tok/s, 13,995 ms | 3,047 ms, 36.7 tok/s, 10,034 ms | 619 ms, 37.0 tok/s, 8,382 ms | 619 ms, 19.6 tok/s, 15,030 ms |
+| 2,048 | Galaxy Z Fold SM-F976U | 15,025 ms, 26.7 tok/s, 22,124 ms | 5,991 ms, 33.2 tok/s, 14,605 ms | 3,325 ms, 33.5 tok/s, 13,636 ms | 3,368 ms, 15.1 tok/s, 24,175 ms |
+| 4,096 | SM8850 QRD (Qualcomm Device Cloud) | 36,442 ms, 22.7 tok/s, 44,139 ms | 14,850 ms, 33.0 tok/s, 22,593 ms | 6,534 ms, 32.9 tok/s, 15,263 ms | 6,466 ms, 16.6 tok/s, 23,225 ms |
+
+What the numbers say:
+- **Time to first token.** The GPU reads the prompt 2.0–2.5× faster than llama.cpp on the S26 Ultra's CPU at every
+  length: 703 against 1,388 ms at 256 tokens, 14.9 against 36.4 s at 4,096. The NPU reads it 10–14× faster up to
+  1,024 tokens (109 ms at 256, 0.62–0.66 s at 1,024), where one graph takes the whole prompt. Beyond that, each
+  512-row chunk attends over all 3,584 past slots, filled or not: 2,048 tokens take 3.3 s (4.5×) and 4,096 take
+  6.5 s (5.6×).
+- **Decode** is bound by memory bandwidth on the CPU and the GPU alike. Up to 1,024 tokens the GPU matches
+  llama.cpp's CPU (34.7 against 34.0 tokens/s), but it slows less as the context grows: 33.2 against 26.7 at 2,048,
+  and 33.0 against 22.7 at 4,096.
+  LFM2 has attention in 8 of its 30 layers, so the cache adds little to what each token reads: at 4,096 tokens,
+  134 MB beside the weights' 1.59 GB. All-NPU decodes at half the GPU's rate (17.7–19.6 tokens/s, and 15.1–16.6 with
+  the 4,352-slot graphs), because its int8 weights are 3.36 GB a token.
+- **End to end** (to the 256th output token), GPU + NPU is best from 1,024 tokens on:
+  - 9.9 s against 14.0 s (1.41×) on the Fold, and 8.4 s on the QRD;
+  - 13.6 against 22.1 s at 2,048 (1.62×);
+  - 15.3 against 44.1 s at 4,096 (2.9×).
+
+  At 256 and 512 tokens the GPU alone is best (7.96 and 8.91 s: 1.08× and 1.15×). GPU + NPU's E2E includes loading
+  the GPU's weights after the NPU's prefill, 1.3–1.8 s on the Fold, more than its faster prefill saves on a short
+  prompt. The same load takes 0.8–1.0 s on the QRD, likely because its 24 GB keep the weights file cached. All-NPU's
+  E2E is longer than llama.cpp's up to 2,048 tokens (half the decode rate, plus a 1.1–2.7 s context swap) and 1.9×
+  shorter at 4,096.
+- **Against Pipette's iPhone 17 Pro** (llama.cpp on its GPU, 1,024 tokens: TTFT 1,059 ms, decode 39 tokens/s, E2E
+  7,687 ms), GPU + NPU's first token comes sooner (619–664 ms). Its E2E is longer (8.4–9.9 s), because of the weight
+  load in the handoff and a slower decode.
+- **DSpark** (QRD, 1,024 tokens) decodes outputs 1–100 at 24.0 tokens/s, against 36.7 without it. On this prompt
+  (a passage to continue, not a chat question) the drafter averages 2.6 tokens per target pass (4.5 on the chat
+  prompt above), too few to pay for its steps. Its later outputs go better: E2E is 10.1 s, the same as plain
+  decoding's 10.0 s. Its TTFT includes the drafter's context of the prompt (+171 ms).
+- **The two phones** at 1,024 tokens: the QRD's GPU prefill is 9% slower (3,047 against 2,787 ms), and its decode
+  is 4–8% faster in every configuration. The chip is the same; the driver and firmware builds are not.
+- **Peak RAM.** By Pipette's measure (VmHWM + swap), the GPU configuration holds 1.55 GB, under llama.cpp's
+  1.87 GB. But 1.50 GB of that is the mapped weights file. The GPU's own pages are outside it: 2.14 GB for the
+  weights, an 8,192-position cache and the prefill's buffers. All-NPU's 0.69–0.89 GB leaves out its HTP contexts in
+  the same way.
+
 ## Checks
 
 `reference.py` runs transformers' own LFM2 one decoder layer at a time in fp32:
@@ -312,6 +414,21 @@ lfm2/compile_npu.sh p0 p1 p2 p3 p4 head d0 d1 d2 d3 d4
 $PY lfm2/run.py --config hybrid --prompt-file lfm2/prompts/long.txt --check --name hybrid_long     # GPU+NPU
 $PY lfm2/run.py --config npu --prompt-file lfm2/prompts/long.txt --check --name npu_long           # all-NPU
 $PY lfm2/fp32_check.py                                                      # every run against fp32 (streamed)
+
+# Against Pipette (pipette.py): Pipette's own Q4_0 file, staged apart in $D/plain; the NPU's graph set for 256-4,096
+B=build/lfm2/plain; X="LFM2_GGUF=$B/LFM2.5-2.6B-Q4_0.gguf LFM2_NPU_DIR=$B/npu LFM2_R=1024 LFM2_C=1280"
+env LFM2_GGUF=$B/LFM2.5-2.6B-Q4_0.gguf LFM2_OUT=$B LFM2_CAP=8192 $PY lfm2/export.py   # $B/{q4,npu}, rope.f32
+env $X PYTHONPATH=... $PY lfm2/export_npu.py calibrate && env $X PYTHONPATH=... $PY lfm2/export_npu.py export
+env $X PYTHONPATH=... $PY lfm2/export_npu.py export-sweep                     # r256_p*, r512_p*, c_p*, dl_d*
+adb shell "mkdir -p $D/plain/q4 $D/plain/npu; cd $D/plain; curl -sSL -o q4_0.gguf https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/e7caca5d835a3901a8e0d63e94009429bafafdfc/LFM2.5-2.6B-Q4_0.gguf"
+adb push $B/rope.f32 $D/plain/ && adb push $B/q4/manifest.txt $B/q4/recipe.txt $D/plain/q4/
+adb push $B/npu/manifest.txt $B/npu/recipe.txt $B/npu/*.onnx $D/plain/npu/
+adb shell "cd $D/plain/q4; $D/lfm2/lfm2_convert $D/plain/q4_0.gguf recipe.txt lfm2_q4.bin"   # likewise npu_w8.bin in npu/
+NPU_DIR=$D/plain/npu lfm2/compile_npu.sh p0 p1 p2 p3 p4 head d0 d1 d2 d3 d4   # and the r256_p*, r512_p*, c_p*, dl_d* graphs
+for n in 256 512 1024 2048 4096; do $PY lfm2/pipette.py gpu hybrid npu --input $n; done   # build/lfm2/pipette/<config>_<n>.json
+$PY lfm2/pipette.py spec --input 1024
+PIPETTE_OUT=build/lfm2/pipette/qrd PIPETTE_ZONE=gpuss-0 PIPETTE_TEMP_MAX=45 $PY lfm2/pipette.py ...   # another phone
+$PY lfm2/pipette.py --table                                                  # the tables above
 ```
 
 ## Follow-ups
@@ -329,6 +446,14 @@ $PY lfm2/fp32_check.py                                                      # ev
     halve both, but the drafts would then differ slightly from the reference.
   - The confidence head (unused here) could pick each step's number of drafts.
   - The down projection's few-row product runs only 256 workgroups. Splitting k would raise that.
+- **NPU prefill chunks over the filled past only.** Each 512-row chunk attends over all 3,584 past slots, filled or
+  not: at 2,048 tokens a chunk takes about 830 ms, against 226 ms for the one-pass 512-row graph. Chunk graphs for a
+  few past lengths (512, 1,536, 2,560, 3,584) would recover most of that.
+- **The weights file outside the resident peak.** The GPU program maps the whole 1.59 GB file to upload it, and
+  that is 1.50 GB of the 1.55 GB that Pipette's measure counts. Reading it in pieces would leave about 0.1 GB.
+- **GPU + NPU on short prompts.** At 256 and 512 tokens, loading the GPU's weights after the NPU's prefill (1.3–1.8 s
+  on the Fold) costs more than the faster prefill saves. Loading them during the prefill needs both in memory at
+  once, which the 416-row contexts did not allow on the Fold.
 
 ## Files
 
@@ -352,4 +477,5 @@ $PY lfm2/fp32_check.py                                                      # ev
 | `kernels/dsk.mojo` | speculative decoding's kernels: few-row int4 / bf16 / head products, the drafter's attention, Markov steps, conv-state rewind |
 | `bench_rows.mojo` | the few-row products against the designs they replaced |
 | `stage_phone.sh` | re-stage a wiped lab phone: the phone downloads the GGUF (and the drafter) and converts |
+| `pipette.py` | Pipette's protocol on the phone: exact-token prompts, TTFT, decode, E2E, peak RAM; 5 repetitions with readiness waits; `--table` |
 | `prompts/long.txt` | the 415-token prompt |

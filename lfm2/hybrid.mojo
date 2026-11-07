@@ -8,6 +8,7 @@
 #   lfm2_hybrid <npu dir> <model.gguf> <storage dir> <weights.bin> <max new> @<ids file>
 #     NPU_RUNS=k            prefill k times (default 3): the first is cold; the decode starts from the last
 #     LFM2_EOS, LFM2_LOGITS, LFM2_LOGITS_EVERY   as lfm2.mojo
+#     LFM2_ROWS=416, LFM2_SLOTS=512   the graphs' prefill rows and decode cache slots (export_npu.py's R, C)
 #
 # One model at a time: the NPU's contexts (3.4 GB) and the GPU's weights (1.6 GB) are not loaded together (a lab
 # Fold rebooted with 3.8 + 2.2 GB, npu/README.md). The NPU's outputs stay in host memory while its contexts are
@@ -20,8 +21,6 @@ from max.gpu.host import DeviceContext
 
 from model import LFM2
 
-comptime R = 416  # the prefill graphs' rows
-comptime SLOTS = 512  # the NPU decode graphs' cache (unused here, but lfm2n_open takes it)
 comptime PARTS = 5
 comptime KVH = 8
 comptime HD = 64
@@ -31,6 +30,18 @@ comptime FP = UnsafePointer[Float32, MutAnyOrigin]
 
 def now_ms() -> Float64:
     return Float64(perf_counter_ns()) / 1e6
+
+
+def print_memory() raises:
+    var status = open("/proc/self/status", "r").read()
+    for line in status.split("\n"):  # (Mojo's splitlines() also breaks at the tab after each name)
+        if line.startswith("VmHWM") or line.startswith("VmRSS") or line.startswith("VmSwap") or line.startswith("Rss"):
+            print("mem:", String(line))
+    try:  # the GPU's page allocations now, every buffer still held (bytes, system-wide: Pipette's GPU side)
+        var pages = open("/sys/class/kgsl/kgsl/page_alloc", "r").read()
+        print("mem: GpuPages:", String(pages.strip()))
+    except:
+        pass
 
 
 def fail(what: String) raises:
@@ -67,6 +78,8 @@ def main() raises:
             eos.append(Int(s))
     var logits_path = getenv("LFM2_LOGITS")
     var every = Int(getenv("LFM2_LOGITS_EVERY", "1"))
+    var R = Int(getenv("LFM2_ROWS", "416"))
+    var SLOTS = Int(getenv("LFM2_SLOTS", "512"))
 
     if external_call["lfm2n_open", Int32](npu_dir.as_c_string_span(), gguf.as_c_string_span(), Int32(R),
                                          Int32(SLOTS), Int32(PARTS)) != 0:
@@ -102,10 +115,19 @@ def main() raises:
           "s (after the NPU's contexts were released)")
     if n + max_new > model.CAP:
         raise Error("prompt + new tokens > " + String(model.CAP))
+    # two decode steps on a dummy token build the decode pipelines here (counted in the handoff), not in a timed step
+    var t_warm = now_ms()
+    model.set_ids(0, [Int(prompt[0])])
+    model.step(0)
+    model.step(1)
+    ctx.synchronize()
+    model.reset()
+    var warm_ms = now_ms() - t_warm
 
     # the NPU's K/V [KVH][R][HD] -> the GPU cache's rows [position][KVH * HD]; conv states -> ring slots p % 3
     var t_in = now_ms()
     var row = KVH * HD
+    var stride = Int(external_call["lfm2n_kv_stride", Int32]())  # rows of the NPU's K/V [KVH][stride][HD]
     var stage = List[Float32](length=n * row, fill=0)
     for l in range(model.L):
         if model.attn[l]:
@@ -114,7 +136,7 @@ def main() raises:
                 for g in range(KVH):
                     for p in range(n):
                         for d in range(HD):
-                            stage[p * row + g * HD + d] = src[(g * R + p) * HD + d]
+                            stage[p * row + g * HD + d] = src[(g * stride + p) * HD + d]
                 var cache = model.kc[l] if w == 0 else model.vc[l]
                 ctx.enqueue_copy(cache.create_sub_buffer[DType.float32](0, n * row), stage.unsafe_ptr())
                 ctx.synchronize()
@@ -132,7 +154,7 @@ def main() raises:
     ids.append(tok0)
     model.set_ids(0, ids)
     print("handoff: NPU contexts released in", round(t_rel, 1), "ms; K/V and conv states into the GPU in",
-          round(copy_ms, 1), "ms")
+          round(copy_ms + warm_ms, 1), "ms (", round(warm_ms, 1), "ms of it building the decode pipelines )")
     print("prompt:", n, "tokens in", round(best, 1), "ms (", round(Float64(n) * 1e3 / best, 1),
           "tokens/s, NPU prefill, best warm ); + handoff", round(t_rel + copy_ms, 1), "ms (GPU load not counted)")
 
@@ -167,6 +189,8 @@ def main() raises:
         t_dec += step_ms
     if logits_path:
         out.close()
+    print_memory()
+    _ = model.V  # the model (its GPU buffers) lives through that reading: Mojo frees a value after its last use
     if gen > 1:
         print("decode:", gen - 1, "steps,", round(t_dec / Float64(gen - 1), 2), "ms/token (",
               round(Float64(gen - 1) * 1000.0 / t_dec, 2), "tokens/s )")

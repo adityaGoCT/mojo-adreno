@@ -12,9 +12,12 @@ from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import dsk
+import g4k
 import lk
 
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of gemm_q4's 128)
+comptime PAD = 128  # cache rows past the context: prefill's matrix-unit attention reads up to a block's 64-aligned end
+comptime SCORE_MAX = 4096  # prompts up to this many positions use the matrix-unit prefill attention (g4k)
 comptime TAPS = (2, 9, 17, 21, 27)  # the layers whose residual stream the DSpark drafter reads
 
 
@@ -58,6 +61,9 @@ struct LFM2(Movable):
     var head8: Bool  # few-row heads read the int8 copy (build_head8)
     var hq8: DeviceBuffer[DType.uint32]  # the head as int8, 4 a word
     var hs16: DeviceBuffer[DType.float32]  # its scale per 16
+    var attn_mma: Bool  # prefill attention on the matrix units (LFM2_ATTN=scalar: lk.attention)
+    var pscores: DeviceBuffer[DType.float32]  # prefill attention: [PMAX rows, H, score_cap keys], made on first use
+    var score_cap: Int
     var dump: String  # prefill: append each layer's residual stream rows (fp32) to this file (stage checks)
     var wide: Bool  # decode: int4 rows a block of 32 (16 bytes) a lane a step (LFM2_GEMV=word: a word a lane)
     var prof: Bool  # step(): wait after each launch and add its time to times[kind] (LFM2_PROFILE)
@@ -82,8 +88,8 @@ struct LFM2(Movable):
         self.V = Int(cfg["V"])
         self.CAP = Int(cfg["CAP"])
         self.q4 = cfg["STORAGE"] == "q4"
-        if Int(cfg["HD"]) != lk.HD or self.CAP > lk.KMAX:
-            raise Error("head dim 64 and a context of at most 2048")
+        if Int(cfg["HD"]) != lk.HD:
+            raise Error("head dim 64")
         self.attn = List[Bool]()
         self.words = Dict[String, DeviceBuffer[DType.uint32]]()
         self.halves = Dict[String, DeviceBuffer[DType.float16]]()
@@ -102,8 +108,8 @@ struct LFM2(Movable):
         var row = self.KVH * lk.HD
         for l in range(self.L):
             if self.attn[l]:
-                self.kc[l] = ctx.enqueue_create_buffer[DType.float32](self.CAP * row)
-                self.vc[l] = ctx.enqueue_create_buffer[DType.float32](self.CAP * row)
+                self.kc[l] = ctx.enqueue_create_buffer[DType.float32]((self.CAP + PAD) * row)
+                self.vc[l] = ctx.enqueue_create_buffer[DType.float32]((self.CAP + PAD) * row)
             else:
                 self.cs[l] = ctx.enqueue_create_buffer[DType.float32](3 * D)
         self.rope = ctx.enqueue_create_buffer[DType.float32](self.CAP * lk.HD)
@@ -116,6 +122,9 @@ struct LFM2(Movable):
         self.gu = ctx.enqueue_create_buffer[DType.float32](PMAX * 2 * self.F)
         self.act = ctx.enqueue_create_buffer[DType.float32](PMAX * self.F)
         self.logits = ctx.enqueue_create_buffer[DType.float32](self.V)
+        self.attn_mma = True
+        self.pscores = ctx.enqueue_create_buffer[DType.float32](1)
+        self.score_cap = 0
         self.dump = ""
         self.tap_on = False
         self.taps = ctx.enqueue_create_buffer[DType.float32](PMAX * 5 * D)
@@ -490,8 +499,25 @@ struct LFM2(Movable):
                                                       self.rope, self.kc[l], self.vc[l], Int32(p0), Int32(H),
                                                       Int32(KVH), Float32(0.125), grid_dim=Dim(H + 2 * KVH, count),
                                                       block_dim=64)
-                ctx.enqueue_function[lk.attention](self.mix, self.kc[l], self.vc[l], self.att, Int32(p0), Int32(H),
-                                                   Int32(KVH), grid_dim=Dim(H, count), block_dim=64)
+                if p0 + R <= SCORE_MAX + PAD and self.attn_mma:
+                    # on the matrix units (gemma4's g4k kernels, head dim 64, no window): Q K^T per 64 rows and 64 keys,
+                    # the softmax of each row, then P V; q carries the scale
+                    var kcap = SCORE_MAX + PAD
+                    if self.score_cap != kcap:
+                        self.pscores = ctx.enqueue_create_buffer[DType.float32](PMAX * H * kcap)
+                        self.score_cap = kcap
+                    var nq = Int32(H // KVH)
+                    ctx.enqueue_function[g4k.p_scores_mma[64]](self.mix, self.kc[l], self.pscores, Int32(p0), Int32(0), nq,
+                                                               Int32(KVH), Int32(w), Int32(H), Int32(kcap),
+                                                               grid_dim=Dim(R // 64, H), block_dim=64)
+                    ctx.enqueue_function[g4k.p_softmax](self.pscores, Int32(p0), c, Int32(0), Int32(H), Int32(kcap),
+                                                        grid_dim=Dim(H, R), block_dim=64)
+                    ctx.enqueue_function[g4k.p_values_mma[64]](self.pscores, self.vc[l], self.att, Int32(p0), Int32(0),
+                                                               nq, Int32(KVH), Int32(H), Int32(kcap),
+                                                               grid_dim=Dim(R // 64, H), block_dim=64)
+                else:
+                    ctx.enqueue_function[lk.attention](self.mix, self.kc[l], self.vc[l], self.att, Int32(p0), Int32(H),
+                                                       Int32(KVH), grid_dim=Dim(H, count), block_dim=64)
                 self.tick("p: q/k norm, RoPE, attention")
                 self.gemm(n + "o", self.att, self.tmp, D, H * lk.HD, R)
                 self.tick("p: o")

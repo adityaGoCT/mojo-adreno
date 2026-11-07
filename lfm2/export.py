@@ -12,8 +12,10 @@ Two storages, each a file of its own, both from the same GGUF:
 All keep the norms and the conv taps in fp32 as stored. In each layer, q|k|v and w1|w3 (gate|up) are one matrix.
 
   build/vla/venv/bin/python lfm2/export.py          # build/lfm2/{q4,f16}/recipe.txt, manifest.txt; build/lfm2/rope.f32
+  LFM2_GGUF=<other.gguf> LFM2_OUT=<dir> ... export.py  # another GGUF of the model (e.g. the plain Q4_0): its offsets
 """
 
+import os
 import pathlib
 import sys
 
@@ -22,9 +24,11 @@ import torch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lfm2"))
-from weights import BUILD, GGUF, GGUFWeights, config  # noqa: E402
+from weights import BUILD, GGUF_PATH, GGUFWeights, config  # noqa: E402
 
-CAP = 2048  # positions the KV cache and the RoPE table hold
+OUT = pathlib.Path(os.environ.get("LFM2_OUT", BUILD))
+
+CAP = int(os.environ.get("LFM2_CAP", "2048"))  # positions the KV cache and the RoPE table hold (LFM2_CAP)
 ALIGN = 4096
 
 
@@ -144,15 +148,15 @@ def main():
         if storage == "npu":  # the NPU driver reads the prompt's embedding rows from the GGUF's Q6_K
             e = t["token_embd.weight"]
             lay.manifest.append(f"embed_q6k {e['abs']} {e['nbytes']} q6k {e['dims'][1]}x{e['dims'][0]}")
-        out = BUILD / storage
+        out = OUT / storage
         out.mkdir(parents=True, exist_ok=True)
         (out / "recipe.txt").write_text(f"size {lay.off}\n" + "\n".join(lay.recipe) + "\n")
         head = (f"lfm2 v1 D {D} L {cfg.num_hidden_layers} H {cfg.num_attention_heads} KVH {cfg.num_key_value_heads} "
                 f"HD {hd} F {F} V {cfg.vocab_size} CAP {CAP} EPS {cfg.norm_eps} STORAGE {storage} "
-                f"GGUF {GGUF}")
+                f"GGUF {GGUF_PATH.name}")
         (out / "manifest.txt").write_text(head + "\n" + "\n".join(layers + lay.manifest) + "\n")
         print(f"{storage}: {lay.off / 1e9:.3f} GB, {len(lay.recipe)} recipe lines -> {out}")
-    rope_table(cfg).tofile(BUILD / "rope.f32")
+    rope_table(cfg).tofile(OUT / "rope.f32")
     print("rope.f32:", CAP, "x", hd)
 
 
