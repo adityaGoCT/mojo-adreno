@@ -13,20 +13,36 @@ stage is checked against the official PyTorch model in fp32.
 
 | Configuration | Device | Chunk | Actions vs fp32 (normalized, max abs) |
 |---|---|---|---|
-| GPU baseline: bf16 weights, fp32 matrix units | — | not yet measured | — |
-| GPU optimized: ViT, mlp1 and LLM on the fp16 matrix units (`EVO1_MMA16`) | — | not yet measured | — |
+| GPU baseline: bf16 weights, fp32 matrix units | Galaxy Z Fold (Adreno 840) | 7.6–9.3 s | 3.1e-6 |
+| GPU, ViT, mlp1 and LLM on the fp16 matrix units (`EVO1_MMA16`) | Galaxy Z Fold (Adreno 840) | 7.6–8.7 s | 9.7e-3 |
 | GPU+NPU: vision and LLM on the NPU, the head on the GPU | — | not yet measured | — |
-| **All-NPU**: vision (once a view), LLM and head on the HTP | X Elite (Hexagon V73) | **6.10 s** (3 × 1,843 + 239 + 334 ms) | 1.3e-2 |
+| **All-NPU**: vision (once a view), LLM and head on the HTP | X Elite (Hexagon V73) | **1.74 s** (3 × 419 + 143 + 330 ms) | 1.1e-2 |
 | *The released bf16 model, for scale* | | | 9.7e-3 |
 
-**Why the GPU rows are empty.** The GPU port ([`model.mojo`](model.mojo)) is written and builds, but it has not
-run: the X Elite (X1E80100) QDC assigned has an Adreno X1-85, whose driver's shader compiler crashes on one of the
-kernels (see [`../vla_adapter`](../vla_adapter)).
+**Where the rows were measured.**
+- **GPU rows:** a Galaxy Z Fold (SM-F976U, Adreno 840) in Samsung's Remote Test Lab, as replays of whole chunks on the
+  phone's clock (`EVO1_REPLAY`). The phone heats from run to run, so the ranges cover two sessions' runs.
+- **Why the laptop's GPU isn't used:** the X Elite laptop's Adreno X1-85 driver crashes compiling one of the kernels
+  (see [`../vla_adapter`](../vla_adapter)).
+- **The GPU's time goes to the head.** The 32 Euler steps take 5.3–5.6 s, about 3,900 small launches at 1.4 ms
+  each. Vision takes 1.9–2.3 s and the LLM 0.36 s. The fp16 matrix units speed up only the latter two, so they gain
+  little. Making the head's launches cheaper (fewer, larger, or batched into submissions) is the open GPU
+  optimization.
 
-**Measurement:** the all-NPU time is `graph_tool chain`, 10 chunks in one process (6.09–6.12 s).
+**Measurement:** the all-NPU time is `graph_tool chain`, 10 chunks in one process (1.73–1.75 s).
 
-**The vision encoder dominates.** InternViT-300M takes 1.84 s per view on the V73, about 0.33 TFLOP/s, against
-1.3 TFLOP/s for VLA-Adapter's two ViTs on the same HTP; finding out why is the first follow-up.
+**The tensors' shape made the NPU 3.5× faster.** InternViT's 1,025 rows (CLS and 32 × 32 patches) first took 1.84 s
+per view on the V73, about 0.33 TFLOP/s against 1.3 for VLA-Adapter's ViTs on the same HTP.
+- **The cause.** QNN's per-op profile (`NPU_PROFILE=detailed`, [`../npu/graph.cpp`](../npu/graph.cpp)) put 45% of
+  the cycles in the 24 GELUs, at 16.7 cycles per element against 2.5 for VLA-Adapter's 261-row ViTs. A GELU over
+  1,025 rows would not even compile on its own, while 1,024 rows did.
+- **Padding the rows.** The graph pads them to 1,056 (a multiple of 32), masks the padding as keys, and drops it at
+  the end. That is exact: 822 ms per view.
+- **Row blocks.** The row-wise work (norms, projections, GELU) runs on the rows as [4, 264, 1,024] rather than one
+  [1,056, 1,024]; only attention sees all rows at once. That gives 419 ms per view. The LLM's 1,024 rows as
+  [8, 128, 896] went from 248 to 143 ms.
+- **The result.** The chunk takes 1.74 s instead of 6.10 s. The tokens drift a little more (1.2% against 0.3%), but
+  the actions do not (1.1e-2 against 1.3e-2).
 
 ## The model
 
@@ -55,14 +71,14 @@ data):
 
 | Graph | What | HTP time (V73) | Error |
 |---|---|---|---|
-| `vision.onnx` | one view: InternViT, pixel shuffle, mlp1 → 256 tokens | 1,843 ms | tokens 0.32% (rel. L2) |
-| `llm.onnx` | the prompt rows with the three views' tokens placed at their slots → 1,024 context rows | 239 ms | 0.60% (chained) |
-| `head.onnx` | the state token, 8 blocks' context K/V, 32 Euler steps → 50 × 24 | 334 ms | 1.7e-3 alone, from the reference's context |
+| `vision.onnx` | one view: InternViT (rows padded to 1,056, in 4 blocks), pixel shuffle, mlp1 → 256 tokens | 419 ms | tokens 1.2% (rel. L2) |
+| `llm.onnx` | the prompt rows with the three views' tokens placed at their slots → 1,024 context rows (8 blocks) | 143 ms | 0.93% (chained) |
+| `head.onnx` | the state token, 8 blocks' context K/V, 32 Euler steps → 50 × 24 | 330 ms | 1.7e-3 alone, from the reference's context |
 
 The graphs use the shared fp16-safe norms ([`npu/htp_norms.py`](../npu/htp_norms.py); the HTP flushes fp16
 subnormals) and centered keys. Two structural constraints:
 - **One view per vision graph.** All three views in one graph compiled for 28 minutes, then failed QNN's
-  finalization (error 1002). The one-view graph compiles in 6.6 minutes, and the chain runs it three times.
+  finalization (error 1002). The one-view graph compiles in 4 minutes, and the chain runs it three times.
 - **Images placed inside the LLM graph.** It takes the three views' tokens as three inputs and places them at their
   slots itself. That makes the all-NPU chain possible, and the GPU+NPU path passes three slices of its token buffer.
 
@@ -87,12 +103,12 @@ Then `evo1/npu_check.py <dir>` reports each graph's error.
 
 ## Follow-ups
 
-- **The vision graph's speed on the HTP.** At about 0.33 TFLOP/s it is four times slower than VLA-Adapter's ViTs.
-  QNN's per-op profile should show where; the 1,025-row attention is the first suspect.
-- **GPU rows.** Run the GPU port (`EVO1_MMA16`, and GPU+NPU through `EVO1_NPU_VISION` / `EVO1_NPU_LLM`) once a
-  laptop's GPU compiles its kernels.
+- **The GPU's head.** About 3,900 launches a chunk at 1.4 ms each on the Adreno 840. Fusing a block's launches,
+  or batching them into fewer submissions (`VK_SUBMIT_EVERY`, only for these small launches), is the GPU-optimized
+  step still to do.
+- **GPU+NPU.** Run it (`EVO1_NPU_VISION` / `EVO1_NPU_LLM`) on a device with both a working GPU and the NPU.
 - **The masked third view.** LIBERO gives two cameras, so the third view is all zeros, and its 256 tokens are the
-  same for every input. Computing them once would drop one of the three vision runs, 1.84 s of the 6.10.
+  same for every input. Computing them once would drop one of the three vision runs, 0.42 s of the 1.74.
 - **Task success.** It has not been checked in LIBERO's simulator.
 
 ## Files

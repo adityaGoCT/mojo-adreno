@@ -184,7 +184,8 @@ class LLM(nn.Module):
 
     def forward(self, prefix, vis, mask_add, idx):
         w, C = self.w, self.C
-        x = torch.cat([prefix[:1], vis, prefix[1 + VROWS:]], 0) / C
+        # row-wise work on the rows as [5, 128, D]: the HTP runs it faster than on one long [SP, D]
+        x = (torch.cat([prefix[:1], vis, prefix[1 + VROWS:]], 0) / C).reshape(5, SP // 5, D)
         taps = []
         for l in range(24):
             p = LM + f"layers.{l}."
@@ -196,12 +197,13 @@ class LLM(nn.Module):
             k = k - k.mean(1, keepdim=True)  # each head's mean key: shifts a query's logits by a constant (from 2,277 to 62)
             k, v = k.repeat_interleave(7, 0), v.repeat_interleave(7, 0)
             o = torch.softmax((q * 0.125) @ k.transpose(-1, -2) + mask_add, -1) @ v
-            x = x + F.linear(o.transpose(0, 1).reshape(SP, D), w(p + "self_attn.o_proj.weight")) * (1.0 / C)
+            x = x + F.linear(o.transpose(0, 1).reshape(5, SP // 5, D), w(p + "self_attn.o_proj.weight")) * (1.0 / C)
             y = rms16(x, w(p + "post_attention_layernorm.weight"))
             g = F.linear(y, w(p + "mlp.gate_proj.weight"))
             u = F.linear(y, w(p + "mlp.up_proj.weight"))
             x = x + F.linear(F.silu(g) * u, w(p + "mlp.down_proj.weight")) * (1.0 / C)
-            out = rms16(x, w(LM + "norm.weight")) if l == 23 else x[idx] * C
+            rows = x.reshape(SP, D)
+            out = rms16(rows, w(LM + "norm.weight")) if l == 23 else rows[idx] * C
             taps.append(out[idx] if l == 23 else out)
         return torch.stack(taps)  # [24, 576, 896]
 

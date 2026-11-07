@@ -35,6 +35,7 @@ NEG = -30000.0
 VM, ML, LM, AH = ("embedder.model.vision_model.", "embedder.model.mlp1.", "embedder.model.language_model.model.",
                   "action_head.")
 S, D, VD = 1024, 896, 1024
+RP = 1056  # the vision graph's rows: 1,025 padded to a multiple of 32
 PT = "mp_rank_00_model_states.pt"
 sys.path.insert(0, str(ROOT / "vla_adapter"))
 sys.path.insert(0, str(ROOT / "npu"))
@@ -77,16 +78,24 @@ class Vision(nn.Module):
         x = F.conv2d(pix, w(pe + "patch_embedding.weight"), w(pe + "patch_embedding.bias"), stride=14)
         x = torch.cat([w(pe + "class_embedding").expand(nv, -1, -1), x.flatten(2).transpose(1, 2)], 1)
         x = (x + w(pe + "position_embedding")) * (1.0 / C)
+        # 1,025 rows padded to RP = 1,056 (a multiple of 32): the HTP ran this graph's GELUs 6.7 times slower per
+        # element at 1,025 rows than VLA-Adapter's at 261 x 2. The padding rows are masked as keys and dropped.
+        x = torch.cat([x, torch.zeros(nv, RP - 1025, VD, dtype=x.dtype)], 1)
+        kmask = torch.cat([torch.zeros(1025), torch.full((RP - 1025,), NEG)]).to(x.dtype)
+        # Row-wise work (norms, projections, GELU) on the rows as [nv 4, 264, c]: the HTP ran it several times slower
+        # per element on one long [1, rows, c] (as on VLA-JEPA's [512, c]) than on VLA-Adapter's [2, 261, c].
+        x = x.reshape(nv * 4, RP // 4, VD)
         for i in range(24):
             p = VM + f"encoder.layers.{i}."
             y = ln16(x, w(p + "norm1.weight"), w(p + "norm1.bias"))
-            qkv = lin(y, w, p + "attn.qkv").view(nv, 1025, 3, 16, 64).permute(2, 0, 3, 1, 4)
+            qkv = lin(y, w, p + "attn.qkv").view(nv, RP, 3, 16, 64).permute(2, 0, 3, 1, 4)
             k = qkv[1] - qkv[1].mean(2, keepdim=True)
-            o = torch.softmax((qkv[0] * 0.125) @ k.transpose(-1, -2), -1) @ qkv[2]
-            x = x + lin(o.transpose(1, 2).reshape(nv, 1025, VD), w, p + "attn.proj") * (w(p + "ls1") / C)
+            o = torch.softmax((qkv[0] * 0.125) @ k.transpose(-1, -2) + kmask, -1) @ qkv[2]
+            o = o.transpose(1, 2).reshape(nv * 4, RP // 4, VD)
+            x = x + lin(o, w, p + "attn.proj") * (w(p + "ls1") / C)
             y = ln16(x, w(p + "norm2.weight"), w(p + "norm2.bias"))
             x = x + lin(F.gelu(lin(y, w, p + "mlp.fc1")), w, p + "mlp.fc2") * (w(p + "ls2") / C)
-        x = (x * C)[:, 1:].reshape(nv, 32, 32, VD)
+        x = (x * C).reshape(nv, RP, VD)[:, 1:1025].reshape(nv, 32, 32, VD)
         # InternVL's pixel_shuffle (v2, 0.5): [n, 32, 32, c] -> [n, 16, 16, 4c]
         x = x.reshape(nv, 32, 16, 2 * VD).permute(0, 2, 1, 3).reshape(nv, 16, 16, 4 * VD).permute(0, 2, 1, 3)
         x = x.reshape(nv * 256, 4 * VD)
@@ -125,7 +134,9 @@ class LLM(nn.Module):
         for v, vis in enumerate((v0, v1, v2)):
             parts += [emb[at:self.slots0[v]], vis]
             at = self.slots0[v] + 256
-        x = torch.cat(parts + [emb[at:]], 0) * (1.0 / C)
+        # row-wise work on the rows as [8, 128, D] (the HTP runs it faster than on one long [S, D]; see Vision)
+        x = (torch.cat(parts + [emb[at:]], 0) * (1.0 / C)).reshape(8, S // 8, D)
+        rowmask = rowmask.reshape(8, S // 8, 1)
         for l in range(14):
             p = LM + f"layers.{l}."
             y = rms16(x, w(p + "input_layernorm.weight"))
@@ -136,13 +147,13 @@ class LLM(nn.Module):
             k = k - k.mean(1, keepdim=True)
             k, v = k.repeat_interleave(7, 0), v.repeat_interleave(7, 0)
             o = torch.softmax((q * 0.125) @ k.transpose(-1, -2) + mask_add, -1) @ v
-            o = o.transpose(0, 1).reshape(S, D) * rowmask
+            o = o.transpose(0, 1).reshape(8, S // 8, D) * rowmask
             x = x + F.linear(o, w(p + "self_attn.o_proj.weight")) * (1.0 / C)
             y = rms16(x, w(p + "post_attention_layernorm.weight"))
             g = F.linear(y, w(p + "mlp.gate_proj.weight"))
             u = F.linear(y, w(p + "mlp.up_proj.weight"))
             x = x + F.linear(F.silu(g) * u, w(p + "mlp.down_proj.weight")) * (1.0 / C)
-        return rms16(x, w(LM + "norm.weight"))
+        return rms16(x, w(LM + "norm.weight")).reshape(S, D)
 
 
 class Head(nn.Module):

@@ -58,15 +58,18 @@ nothing from the NPU.
 **[VLA-Adapter (Pro) on Snapdragon laptops: GPU and NPU](vla_adapter/README.md)**: the 1.47B LIBERO-Spatial policy
 (DINOv2 + SigLIP, Qwen2.5-0.5B's 24 layer taps, the Pro policy), checked stage by stage against the official PyTorch
 model. On the X2 Elite's GPU a chunk takes 1.30 s in fp32 (actions within 2.3e-6) and 0.63 s with fp16 matrix units
-(1.8e-2). On the X Elite's NPU (Hexagon V73), all three graphs take 0.87 s (2.5e-2; the released bf16 model is
+(1.8e-2). On the X Elite's NPU (Hexagon V73), all three graphs take 0.86 s (2.5e-2; the released bf16 model is
 2.8e-2 off). That run found that the HTP flushes fp16 subnormals, which made norms over scaled-down activations
 wrong. [`npu/htp_norms.py`](npu/htp_norms.py) holds the fix, which all five ports now share.
 
 **[Evo-1](evo1/README.md)** (0.77B: InternViT-300M, 14 Qwen2.5 layers, a 32-step flow-matching head) and
 **[VLA-JEPA](vla_jepa/README.md)** (Qwen3-VL-2B with DeepStack and a 4-step DiT): GPU ports and NPU graphs checked
-against the official models. All on the X Elite's NPU, a chunk takes 6.10 s for Evo-1 (actions within 1.3e-2;
-the vision encoder dominates) and 1.30 s for VLA-JEPA (2.0e-3). Their GPU rows wait on the X Elite's Adreno X1-85,
-whose driver crashes compiling one of the ports' kernels.
+against the official models. All on the X Elite's NPU, a chunk takes 1.74 s for Evo-1 (actions within 1.1e-2)
+and 0.79 s for VLA-JEPA (1.7e-3). QNN's per-op profile showed the HTP running row-wise work several times slower on
+one long [rows, channels] tensor than on blocks of rows; reshaping the ViTs (and Evo-1's LLM) took Evo-1 from 6.10 s
+and VLA-JEPA from 1.30 s. The X Elite's Adreno X1-85 driver crashes compiling one of the ports' kernels, so their GPU
+rows come from a Galaxy Z Fold's Adreno 840: Evo-1 takes 7.6–9.3 s there (actions within 3.1e-6), most of it the
+head's 3,900 small launches.
 
 **[LIBERO, closed loop](sim/README.md)**: TurboVLA on the X Elite laptop's NPU drives a simulated Franka arm in
 LIBERO (MuJoCo on the Mac), with a live dashboard of the cameras and the success tally. All 20 episodes of

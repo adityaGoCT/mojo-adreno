@@ -84,27 +84,34 @@ class Vision(nn.Module):
         return lin(F.gelu(lin(x, w, p + "linear_fc1")), w, p + "linear_fc2")
 
     def forward(self, pix):
+        """Rows as [2 views, 256, 1024]: the HTP ran this ViT's elementwise operations 3-6 times slower per element
+        on 2-D [512, 1024] tensors than on VLA-Adapter's [2, 261, 1024]."""
         w, C = self.w, self.C
         x = F.linear(pix, w(VQ + "patch_embed.proj.weight").reshape(1024, 1536), w(VQ + "patch_embed.proj.bias"))
-        x = (x + torch.cat([self.posemb, self.posemb], 0)) * (1.0 / C)
-        cos, sin = torch.cat([self.cos, self.cos], 0), torch.cat([self.sin, self.sin], 0)  # [512, 64]
+        x = ((x + torch.cat([self.posemb, self.posemb], 0)) * (1.0 / C)).view(2, 256, 1024)
+        cos, sin = self.cos, self.sin  # [256, 64]: both views' positions are the same
         ds = []
         for i in range(24):
             p = VQ + f"blocks.{i}."
             y = ln16(x, w(p + "norm1.weight"), w(p + "norm1.bias"))
-            qkv = lin(y, w, p + "attn.qkv").view(512, 3, 16, 64).permute(1, 2, 0, 3)  # [3, 16, 512, 64]
+            qkv = lin(y, w, p + "attn.qkv").view(2, 256, 3, 16, 64).permute(2, 0, 3, 1, 4)  # [3, 2, 16, 256, 64]
             q = qkv[0] * cos + rot(qkv[0]) * sin
             k = qkv[1] * cos + rot(qkv[1]) * sin
-            q, k, v = q.view(16, 2, 256, 64), k.view(16, 2, 256, 64), qkv[2].view(16, 2, 256, 64)
             k = k - k.mean(-2, keepdim=True)  # centered per view: each query's logits shift by a constant
-            o = torch.softmax((q * 0.125) @ k.transpose(-1, -2), -1) @ v  # per view
-            o = o.reshape(16, 512, 64).transpose(0, 1).reshape(512, 1024)
+            o = torch.softmax((q * 0.125) @ k.transpose(-1, -2), -1) @ qkv[2]  # [2, 16, 256, 64]
+            o = o.transpose(1, 2).reshape(2, 256, 1024)
             x = x + lin(o, w, p + "attn.proj") * (1.0 / C)
             y = ln16(x, w(p + "norm2.weight"), w(p + "norm2.bias"))
-            x = x + lin(F.gelu(lin(y, w, p + "mlp.linear_fc1"), approximate="tanh"), w, p + "mlp.linear_fc2") * (1.0 / C)
+            x = x + lin(gelu_tanh(lin(y, w, p + "mlp.linear_fc1")), w, p + "mlp.linear_fc2") * (1.0 / C)
             if i in (5, 11, 17):
-                ds.append(self.merge(x * C, VQ + f"deepstack_merger_list.{(i - 5) // 6}.", True))
-        return self.merge(x * C, VQ + "merger.", False), torch.stack(ds)
+                ds.append(self.merge((x * C).reshape(512, 1024), VQ + f"deepstack_merger_list.{(i - 5) // 6}.", True))
+        return self.merge((x * C).reshape(512, 1024), VQ + "merger.", False), torch.stack(ds)
+
+
+def gelu_tanh(x):
+    """GELU's tanh form written out (the same function as F.gelu(approximate="tanh")): ONNX Gelu with the tanh
+    approximation ran at about 16 cycles an element on the HTP, half the ViT's time."""
+    return 0.5 * x * (1 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
 
 
 def rms(x, g, eps):
@@ -132,6 +139,8 @@ class LLM(nn.Module):
             parts += ([emb[at - PRE:self.img0[v] - PRE]] if self.img0[v] > at else []) + [vis[v * 64:(v + 1) * 64]]
             at = self.img0[v] + 64
         parts.append(emb[at - PRE:])
+        # one [n, D] block: as [4, 63, D] (faster for the ViTs) the HTP ran it 11% faster but with 2.6% error on the
+        # embodied rows instead of 0.96% (actions 4.7e-3 instead of 1.7e-3)
         x = torch.cat(parts, 0) * (1.0 / C)
         for l in range(28):
             p = LQ + f"layers.{l}."

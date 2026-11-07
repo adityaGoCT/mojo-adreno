@@ -13,15 +13,26 @@ from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
 
-from check import Check, compare, fetch, now_ms, read_f32, read_i32, show, span
+from check import cool_down, Check, compare, fetch, now_ms, read_f32, read_i32, show, span
 from model import (AD, CTX, D, H, LL, MT, NV, OUT, S, STEPS, VD, VR, VT, Evo1)
 
 
 def replay(mut m: Evo1, ctx: DeviceContext, k: Int) raises -> Float64:
+    """A chunk (or EVO1_REPLAY_STAGE=vision|llm|head: that stage alone) recorded, then replayed k times on the device's
+    clock: ms each."""
+    var stage = getenv("EVO1_REPLAY_STAGE")
     ctx.synchronize()
     if m.lib.call["M_driver_remote_record", Int32](Int32(1)) != 0:
         raise Error("M_driver_remote_record failed")
-    m.chunk()
+    if stage == "vision":
+        m.vision()
+    elif stage == "llm":
+        m.embed()
+        m.llm()
+    elif stage == "head":
+        m.head()
+    else:
+        m.chunk()
     _ = m.lib.call["M_driver_remote_record", Int32](Int32(0))
     ctx.synchronize()
     var ms = m.lib.call["M_driver_remote_replay", Float64](Int32(k))
@@ -69,8 +80,10 @@ def gpu_npu(mut m: Evo1, ctx: DeviceContext, r: String, runs: Int) raises:
         ctx.synchronize()
         print("run", run, ": chunk", round(now_ms() - a0, 1), "ms (Mac clock)")
     if getenv("EVO1_REPLAY"):
+        cool_down()
         var k = Int(getenv("EVO1_REPLAY"))
-        var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
+        var what = getenv("EVO1_REPLAY_STAGE") if getenv("EVO1_REPLAY_STAGE") else String("chunk")
+        var line = String("replay: ") + what + ", " + String(k) + " a replay, ms each (server clock):"
         for _ in range(5):
             line += " " + String(round(replay(m, ctx, k), 1))
         print(line)
@@ -177,8 +190,10 @@ def main() raises:
         print("run", run, ": vision", round(b - a0, 1), "ms, LLM", round(c2 - b, 1), "ms, head (32 steps)",
               round(d - c2, 1), "ms (Mac clock)")
     if getenv("EVO1_REPLAY"):
+        cool_down()
         var k = Int(getenv("EVO1_REPLAY"))
-        var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
+        var what = getenv("EVO1_REPLAY_STAGE") if getenv("EVO1_REPLAY_STAGE") else String("chunk")
+        var line = String("replay: ") + what + ", " + String(k) + " a replay, ms each (server clock):"
         for _ in range(5):
             line += " " + String(round(replay(m, ctx, k), 1))
         print(line)

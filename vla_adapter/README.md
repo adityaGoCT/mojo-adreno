@@ -15,7 +15,7 @@ is checked against the official PyTorch model in fp32.
 | GPU baseline: bf16 weights, fp32 matrix units | X2 Elite (Adreno X2-90) | 1.30 s | 2.3e-6 |
 | GPU optimized: ViTs, projector and LLM on the fp16 matrix units (`VLA_MMA16`) | X2 Elite | 0.63 s | 1.8e-2 |
 | GPU+NPU: vision and LLM on the NPU, policy on the GPU | — | not yet measured | — |
-| **All-NPU**: vision, LLM and policy on the HTP | X1 Elite (Hexagon V73) | **0.867 s** (557 + 237 + 72 ms) | 2.5e-2 |
+| **All-NPU**: vision, LLM and policy on the HTP | X1 Elite (Hexagon V73) | **0.855 s** (567 + 218 + 70 ms) | 2.5e-2 |
 | *The released bf16 model, for scale* | | | 2.8e-2 |
 
 The rows come from two different laptops:
@@ -55,7 +55,7 @@ fp16 when it loads the graph.
 | Graph | What | HTP time (V73) | Error alone |
 |---|---|---|---|
 | `vision.onnx` | 2 × (DINOv2 + SigLIP), projector → 512 tokens | 557–562 ms | tokens rel. L2 4.3% |
-| `llm.onnx` | Qwen2.5-0.5B → 24 taps of 576 rows | 236 ms | taps 0.14–0.89% (from the reference's vision tokens); the fp32 policy on them: actions 2.9e-3 |
+| `llm.onnx` | Qwen2.5-0.5B (rows as [5, 128, 896]) → 24 taps of 576 rows | 218 ms | taps 0.14–0.89% (from the reference's vision tokens); the fp32 policy on them: actions 2.9e-3 |
 | `policy.onnx` | proprio projector, 24 Pro blocks, head → 8 × 7 | 72 ms | |
 
 **The HTP flushes fp16 subnormals to zero, and that decides how the norms are written.**

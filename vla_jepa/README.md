@@ -16,7 +16,7 @@ stage is checked against the official PyTorch model in fp32.
 | GPU baseline: bf16 weights, fp32 matrix units | — | not yet measured | — |
 | GPU optimized: ViT, mergers and LLM on the fp16 matrix units (`VJ_MMA16`) | — | not yet measured | — |
 | GPU+NPU: vision and LLM on the NPU, the DiT on the GPU | — | not yet measured | — |
-| **All-NPU**: vision, LLM and DiT on the HTP | X Elite (Hexagon V73) | **1.30 s** (848 + 367 + 86 ms) | 2.0e-3 |
+| **All-NPU**: vision, LLM and DiT on the HTP | X Elite (Hexagon V73) | **0.786 s** (325 + 374 + 87 ms) | 1.7e-3 |
 | *The released bf16 model, for scale* | | | 3.4e-3 |
 
 **Why the GPU rows are empty.** The GPU port ([`model.mojo`](model.mojo)) is written and builds, but it has not run
@@ -25,7 +25,7 @@ yet:
 - On that laptop's Adreno X1-85, the driver's shader compiler crashes on one of our kernels (see
   [`../vla_adapter`](../vla_adapter)).
 
-**Measurement:** the all-NPU time is `graph_tool chain`, 10 chunks in one process (1,300–1,305 ms).
+**Measurement:** the all-NPU time is `graph_tool chain`, 10 chunks in one process (781–787 ms).
 
 ## The model
 
@@ -55,9 +55,19 @@ data):
 
 | Graph | What | HTP time (V73) | Error |
 |---|---|---|---|
-| `vision.onnx` | ViT, DeepStack mergers, merger → 128 tokens and 3 × 128 DeepStack rows | 848 ms | tokens 0.35%, DeepStack 0.25–0.32% (rel. L2) |
-| `llm.onnx` | Qwen3 over rows 4–255 → the 32 embodied rows | 367 ms | 0.92% (chained after the NPU's vision) |
+| `vision.onnx` | ViT (the two views as [2, 256, 1,024]), DeepStack mergers, merger → 128 tokens and 3 × 128 DeepStack rows | 325 ms | tokens 0.30%, DeepStack 0.19–0.27% (rel. L2) |
+| `llm.onnx` | Qwen3 over rows 4–255 → the 32 embodied rows | 374 ms | 0.96% (chained after the NPU's vision) |
 | `head.onnx` | the 4-step DiT → 7 × 7 actions | 85 ms | 9.1e-4 alone, from the reference's context |
+
+**The vision graph's speed came from its tensors' shape.** It first took 848 ms. QNN's per-op profile
+(`NPU_PROFILE=detailed` in `graph_tool`) put 54% of the cycles in the 24 tanh GELUs, at about 16 cycles an element.
+Two changes, both the same function, brought it to 325 ms:
+- **The GELU written out** (`0.5 x (1 + tanh(...))` instead of ONNX `Gelu` with `approximate="tanh"`): 714 ms.
+- **The two views' rows as [2, 256, 1,024]** instead of one [512, 1,024]: 325 ms. The HTP runs row-wise work several
+  times faster on such blocks (Evo-1 gained the same way).
+
+The same blocking made the LLM 11% faster but doubled its error (embodied rows 2.6%, actions 4.7e-3), so the LLM
+keeps one block.
 
 fp16 measures, besides the shared fp16-safe norms (`rms16`, `ln16`; see [`../vla_adapter`](../vla_adapter)):
 - **Rows 0–3 as constants.** Their residual reaches 37,897, beyond fp16. They are the same for every input (the chat
@@ -90,9 +100,6 @@ Then `vla_jepa/npu_check.py <dir>` reports each graph's error.
 
 - **GPU rows.** Run the GPU port (`VJ_MMA16`, GPU+NPU through `VJ_NPU_VISION` / `VJ_NPU_LLM`) once a laptop's
   GPU can compile its kernels.
-- **The vision graph's speed.** It runs at about 0.36 TFLOP/s, against 1.3 for VLA-Adapter's two ViTs on the same
-  HTP. The 2-D RoPE and the per-view attention reshapes are the first suspects. QNN's per-op profile would show
-  which.
 - **Task success.** It has not been checked in LIBERO's simulator.
 
 ## Files
