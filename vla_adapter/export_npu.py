@@ -19,6 +19,7 @@ way, and in fp32 the vision graph would pass protobuf's 2 GB.
 import json
 import math
 import pathlib
+import sys
 
 import numpy as np
 import torch
@@ -33,6 +34,10 @@ NEG = -30000.0
 VB, SB, LM, AH, PP = ("vision_backbone.featurizer.", "vision_backbone.fused_featurizer.", "language_model.model.",
                       "action_head.model.", "proprio_projector.")
 SP, VROWS, TAP, D = 640, 512, 576, 896
+
+
+sys.path.insert(0, str(ROOT / "npu"))
+from htp_norms import ln16, rms16  # noqa: E402  (fp16-safe norms)
 
 
 class W(nn.Module):
@@ -93,32 +98,6 @@ def externalize(path):
     onnx.save(m, str(path))
     print(f"{path.name}: {moved} parameters point into the checkpoint files, {kept} constants kept; "
           f"{path.stat().st_size / 1e6:.1f} MB")
-
-
-def rms16(x, g, eps=1e-6):
-    """RMSNorm for the HTP, which computes in fp16 and flushes subnormals to zero: squares of small activations (below
-    7.8e-3) would vanish, so each row is first scaled by k / m (m its largest |x|): k = 4 for rows up to 2,048 wide
-    (the sum of squares at most 32,768, inside fp16), 2 beyond. RMSNorm is scale-invariant but for eps, which becomes
-    eps (k / m)^2, computed as (k sqrt(eps) / m)^2 (eps itself would be a subnormal constant). The same function as
-    g x / sqrt(mean(x^2) + eps); rows of zeros give zeros."""
-    k = 4.0 if int(x.shape[-1]) <= 2048 else 2.0  # Python numbers: no shape arithmetic in the graph
-    m = torch.clamp(x.abs().amax(-1, keepdim=True), min=1e-3)
-    z = x / (m * (1.0 / k))  # Divs: QNN's Reciprocal mis-sizes its fp16 constant
-    e = torch.full_like(m, k * math.sqrt(eps)) / m  # tensor / tensor: a scalar / tensor exports as a Reciprocal
-    return g * (z / torch.sqrt((z * z).mean(-1, keepdim=True) + e * e))
-
-
-def ln16(x, g=None, b=None, eps=1e-6):
-    """LayerNorm for the HTP (see rms16): each row scaled by k / m first, k = 2 for rows up to 1,152 wide (centered
-    values within 4, their squares' sum at most 18,432), 1 beyond; eps exact as in rms16. g, b: the affine (None:
-    none)."""
-    k = 2.0 if int(x.shape[-1]) <= 1152 else 1.0
-    m = torch.clamp(x.abs().amax(-1, keepdim=True), min=1e-3)
-    z = x / (m * (1.0 / k))
-    d = z - z.mean(-1, keepdim=True)
-    e = torch.full_like(m, k * math.sqrt(eps)) / m
-    y = d / torch.sqrt((d * d).mean(-1, keepdim=True) + e * e)
-    return y if g is None else y * g + b
 
 
 def lin(x, w, name, bias=True):

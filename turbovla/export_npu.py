@@ -27,6 +27,8 @@ from torch import nn
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "turbovla"))
 import reference as R  # noqa: E402
+sys.path.insert(0, str(ROOT / "npu"))
+from htp_norms import swap_layernorms  # noqa: E402
 
 OUT = R.B / "npu"
 NEG = -30000.0
@@ -45,6 +47,7 @@ def build():
     m = m.float().eval()
     m.vision_encoder.backbone.config._attn_implementation = "eager"
     m.text_encoder.bert.config._attn_implementation = "eager"
+    swap_layernorms(m)  # every LayerNorm fp16-safe on the HTP (npu/htp_norms.py); the same function
     return m
 
 
@@ -61,15 +64,15 @@ class Vision(nn.Module):
         self.register_buffer("sin", sin.clone())
 
     def dino(self, pix):  # [V, 3, 256, 256] -> patch tokens [V, 256, 768], after the final LayerNorm
-        """Written for fp16 (the HTP), the same function: DINOv3's registers carry activations up to 17,000, whose
-        squares overflow fp16 in a LayerNorm, so the residual stream is kept divided by C = 256 (each LayerNorm's eps
-        divided by C^2, which leaves its output unchanged); and layer 0's attention scores reach 86,689 across whole
-        rows, so the keys are centered per head (each query row's scores shift by a constant, which the softmax
-        ignores) and q carries the 1/8. In fp32 this matches the original within 1e-5."""
+        """Written for fp16 (the HTP), the same function: DINOv3's registers carry activations up to 17,000, inside
+        fp16 but not their squares: the LayerNorms are htp_norms' (each row scaled first; a residual stream divided by
+        256 instead made small activations' squares subnormal, which the HTP flushes). Layer 0's attention scores
+        reach 86,689 across whole rows, so the keys are centered per head (each query row's scores shift by a
+        constant, which the softmax ignores) and q carries the 1/8."""
         bb = self.m.vision_encoder.backbone
         e = bb.embeddings
-        c = 256.0
-        ln = lambda mod, x: nn.functional.layer_norm(x, (x.shape[-1],), mod.weight, mod.bias, mod.eps / c / c)
+        c = 1.0
+        ln = lambda mod, x: mod(x)  # LN16 (build() swapped them in)
         x = e.patch_embeddings(pix).flatten(2).transpose(1, 2)
         nv = pix.shape[0]
         x = torch.cat([e.cls_token.expand(nv, -1, -1), e.register_tokens.expand(nv, -1, -1), x], 1) / c

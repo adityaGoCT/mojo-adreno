@@ -22,6 +22,24 @@ of 0.01–0.08) the baseline is within 3.1e-7.
   - *All-NPU:* `graph_tool chain`, 20 chunks in one process.
   - Neither includes the SSH tunnel.
 
+### On the X Elite laptop (X1E80100, Hexagon V73)
+
+The next QDC session assigned a Snapdragon X Elite. Its NPU is the older V73, so these rows are not comparable with
+the X2 Elite's above.
+
+| Configuration | Chunk (min / median) | With T5 | Actions vs JAX fp32 |
+|---|---|---|---|
+| **All-NPU**, stems and trunk as one graph (`obs_trunk`) | 92.1 / 92.3 ms (91.1 + head 1.0) | 95.6 ms (T5 3.3) | 2.1e-2 |
+| All-NPU, stems and trunk as separate graphs | 106.0 / 106.2 ms | 109.6 ms | 2.1e-2 |
+
+- **Why the error halved.** The graphs' norms are now [`npu/htp_norms.py`](../npu/htp_norms.py)'s. The HTP
+  flushes fp16 subnormals, and the earlier graphs divided T5's and the stems' activations by 256, folded into their
+  weights. Their small values' squares, and small weights, became subnormal and vanished. The same graphs now
+  give 0.021 where the X2 run gave 0.042.
+- **NPU accuracy by stage:** T5's task tokens are within 1.6e-3, the stems' tokens within 2.9e-3, and the readout within
+  4.4e-3.
+- **The GPU rows can't be measured here yet.** The X1-85's driver crashes compiling one of the port's kernels.
+
 **On Octo-Small, the NPU is no faster than the GPU.** The two reasons below are the opposite of TurboVLA's case
 ([`../turbovla`](../turbovla)):
 - **The trunk is small and narrow.** It is 12 layers of 384 over 690 tokens, about 38 GFLOP. The HTP runs it in

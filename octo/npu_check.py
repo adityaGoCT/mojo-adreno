@@ -26,32 +26,41 @@ def err(got, want):
     return f"{np.abs(got - want).max():.2g} (largest reference value {np.abs(want).max():.3g})"
 
 
+def find(d, name):
+    """name.f32 (graph_tool run -o) or <g>_name.f32 (graph_tool chain), or None."""
+    if (d / f"{name}.f32").exists():
+        return d / f"{name}.f32"
+    hits = sorted(d.glob(f"*_{name}.f32"))
+    return hits[0] if hits else None
+
+
 def main():
     d = pathlib.Path(sys.argv[1])
     ti = rd(REF / "trunk_input.f32", (690, D))
-    task = rd(d / "task.f32", (1, NT, D))
-    prim = rd(d / "primary_tokens.f32", (2, NPR, D))
-    wrist = rd(d / "wrist_tokens.f32", (2, NWR, D))
-    ref_prim = np.stack([ti[NT + t * PER:NT + t * PER + NPR] for t in range(2)])
-    ref_wrist = np.stack([ti[NT + t * PER + NPR:NT + t * PER + NPR + NWR] for t in range(2)])
+    task = rd(find(d, "task"), (1, NT, D))
     print("task tokens (T5 on the NPU):", err(task[0], ti[:NT]))
-    print("primary tokens (stems on the NPU):", err(prim, ref_prim))
-    print("wrist tokens:", err(wrist, ref_wrist))
     readout_ref = rd(REF / "readout.f32", (2, D))[1:2]
-    readout = rd(d / "readout.f32", (1, D))
-    print("readout (trunk on the NPU, on the NPU's tokens):", err(readout, readout_ref))
-    mask = rd(N / "in/mask.f32", (690, 690))
-    trunk = ort.InferenceSession(str(N / "trunk.onnx"), providers=["CPUExecutionProvider"])
-    r32 = trunk.run(None, {"task": task, "primary_tokens": prim, "wrist_tokens": wrist, "mask": mask})[0]
-    print("readout, trunk in fp32 on the NPU's tokens:", err(r32, readout_ref))
+    if find(d, "primary_tokens"):  # the stems as their own graph
+        prim = rd(find(d, "primary_tokens"), (2, NPR, D))
+        wrist = rd(find(d, "wrist_tokens"), (2, NWR, D))
+        ref_prim = np.stack([ti[NT + t * PER:NT + t * PER + NPR] for t in range(2)])
+        ref_wrist = np.stack([ti[NT + t * PER + NPR:NT + t * PER + NPR + NWR] for t in range(2)])
+        print("primary tokens (stems on the NPU):", err(prim, ref_prim))
+        print("wrist tokens:", err(wrist, ref_wrist))
+        mask = rd(N / "in/mask.f32", (690, 690))
+        trunk = ort.InferenceSession(str(N / "trunk.onnx"), providers=["CPUExecutionProvider"])
+        r32 = trunk.run(None, {"task": task, "primary_tokens": prim, "wrist_tokens": wrist, "mask": mask})[0]
+        print("readout, trunk in fp32 on the NPU's tokens:", err(r32, readout_ref))
+    readout = rd(find(d, "readout"), (1, D))
+    print("readout (trunk on the NPU):", err(readout, readout_ref))
     head = ort.InferenceSession(str(N / "head.onnx"), providers=["CPUExecutionProvider"])
     noise, z = rd(N / "in/noise.f32", (1, 28)), rd(N / "in/z.f32", (20, 28))
     a_ref = rd(REF / "actions_norm.f32", (1, 28))
     for name, r in (("JAX's readout", readout_ref), ("the NPU's readout", readout)):
         a = head.run(None, {"readout": r, "noise": noise, "z": z})[0]
         print(f"head (fp32, CPU) on {name}: actions within {err(a, a_ref)}")
-    if (d / "actions.f32").exists():
-        print("all-NPU actions (normalized):", err(rd(d / "actions.f32", (1, 28)), a_ref))
+    if find(d, "actions"):
+        print("all-NPU actions (normalized):", err(rd(find(d, "actions"), (1, 28)), a_ref))
 
 
 if __name__ == "__main__":

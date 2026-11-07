@@ -39,7 +39,9 @@ VQ, LQ, AM, DM = ("qwen_vl_interface.model.model.visual.", "qwen_vl_interface.mo
 D, SP, PRE = 2048, 256, 4
 PT = "VLA-JEPA-LIBERO.pt"
 sys.path.insert(0, str(ROOT / "vla_adapter"))
-from export_npu import check, precision, Half, ln16, rms16  # noqa: E402
+sys.path.insert(0, str(ROOT / "npu"))
+from export_npu import check, precision, Half  # noqa: E402
+from htp_norms import ln16, rms16  # noqa: E402
 
 
 class W(nn.Module):

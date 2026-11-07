@@ -21,6 +21,7 @@ C (RMSNorm's eps divided by C^2, which leaves its output unchanged). Masks are a
 
 import json
 import pathlib
+import sys
 
 import numpy as np
 import torch
@@ -29,6 +30,8 @@ from torch import nn
 from torch.nn import functional as F
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "npu"))
+from htp_norms import ln16, rms16  # noqa: E402
 B = ROOT / "build/octo"
 OUT = B / "npu"
 NEG = -30000.0
@@ -38,8 +41,10 @@ T5 = OT + "task_tokenizers_language.hf_model."
 RN = "heads_action.diffusion_model.reverse_network."
 DM = "heads_action.diffusion_model."
 NT, NPR, NWR, PER, N, D = 16, 256, 64, 337, 690, 384
-CG = 256.0  # the stems' GroupNorm input scale on the HTP: the squares of conv outputs up to 446 overflow fp16
-C5 = 256.0  # T5's residual scale on the HTP: its hidden state reaches 29,673, whose square overflows fp16
+# fp16 on the HTP: the conv outputs (up to 446) and T5's hidden state (up to 29,673) fit fp16 but their squares do
+# not; the norms are npu/htp_norms' (each row or group scaled to a fixed maximum first). An earlier version divided
+# the activations by 256 instead (folded into weights): their small values' squares, and small weights, became
+# subnormal, which the HTP flushes to zero.
 
 
 class Weights:
@@ -59,16 +64,16 @@ def swish(x):
 
 
 def layer_norm(x, g, b, eps=1e-6):
-    return F.layer_norm(x, (x.shape[-1],), g, b, eps)
+    return ln16(x, g, b, eps)
 
 
 class T5Enc(nn.Module):
-    """T5-base's encoder over 16 tokens, the residual stream divided by C5 (fp16-safe), then Octo's projection and
-    task position embedding."""
+    """T5-base's encoder over 16 tokens (fp16-safe RMSNorms), then Octo's projection and task position
+    embedding."""
 
     def __init__(self, w):
         super().__init__()
-        self.emb = nn.Parameter(w(T5 + "shared.embedding") / C5, requires_grad=False)
+        self.emb = nn.Parameter(w(T5 + "shared.embedding"), requires_grad=False)
         self.bias = nn.Parameter(w("t5.position_bias"), requires_grad=False)  # [12, 16, 16]
         self.layers = []
         for l in range(12):
@@ -83,7 +88,7 @@ class T5Enc(nn.Module):
         self.pos = w(OT + "task_language_pos_embedding")[0]
 
     def rms(self, x, g):
-        return g * (x * torch.rsqrt((x * x).mean(-1, keepdim=True) + 1e-6 / C5 / C5))
+        return rms16(x, g, 1e-6)
 
     def forward(self, ids, key_add):  # [1, 16] int32, [1, 16] -> [1, 16, 384]
         x = self.emb[ids[0].long()]
@@ -94,9 +99,9 @@ class T5Enc(nn.Module):
             v = (y @ p["v"].T).view(16, 12, 64).transpose(0, 1)
             s = q @ k.transpose(-1, -2) + self.bias + key_add[0][None, None, :]
             o = (torch.softmax(s, -1) @ v).transpose(0, 1).reshape(16, 768)
-            x = x + o @ (p["o"].T / C5)
+            x = x + o @ p["o"].T
             y = self.rms(x, p["n2"])
-            x = x + torch.relu(y @ p["wi"].T) @ (p["wo"].T / C5)
+            x = x + torch.relu(y @ p["wi"].T) @ p["wo"].T
         x = self.rms(x, self.final)
         return (x @ self.proj.T + self.proj_b + self.pos)[None]
 
@@ -117,15 +122,18 @@ class Stem(nn.Module):
     def forward(self, x):  # [2, H, W, 6] -> [2, n, 384]
         x = x.permute(0, 3, 1, 2)
         for k, b, g, gb in self.convs:
-            # fp16-safe GroupNorm, the same function: the convolution's output (up to 446) divided by CG (in its
-            # weights; eps divided by CG^2), and each mean taken in two stages of at most 192 values
-            x = F.conv2d(x, k / CG, b / CG, stride=2, padding=1)
+            # fp16-safe GroupNorm, the same function: each group scaled to max |y| = 2 first (as htp_norms does a
+            # row; eps carried exactly), and each mean taken in two stages of at most 192 values
+            x = F.conv2d(x, k, b, stride=2, padding=1)
             nb, c, h, ww = x.shape
             y = x.reshape(nb, 32, (c // 32) * h, ww)
+            m = torch.clamp(y.abs().amax(-1, keepdim=True).amax(-2, keepdim=True), min=1e-3)
+            y = y / (m * 0.5)
             mean = y.mean(-1, keepdim=True).mean(-2, keepdim=True)
             d = y - mean
             var = (d * d).mean(-1, keepdim=True).mean(-2, keepdim=True)
-            y = (d * torch.rsqrt(var + 1e-6 / CG / CG)).reshape(nb, c, h, ww)
+            e = torch.full_like(m, 2.0 * 1e-3) / m  # 2 sqrt(eps) / m: eps (1e-6) in the scaled units
+            y = (d / torch.sqrt(var + e * e)).reshape(nb, c, h, ww)
             x = torch.relu(y * g[None, :, None, None] + gb[None, :, None, None])
         x = x.permute(0, 2, 3, 1).reshape(2, self.n, 384)
         x = x @ self.emb.T + self.emb_b

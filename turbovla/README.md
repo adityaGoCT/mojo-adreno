@@ -33,6 +33,22 @@ than the accurate fp16-weight one.** Two things explain it:
 So putting only the compute-bound part on the NPU (GPU+NPU) gains little over the GPU with fp16 matrix units. The
 gain comes from moving everything.
 
+### On the X Elite laptop (X1E80100, Hexagon V73)
+
+The next QDC session assigned a Snapdragon X Elite. Its NPU is the older V73, so the rows below are not comparable
+with the X2 Elite's above.
+
+| Configuration | Chunk (min / median) | With BERT | Actions vs PyTorch fp32 |
+|---|---|---|---|
+| **All-NPU** | 102.5 / 102.7 ms (vision 94 + head 8.5) | 108.9 ms (BERT 6.2) | 2.3e-2 |
+
+- **The graphs differ from the X2 run's.** Their LayerNorms are now
+  [`npu/htp_norms.py`](../npu/htp_norms.py)'s, with each row scaled to a fixed maximum before squaring. The HTP
+  flushes fp16 subnormals, and the earlier graphs kept the residual divided by 256: many activations' squares then
+  became subnormal and vanished. On this model that cost little (vision tokens 2.0% either way); on VLA-Adapter and
+  Evo-1 it made the outputs unusable.
+- **The GPU rows can't be measured here yet.** The X1-85's driver crashes compiling one of the port's kernels.
+
 ## The model
 
 Each stage of [`model.mojo`](model.mojo) matches a tensor of [`reference.py`](reference.py) (the official model):
