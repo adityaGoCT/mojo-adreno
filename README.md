@@ -55,6 +55,19 @@ and 66 ms with fp16 matrix units (1.1e-2). With DINOv3 on the Hexagon NPU and th
 the stems and trunk on the NPU it takes 44 ms (4.8e-2), and all on the NPU 47 ms (4.2e-2): this small trunk gains
 nothing from the NPU.
 
+**[VLA-Adapter (Pro) on Snapdragon laptops: GPU and NPU](vla_adapter/README.md)**: the 1.47B LIBERO-Spatial policy
+(DINOv2 + SigLIP, Qwen2.5-0.5B's 24 layer taps, the Pro policy), checked stage by stage against the official PyTorch
+model. On the X2 Elite's GPU a chunk takes 1.30 s in fp32 (actions within 2.3e-6) and 0.63 s with fp16 matrix units
+(1.8e-2). On the X Elite's NPU (Hexagon V73), all three graphs take 0.87 s (2.5e-2; the released bf16 model is
+2.8e-2 off). That run found that the HTP flushes fp16 subnormals, which made norms over scaled-down activations
+wrong. [`npu/htp_norms.py`](npu/htp_norms.py) holds the fix, which all five ports now share.
+
+**[Evo-1](evo1/README.md)** (0.77B: InternViT-300M, 14 Qwen2.5 layers, a 32-step flow-matching head) and
+**[VLA-JEPA](vla_jepa/README.md)** (Qwen3-VL-2B with DeepStack and a 4-step DiT): GPU ports and NPU graphs checked
+against the official models. All on the X Elite's NPU, a chunk takes 6.10 s for Evo-1 (actions within 1.3e-2;
+the vision encoder dominates) and 1.30 s for VLA-JEPA (2.0e-3). Their GPU rows wait on the X Elite's Adreno X1-85,
+whose driver crashes compiling one of the ports' kernels.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -586,6 +599,9 @@ turbovla/          TurboVLA on the X2 Elite laptop: model.mojo (GPU), export_npu
                    npu_check.py
 octo/              Octo-Small on the X2 Elite laptop: model.mojo (GPU), export_npu.py (NPU graphs), reference.py
                    (Octo's JAX), npu_check.py
+vla_adapter/       VLA-Adapter Pro: model.mojo (GPU), export_npu.py (NPU graphs), reference.py, npu_check.py
+evo1/              Evo-1 (LIBERO): model.mojo (GPU), export_npu.py (NPU graphs), reference.py, npu_check.py
+vla_jepa/          VLA-JEPA (LIBERO): model.mojo (GPU), export_npu.py (NPU graphs), reference.py, npu_check.py
 qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLSL; runners load them
                    when a driver has the extension; see its README)
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
