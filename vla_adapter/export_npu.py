@@ -95,16 +95,43 @@ def externalize(path):
           f"{path.stat().st_size / 1e6:.1f} MB")
 
 
+def rms16(x, g, eps=1e-6):
+    """RMSNorm for the HTP, which computes in fp16 and flushes subnormals to zero: squares of small activations (below
+    7.8e-3) would vanish, so each row is first scaled by k / m (m its largest |x|): k = 4 for rows up to 2,048 wide
+    (the sum of squares at most 32,768, inside fp16), 2 beyond. RMSNorm is scale-invariant but for eps, which becomes
+    eps (k / m)^2, computed as (k sqrt(eps) / m)^2 (eps itself would be a subnormal constant). The same function as
+    g x / sqrt(mean(x^2) + eps); rows of zeros give zeros."""
+    k = 4.0 if int(x.shape[-1]) <= 2048 else 2.0  # Python numbers: no shape arithmetic in the graph
+    m = torch.clamp(x.abs().amax(-1, keepdim=True), min=1e-3)
+    z = x / (m * (1.0 / k))  # Divs: QNN's Reciprocal mis-sizes its fp16 constant
+    e = torch.full_like(m, k * math.sqrt(eps)) / m  # tensor / tensor: a scalar / tensor exports as a Reciprocal
+    return g * (z / torch.sqrt((z * z).mean(-1, keepdim=True) + e * e))
+
+
+def ln16(x, g=None, b=None, eps=1e-6):
+    """LayerNorm for the HTP (see rms16): each row scaled by k / m first, k = 2 for rows up to 1,152 wide (centered
+    values within 4, their squares' sum at most 18,432), 1 beyond; eps exact as in rms16. g, b: the affine (None:
+    none)."""
+    k = 2.0 if int(x.shape[-1]) <= 1152 else 1.0
+    m = torch.clamp(x.abs().amax(-1, keepdim=True), min=1e-3)
+    z = x / (m * (1.0 / k))
+    d = z - z.mean(-1, keepdim=True)
+    e = torch.full_like(m, k * math.sqrt(eps)) / m
+    y = d / torch.sqrt((d * d).mean(-1, keepdim=True) + e * e)
+    return y if g is None else y * g + b
+
+
 def lin(x, w, name, bias=True):
     return F.linear(x, w(name + ".weight"), w(name + ".bias") if bias else None)
 
 
 class ViT(nn.Module):
     """A timm ViT's first `blocks` blocks (DINOv2 with CLS, registers and LayerScale; or SigLIP), patch tokens out.
-    fp16-safe: the residual stream is kept divided by C (each LayerNorm's eps divided by C^2), the same function;
-    DINOv2's registers reach 528 and SigLIP carries 288, whose squares overflow fp16."""
+    fp16-safe: the LayerNorms are ln16 (DINOv2's registers reach 528 and SigLIP carries 288, whose squares overflow
+    fp16; a residual stream divided by 16 instead made small activations' squares subnormal, which the HTP flushes).
+    C (the residual's scale) stays 1."""
 
-    C = 16.0
+    C = 1.0
 
     def __init__(self, w, pre, blocks, heads, dino):
         super().__init__()
@@ -125,14 +152,14 @@ class ViT(nn.Module):
             x = torch.cat([w(p + "cls_token").expand(2, -1, -1) / C, w(p + "reg_token").expand(2, -1, -1) / C, x], 1)
         n, c = x.shape[1], x.shape[2]
         hd = c // self.heads
-        eps = 1e-6 / C / C
         for i in range(self.blocks):
             b = p + f"blocks.{i}."
-            y = F.layer_norm(x, (c,), w(b + "norm1.weight"), w(b + "norm1.bias"), eps)
+            y = ln16(x, w(b + "norm1.weight"), w(b + "norm1.bias"))
             qkv = lin(y, w, b + "attn.qkv").view(2, n, 3, self.heads, hd).permute(2, 0, 3, 1, 4)
-            o = torch.softmax((qkv[0] * hd ** -0.5) @ qkv[1].transpose(-1, -2), -1) @ qkv[2]
+            k = qkv[1] - qkv[1].mean(-2, keepdim=True)  # centered: each query's logits shift by a constant
+            o = torch.softmax((qkv[0] * hd ** -0.5) @ k.transpose(-1, -2), -1) @ qkv[2]
             x = x + self.out(o.transpose(1, 2).reshape(2, n, c), b + "attn.proj", b + "ls1.scale_factor")
-            y = F.layer_norm(x, (c,), w(b + "norm2.weight"), w(b + "norm2.bias"), eps)
+            y = ln16(x, w(b + "norm2.weight"), w(b + "norm2.bias"))
             x = x + self.out(F.gelu(lin(y, w, b + "mlp.fc1")), b + "mlp.fc2", b + "ls2.scale_factor")
         x = x * C
         return x[:, 5:] if self.dino else x
@@ -157,11 +184,12 @@ def rms(x, g, eps=1e-6):
 
 class LLM(nn.Module):
     """Qwen2.5-0.5B over the 640 rows: [prefix row 0, the vision rows, prefix rows 513 ..]; the windows of every
-    layer's output (the last after the final RMSNorm). fp16-safe: the residual stream (up to 1,463 at row 0) is kept
-    divided by C (RMSNorm's eps divided by C^2), the same function; the taps are scaled back. Each head's keys are
-    centered and q carries the 1/8: the logits reach 2,277 otherwise (62 centered), too coarse in fp16."""
+    layer's output (the last after the final RMSNorm). fp16-safe: the RMSNorms are rms16 (the residual stream reaches
+    1,463 at row 0; dividing it by 64 instead made small activations' squares subnormal, which the HTP flushes). Each
+    head's keys are centered and q carries the 1/8: the logits reach 2,277 otherwise (62 centered), too coarse in
+    fp16. C (the residual's scale) stays 1."""
 
-    C = 64.0
+    C = 1.0
 
     def __init__(self, w):
         super().__init__()
@@ -177,12 +205,11 @@ class LLM(nn.Module):
 
     def forward(self, prefix, vis, mask_add, idx):
         w, C = self.w, self.C
-        eps = 1e-6 / C / C
         x = torch.cat([prefix[:1], vis, prefix[1 + VROWS:]], 0) / C
         taps = []
         for l in range(24):
             p = LM + f"layers.{l}."
-            y = rms(x, w(p + "input_layernorm.weight"), eps)
+            y = rms16(x, w(p + "input_layernorm.weight"))
             q = lin(y, w, p + "self_attn.q_proj").view(SP, 14, 64).transpose(0, 1)
             k = lin(y, w, p + "self_attn.k_proj").view(SP, 2, 64).transpose(0, 1)
             v = lin(y, w, p + "self_attn.v_proj").view(SP, 2, 64).transpose(0, 1)
@@ -191,11 +218,11 @@ class LLM(nn.Module):
             k, v = k.repeat_interleave(7, 0), v.repeat_interleave(7, 0)
             o = torch.softmax((q * 0.125) @ k.transpose(-1, -2) + mask_add, -1) @ v
             x = x + F.linear(o.transpose(0, 1).reshape(SP, D), w(p + "self_attn.o_proj.weight")) * (1.0 / C)
-            y = rms(x, w(p + "post_attention_layernorm.weight"), eps)
+            y = rms16(x, w(p + "post_attention_layernorm.weight"))
             g = F.linear(y, w(p + "mlp.gate_proj.weight"))
             u = F.linear(y, w(p + "mlp.up_proj.weight"))
             x = x + F.linear(F.silu(g) * u, w(p + "mlp.down_proj.weight")) * (1.0 / C)
-            out = rms(x, w(LM + "norm.weight"), eps) if l == 23 else x[idx] * C
+            out = rms16(x, w(LM + "norm.weight")) if l == 23 else x[idx] * C
             taps.append(out[idx] if l == 23 else out)
         return torch.stack(taps)  # [24, 576, 896]
 
@@ -235,9 +262,9 @@ class Policy(nn.Module):
             s = torch.cat([q @ ks.transpose(-1, -2), q @ ka.transpose(-1, -2), (q @ kt.transpose(-1, -2)) * g], -1)
             o = torch.softmax(s / math.sqrt(112), -1) @ torch.cat([vs, va, vt], 1)
             o = lin(o.transpose(0, 1).reshape(8, D), w, b + "o_proj")
-            y = F.layer_norm(o + x, (D,), w(b + "ffn.0.weight"), w(b + "ffn.0.bias"))
+            y = ln16(o + x, w(b + "ffn.0.weight"), w(b + "ffn.0.bias"), 1e-5)
             x = torch.relu(lin(y, w, b + "ffn.1"))
-        y = F.layer_norm(x, (D,), w(AH + "layer_norm2.weight"), w(AH + "layer_norm2.bias"))
+        y = ln16(x, w(AH + "layer_norm2.weight"), w(AH + "layer_norm2.bias"), 1e-5)
         return lin(y, w, AH + "fc2")  # [8, 7]
 
 
@@ -293,6 +320,7 @@ def main():
     emb = rd("llm_inputs_embeds.f32").reshape(S, D)
     prefix = np.zeros((SP, D), np.float32)
     prefix[:S] = emb  # the vision rows (1 .. 512) are taken from the vision input
+    prefix[S:] = w(LM + "embed_tokens.weight")[0].float().numpy()  # padding: token 0's row, as on the GPU
     mask = np.full((SP, SP), NEG, np.float32)
     for i in range(SP):
         mask[i, :min(i, S - 1) + 1] = 0.0 if i < S else NEG
