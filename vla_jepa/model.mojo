@@ -17,6 +17,10 @@
 # Weights: the checkpoint's bf16 tensors (vla_jepa.safetensors from reference.py --export): matrices stay bf16, the rest
 # are widened to fp32. VJ_REMOTE names the official .pt on the executor and VJ_REMOTE_INDEX the tensors' offsets in it
 # (build/vla_jepa/pt_offsets.txt): the laptop downloads the checkpoint itself.
+#
+# VJ_MMA16=1: the ViT's, mergers' and LLM's matrices in fp16 (exact from bf16) on the fp16 matrix units (fp16 sums);
+# the DiT stays fp32. GPU+NPU: VJ_NPU_VISION / VJ_NPU_LLM name graphs compiled on the laptop (vla_jepa/export_npu.py),
+# run inside vk_server_npu on this program's buffers.
 from std.collections import Dict
 from std.ffi import OwnedDLHandle
 from std.math import cos, exp, floor, log, sin, sqrt
@@ -50,6 +54,8 @@ comptime HD = 128
 comptime QKV = (QH + 2 * KVH) * HD  # 4096
 comptime FF = 6144
 comptime SP = 256  # the prompt's rows, padded
+comptime PRE = 4  # the NPU LLM graph's rows start here (rows 0 .. 3, the same for every input, are constants there)
+comptime NEG: Float32 = -30000.0  # the NPU graphs' masked logit (fp16)
 comptime NE = 32  # embodied-action tokens
 comptime DD = 768  # the DiT
 comptime DB = 16
@@ -86,6 +92,17 @@ def sub(b: DeviceBuffer[DType.float32], off: Int, n: Int) raises -> DeviceBuffer
 def flag(name: String) -> Bool:
     var v = getenv(name)
     return v != "" and v != "0"
+
+
+def cols_of(name: String) -> Int:
+    """A heavy matrix's k (VJ_MMA16)."""
+    if name.startswith(VQ):
+        if "patch_embed" in name:
+            return KP
+        if "merger" in name or "linear_fc2" in name:
+            return VF
+        return VD
+    return FF if "down_proj" in name else D
 
 
 def is_matrix(name: String) -> Bool:
@@ -171,11 +188,30 @@ struct VLAJEPA(Movable):
     var vel: DeviceBuffer[DType.float32]  # [64, 64]
     var act: DeviceBuffer[DType.float32]  # [64, 8]: x (rows 0 .. 6)
     var mask0: DeviceBuffer[DType.int32]
+    var wv: Weights[DType.float16, True]  # VJ_MMA16: the ViT's, mergers' and LLM's matrices in fp16
+    var s16: Scratch
+    var mma16: Bool
+    # GPU+NPU
+    var dsall: DeviceBuffer[DType.float32]  # the three DeepStack sets, contiguous (ds[k] are its sub-buffers)
+    var ncos: DeviceBuffer[DType.float32]  # the NPU LLM graph's RoPE tables (rows 4 .. 255, 128 columns) and mask
+    var nsin: DeviceBuffer[DType.float32]
+    var nmask: DeviceBuffer[DType.float32]
+    var npu_vision: Int  # VJ_NPU_VISION (vision_ctx.onnx on the laptop): its handle there, or -1
+    var npu_llm: Int  # VJ_NPU_LLM (llm_ctx.onnx)
 
     def __init__(out self, ctx: DeviceContext, path: String) raises:
         self.ctx = ctx
         self.w = Weights[DType.uint16, False](ctx)
         self.s = Scratch(ctx, 64 * FF * 2, 64 * FF * 16, 0, 64)
+        self.mma16 = flag("VJ_MMA16")
+        self.wv = Weights[DType.float16, True](ctx)
+        self.s16 = Scratch(ctx, 64, 64, SP * 2 * FF if self.mma16 else 64, 64)
+        self.npu_vision = -1
+        self.npu_llm = -1
+        self.dsall = ctx.enqueue_create_buffer[DType.float32](3 * MROWS * D)
+        self.ncos = ctx.enqueue_create_buffer[DType.float32]((SP - PRE) * HD)
+        self.nsin = ctx.enqueue_create_buffer[DType.float32]((SP - PRE) * HD)
+        self.nmask = ctx.enqueue_create_buffer[DType.float32]((SP - PRE) * SP)
         self.lib = OwnedDLHandle(plugin_path())
         self.bytes = 0
         self.profiling = False
@@ -204,7 +240,7 @@ struct VLAJEPA(Movable):
         self.vis = ctx.enqueue_create_buffer[DType.float32](MROWS * D)
         self.ds = List[DeviceBuffer[DType.float32]]()
         for _ in range(3):
-            self.ds.append(ctx.enqueue_create_buffer[DType.float32](MROWS * D))
+            self.ds.append(self.dsall.create_sub_buffer[DType.float32](len(self.ds) * MROWS * D, MROWS * D))
         self.x = ctx.enqueue_create_buffer[DType.float32](SP * D)
         self.xn = ctx.enqueue_create_buffer[DType.float32](SP * D)
         self.qkv = ctx.enqueue_create_buffer[DType.float32](SP * QKV)
@@ -252,6 +288,8 @@ struct VLAJEPA(Movable):
         ctx.enqueue_memset(self.mask0, Int32(0))
         self.load(path)
         self.tables()
+        self.npu_vision = self.npug_open("VJ_NPU_VISION")
+        self.npu_llm = self.npug_open("VJ_NPU_LLM")
 
     # weights
     def load(mut self, path: String) raises:
@@ -302,6 +340,29 @@ struct VLAJEPA(Movable):
         self.ctx.enqueue_function[ok.pad_cols](self.w.floats[AM + "action_encoder.layer1.weight"], a1, Int32(AH), Int32(AX),
                                                Int32(DD * AX), grid_dim=groups(DD * AX, 256), block_dim=256)
         self.w.floats[AM + "action_encoder.layer1.weight8"] = a1
+        self.ctx.synchronize()
+        if self.mma16:
+            self.halve()
+
+    def halve(mut self) raises:
+        """VJ_MMA16: the ViT's, mergers' and LLM's matrices in fp16 (exact from bf16), rows padded to 128."""
+        var names = List[String]()
+        for e in self.w.halves.items():
+            var nm = e.key
+            if nm.startswith(VQ):
+                names.append(nm)
+            elif nm.startswith(LQ + "layers.") and ("qkv" in nm or "o_proj" in nm or "gate_up" in nm or
+                                                     "down_proj" in nm):
+                names.append(nm)
+        for nm in names:
+            var src = self.w.halves[nm]
+            var n = len(src)
+            var cols = cols_of(nm)
+            var padded = (n // cols + 127) // 128 * 128 * cols
+            var dst = self.ctx.enqueue_create_buffer[DType.float16](padded)
+            self.ctx.enqueue_memset(dst, Float16(0))
+            self.ctx.enqueue_function[vak.to_f16_from_bf16](src, dst, Int32(n), grid_dim=groups(n, 256), block_dim=256)
+            self.wv.halves[nm] = dst
         self.ctx.synchronize()
 
     def cat16(mut self, key: String, names: List[String]) raises:
@@ -437,6 +498,25 @@ struct VLAJEPA(Movable):
                 sn[i * HD // 2 + j] = Float32(sin(Float64(f)))
         ctx.enqueue_copy(self.lcos, c.unsafe_ptr())
         ctx.enqueue_copy(self.lsin, sn.unsafe_ptr())
+        # the NPU LLM graph's forms (export_npu.py): full 128-column tables from row 4, and its additive mask (row
+        # 4 + i sees keys 0 .. 4 + i; padding rows see key 0)
+        var n = SP - PRE
+        var c2 = List[Float32](length=n * HD, fill=0)
+        var s2 = List[Float32](length=n * HD, fill=0)
+        for i in range(PRE, S):
+            for j in range(HD):
+                c2[(i - PRE) * HD + j] = c[i * HD // 2 + j % (HD // 2)]
+                s2[(i - PRE) * HD + j] = sn[i * HD // 2 + j % (HD // 2)]
+        var ma = List[Float32](length=n * SP, fill=NEG)
+        for i in range(n):
+            if PRE + i < S:
+                for j in range(PRE + i + 1):
+                    ma[i * SP + j] = 0
+            else:
+                ma[i * SP] = 0
+        ctx.enqueue_copy(self.ncos, c2.unsafe_ptr())
+        ctx.enqueue_copy(self.nsin, s2.unsafe_ptr())
+        ctx.enqueue_copy(self.nmask, ma.unsafe_ptr())
         var st = List[Float32](length=64 * 8, fill=0)
         for i in range(8):
             st[i] = state[i]
@@ -447,6 +527,51 @@ struct VLAJEPA(Movable):
                 nz[i * AX + j] = noise[i * AH + j]
         ctx.enqueue_copy(self.noise, nz.unsafe_ptr())
         ctx.synchronize()
+
+    def npug_open(self, env: String) raises -> Int:
+        var graph = getenv(env)
+        if not graph:
+            return -1
+        var ms = Float64(0)
+        var h = self.lib.call["M_driver_remote_npug_open", Int32](graph.as_c_string_span().unsafe_ptr(), Pointer(to=ms))
+        if h < 0:
+            raise Error("M_driver_remote_npug_open failed for " + graph + ": the server must be vk_server_npu.exe")
+        print("NPU:", graph, "opened in", round(ms, 1), "ms")
+        return Int(h)
+
+    def npug_run(mut self, h: Int, ins: List[UInt64], inb: List[UInt64], outs: List[UInt64],
+                 outb: List[UInt64]) raises:
+        """A compiled graph on the laptop's NPU, inside vk_server_npu: inputs read from and outputs written to GPU
+        buffers (device pointers and byte sizes, in the graph's order)."""
+        if self.lib.call["M_driver_remote_npug_run", Int32](Int32(h), Int32(len(ins)), ins.unsafe_ptr(),
+                                                            inb.unsafe_ptr(), Int32(len(outs)), outs.unsafe_ptr(),
+                                                            outb.unsafe_ptr()) != 0:
+            raise Error("M_driver_remote_npug_run failed")
+        self.tick("NPU graph")
+
+    def npu_time(mut self) raises -> Float64:
+        var ms = Float64(0)
+        if self.lib.call["M_driver_remote_npug_time", Int32](Pointer(to=ms)) != 0:
+            raise Error("the NPU graph failed (M_driver_remote_npug_time)")
+        return ms
+
+    def vision_npu(mut self) raises:
+        """GPU+NPU: the ViT, DeepStack mergers and the merger on the NPU: vis and the DeepStack sets."""
+        self.npug_run(self.npu_vision, [UInt64(Int(self.pix.unsafe_ptr()))], [UInt64(VROWS * KP * 4)],
+                      [UInt64(Int(self.vis.unsafe_ptr())), UInt64(Int(self.dsall.unsafe_ptr()))],
+                      [UInt64(MROWS * D * 4), UInt64(3 * MROWS * D * 4)])
+
+    def llm_npu(mut self) raises:
+        """GPU+NPU: Qwen3's 28 layers on the NPU over rows 4 .. 255 of x (the image rows taken from vis, DeepStack
+        added inside): the 32 embodied rows into vl."""
+        var n = SP - PRE
+        var emb = sub(self.x, PRE * D, n * D)
+        self.npug_run(self.npu_llm, [UInt64(Int(emb.unsafe_ptr())), UInt64(Int(self.vis.unsafe_ptr())),
+                                     UInt64(Int(self.dsall.unsafe_ptr())), UInt64(Int(self.ncos.unsafe_ptr())),
+                                     UInt64(Int(self.nsin.unsafe_ptr())), UInt64(Int(self.nmask.unsafe_ptr()))],
+                      [UInt64(n * D * 4), UInt64(MROWS * D * 4), UInt64(3 * MROWS * D * 4), UInt64(n * HD * 4),
+                       UInt64(n * HD * 4), UInt64(n * SP * 4)], [UInt64(Int(self.vl.unsafe_ptr()))],
+                      [UInt64(NE * D * 4)])
 
     def tick(self, what: String) raises:
         if self.profiling:
@@ -460,6 +585,29 @@ struct VLAJEPA(Movable):
                                                      xoff: Int = 0) raises:
         lin[DType.uint16, False, ACT, BIAS, RES](self.w, self.s, wname, bname, x, y, rows, n, k, ldx, ldy, xoff)
         self.tick("proj " + String(rows) + "x" + String(n) + "x" + String(k))
+
+    def hproj[BIAS: Bool, RES: Bool, ACT: Int = NONE](self, wname: String, bname: String,
+                                                      x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
+                                                      rows: Int, n: Int, k: Int, ldx: Int, ldy: Int,
+                                                      xoff: Int = 0) raises:
+        """A heavy projection (ViT, mergers, LLM): proj, or VJ_MMA16's fp16 matrix units (fp16 sums)."""
+        if not self.mma16:
+            self.proj[BIAS, RES, ACT](wname, bname, x, y, rows, n, k, ldx, ldy, xoff)
+            return
+        var b = self.w.floats[bname] if BIAS else self.s16.xa
+        var ctx = self.ctx
+        var w16 = self.wv.halves[wname]
+        ctx.enqueue_function[vgemm.to_half[ACT]](x, self.s16.xh, Int32(k), Int32(ldx), Int32(xoff), Float32(1),
+                                                 Int32(rows * k), grid_dim=groups(rows * k, 256), block_dim=256)
+        if rows % 128 == 0:
+            ctx.enqueue_function[vgemm.gemm16[2, 2]](self.s16.xh, w16, self.s16.yh, Int32(n), Int32(k), Int32(ldy),
+                                                     grid_dim=Dim(groups(n, 128), rows // 128), block_dim=256)
+        else:
+            ctx.enqueue_function[vgemm.gemm16[1, 2]](self.s16.xh, w16, self.s16.yh, Int32(n), Int32(k), Int32(ldy),
+                                                     grid_dim=Dim(groups(n, 128), rows // 64), block_dim=128)
+        ctx.enqueue_function[vgemm.finish16[BIAS, RES]](self.s16.yh, b, y, Int32(n), Int32(ldy), Int32(rows * n),
+                                                        grid_dim=groups(rows * n, 256), block_dim=256)
+        self.tick("proj16 " + String(rows) + "x" + String(n) + "x" + String(k))
 
     def ln(self, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], name: String, rows: Int, d: Int,
            eps: Float32) raises:
@@ -489,12 +637,12 @@ struct VLAJEPA(Movable):
         var ctx = self.ctx
         for v in range(NV):
             self.copy(sub(self.vx, v * NP * VD, NP * VD), self.posemb)
-        self.proj[True, True](VQ + "patch_embed.proj.weight", VQ + "patch_embed.proj.bias", self.pix, self.vx, VROWS,
+        self.hproj[True, True](VQ + "patch_embed.proj.weight", VQ + "patch_embed.proj.bias", self.pix, self.vx, VROWS,
                               VD, KP, KP, VD)
         for i in range(VL):
             var p = VQ + "blocks." + String(i) + "."
             self.ln(self.vx, self.vxn, p + "norm1", VROWS, VD, EPS6)
-            self.proj[True, False](p + "attn.qkv.weight", p + "attn.qkv.bias", self.vxn, self.vqkv, VROWS, 3 * VD, VD, VD,
+            self.hproj[True, False](p + "attn.qkv.weight", p + "attn.qkv.bias", self.vxn, self.vqkv, VROWS, 3 * VD, VD, VD,
                                    3 * VD)
             ctx.enqueue_function[vrow.rope_qk](self.vqkv, self.vcos, self.vsin, self.vpos, self.vkc, self.vvc,
                                                Int32(3 * VD), Int32(VH), Int32(VH), Int32(VD), Int32(0), Int32(64),
@@ -503,11 +651,11 @@ struct VLAJEPA(Movable):
             attend[False, 64](ctx, self.vqkv, self.vkc, self.vvc, self.vatt, self.zlev, self.zlev, 3 * VD, VD, VD, 0, 0,
                               NP, VH, 1, NP, NV, NP, Float32(0.125))
             self.tick("attention")
-            self.proj[True, True](p + "attn.proj.weight", p + "attn.proj.bias", self.vatt, self.vx, VROWS, VD, VD, VD, VD)
+            self.hproj[True, True](p + "attn.proj.weight", p + "attn.proj.bias", self.vatt, self.vx, VROWS, VD, VD, VD, VD)
             self.ln(self.vx, self.vxn, p + "norm2", VROWS, VD, EPS6)
-            self.proj[True, False](p + "mlp.linear_fc1.weight", p + "mlp.linear_fc1.bias", self.vxn, self.vh, VROWS, VF,
+            self.hproj[True, False](p + "mlp.linear_fc1.weight", p + "mlp.linear_fc1.bias", self.vxn, self.vh, VROWS, VF,
                                    VD, VD, VF)
-            self.proj[True, True, GELU](p + "mlp.linear_fc2.weight", p + "mlp.linear_fc2.bias", self.vh, self.vx, VROWS,
+            self.hproj[True, True, GELU](p + "mlp.linear_fc2.weight", p + "mlp.linear_fc2.bias", self.vh, self.vx, VROWS,
                                         VD, VF, VF, VD)
             if i == 5 or i == 11 or i == 17:
                 self.merge(VQ + "deepstack_merger_list." + String((i - 5) // 6) + ".", self.vx, True,
@@ -522,8 +670,8 @@ struct VLAJEPA(Movable):
             self.ln(src, self.mn, p + "norm", MROWS, VF, EPS6)
         else:
             self.ln(src, self.mn, p + "norm", VROWS, VD, EPS6)
-        self.proj[True, False](p + "linear_fc1.weight", p + "linear_fc1.bias", self.mn, self.mh, MROWS, VF, VF, VF, VF)
-        self.proj[True, False, GELU_ERF](p + "linear_fc2.weight", p + "linear_fc2.bias", self.mh, dst, MROWS, D, VF, VF,
+        self.hproj[True, False](p + "linear_fc1.weight", p + "linear_fc1.bias", self.mn, self.mh, MROWS, VF, VF, VF, VF)
+        self.hproj[True, False, GELU_ERF](p + "linear_fc2.weight", p + "linear_fc2.bias", self.mh, dst, MROWS, D, VF, VF,
                                          D)
 
     # the language model
@@ -546,7 +694,7 @@ struct VLAJEPA(Movable):
         var ctx = self.ctx
         var p = LQ + "layers." + String(l) + "."
         self.rms(self.x, self.xn, p + "input_layernorm.weight")
-        self.proj[False, False](p + "qkv.weight", "", self.xn, self.qkv, SP, QKV, D, D, QKV)
+        self.hproj[False, False](p + "qkv.weight", "", self.xn, self.qkv, SP, QKV, D, D, QKV)
         ctx.enqueue_function[jk.head_rms](self.qkv, self.w.floats[p + "self_attn.q_norm.weight"], Int32(QKV), Int32(0),
                                           Int32(HD), EPS6, grid_dim=Dim(SP, QH), block_dim=64)
         ctx.enqueue_function[jk.head_rms](self.qkv, self.w.floats[p + "self_attn.k_norm.weight"], Int32(QKV),
@@ -559,10 +707,10 @@ struct VLAJEPA(Movable):
         attend[True, HD](ctx, self.qkv, self.kc, self.vc, self.att, self.lklev, self.lqlev, QKV, KVH * HD, QH * HD, 0, 0,
                          SP, QH, QH // KVH, SP, 1, 0, Float32(1 / sqrt(Float64(HD))))
         self.tick("attention")
-        self.proj[False, True](p + "self_attn.o_proj.weight", "", self.att, self.x, SP, D, QH * HD, QH * HD, D)
+        self.hproj[False, True](p + "self_attn.o_proj.weight", "", self.att, self.x, SP, D, QH * HD, QH * HD, D)
         self.rms(self.x, self.xn, p + "post_attention_layernorm.weight")
-        self.proj[False, False](p + "gate_up.weight", "", self.xn, self.gu, SP, 2 * FF, D, D, 2 * FF)
-        self.proj[False, True, SILU_MUL](p + "mlp.down_proj.weight", "", self.gu, self.x, SP, D, FF, 2 * FF, D, xoff=FF)
+        self.hproj[False, False](p + "gate_up.weight", "", self.xn, self.gu, SP, 2 * FF, D, D, 2 * FF)
+        self.hproj[False, True, SILU_MUL](p + "mlp.down_proj.weight", "", self.gu, self.x, SP, D, FF, 2 * FF, D, xoff=FF)
         if l < 3:  # DeepStack
             for v in range(NV):
                 var rows = sub(self.x, self.img0[v] * D, 64 * D)
@@ -646,7 +794,15 @@ struct VLAJEPA(Movable):
             self.step(s)
 
     def chunk(mut self) raises:
-        self.vit()
+        """One action chunk: the ViT, the prompt rows, the LLM, the head (GPU+NPU: vision and the LLM on the NPU).
+        Enqueued only."""
+        if self.npu_vision >= 0:
+            self.vision_npu()
+        else:
+            self.vit()
         self.embed()
-        self.llm()
+        if self.npu_llm >= 0:
+            self.llm_npu()
+        else:
+            self.llm()
         self.head()

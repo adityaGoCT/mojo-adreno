@@ -39,7 +39,7 @@ VQ, LQ, AM, DM = ("qwen_vl_interface.model.model.visual.", "qwen_vl_interface.mo
 D, SP, PRE = 2048, 256, 4
 PT = "VLA-JEPA-LIBERO.pt"
 sys.path.insert(0, str(ROOT / "vla_adapter"))
-from export_npu import check, precision, Half  # noqa: E402
+from export_npu import check, precision, Half, ln16, rms16  # noqa: E402
 
 
 class W(nn.Module):
@@ -63,9 +63,11 @@ def rot(x):
 
 
 class Vision(nn.Module):
-    """Qwen3-VL's ViT on both views (residual kept / C), the DeepStack mergers and the final merger."""
+    """Qwen3-VL's ViT on both views, the DeepStack mergers and the final merger. fp16-safe norms: ln16 (the HTP
+    flushes subnormals; a residual divided by 16 made small activations' squares vanish). Activations stay within
+    1,046."""
 
-    C = 16.0
+    C = 1.0
 
     def __init__(self, w, posemb, vcos, vsin):
         super().__init__()
@@ -74,29 +76,29 @@ class Vision(nn.Module):
     def merge(self, x, p, post):
         w = self.w
         if post:
-            x = F.layer_norm(x.reshape(128, 4096), (4096,), w(p + "norm.weight"), w(p + "norm.bias"), 1e-6)
+            x = ln16(x.reshape(128, 4096), w(p + "norm.weight"), w(p + "norm.bias"))
         else:
-            x = F.layer_norm(x, (1024,), w(p + "norm.weight"), w(p + "norm.bias"), 1e-6).reshape(128, 4096)
+            x = ln16(x, w(p + "norm.weight"), w(p + "norm.bias")).reshape(128, 4096)
         return lin(F.gelu(lin(x, w, p + "linear_fc1")), w, p + "linear_fc2")
 
     def forward(self, pix):
         w, C = self.w, self.C
-        eps = 1e-6 / C / C
         x = F.linear(pix, w(VQ + "patch_embed.proj.weight").reshape(1024, 1536), w(VQ + "patch_embed.proj.bias"))
         x = (x + torch.cat([self.posemb, self.posemb], 0)) * (1.0 / C)
         cos, sin = torch.cat([self.cos, self.cos], 0), torch.cat([self.sin, self.sin], 0)  # [512, 64]
         ds = []
         for i in range(24):
             p = VQ + f"blocks.{i}."
-            y = F.layer_norm(x, (1024,), w(p + "norm1.weight"), w(p + "norm1.bias"), eps)
+            y = ln16(x, w(p + "norm1.weight"), w(p + "norm1.bias"))
             qkv = lin(y, w, p + "attn.qkv").view(512, 3, 16, 64).permute(1, 2, 0, 3)  # [3, 16, 512, 64]
             q = qkv[0] * cos + rot(qkv[0]) * sin
             k = qkv[1] * cos + rot(qkv[1]) * sin
             q, k, v = q.view(16, 2, 256, 64), k.view(16, 2, 256, 64), qkv[2].view(16, 2, 256, 64)
+            k = k - k.mean(-2, keepdim=True)  # centered per view: each query's logits shift by a constant
             o = torch.softmax((q * 0.125) @ k.transpose(-1, -2), -1) @ v  # per view
             o = o.reshape(16, 512, 64).transpose(0, 1).reshape(512, 1024)
             x = x + lin(o, w, p + "attn.proj") * (1.0 / C)
-            y = F.layer_norm(x, (1024,), w(p + "norm2.weight"), w(p + "norm2.bias"), eps)
+            y = ln16(x, w(p + "norm2.weight"), w(p + "norm2.bias"))
             x = x + lin(F.gelu(lin(y, w, p + "mlp.linear_fc1"), approximate="tanh"), w, p + "mlp.linear_fc2") * (1.0 / C)
             if i in (5, 11, 17):
                 ds.append(self.merge(x * C, VQ + f"deepstack_merger_list.{(i - 5) // 6}.", True))
@@ -108,9 +110,11 @@ def rms(x, g, eps):
 
 
 class LLM(nn.Module):
-    """Qwen3's 28 layers over rows 4 .. 255, rows 0 .. 3's keys and values given (constants), residual kept / C."""
+    """Qwen3's 28 layers over rows 4 .. 255, rows 0 .. 3's keys and values given (constants: their residual reaches
+    37,897; from row 4 on it stays within 2,003). fp16-safe norms: rms16 (a residual divided by 64 made small
+    activations' squares subnormal, which the HTP flushes)."""
 
-    C = 64.0
+    C = 1.0
 
     def __init__(self, w, img0, pre_k, pre_v):
         super().__init__()
@@ -120,28 +124,27 @@ class LLM(nn.Module):
     def forward(self, emb, vis, ds, cos, sin, mask_add):
         w, C = self.w, self.C
         n = SP - PRE
-        eps = 1e-6 / C / C
         parts = []
         at = PRE
-        for v in range(2):  # the image rows from the vision graph
-            parts += [emb[at - PRE:self.img0[v] - PRE], vis[v * 64:(v + 1) * 64]]
+        for v in range(2):  # the image rows from the vision graph (no empty pieces: QNN rejects empty tensors)
+            parts += ([emb[at - PRE:self.img0[v] - PRE]] if self.img0[v] > at else []) + [vis[v * 64:(v + 1) * 64]]
             at = self.img0[v] + 64
         parts.append(emb[at - PRE:])
         x = torch.cat(parts, 0) * (1.0 / C)
         for l in range(28):
             p = LQ + f"layers.{l}."
-            y = rms(x, w(p + "input_layernorm.weight"), eps)
+            y = rms16(x, w(p + "input_layernorm.weight"))
             q = F.linear(y, w(p + "self_attn.q_proj.weight")).view(n, 16, 128).transpose(0, 1)
             k = F.linear(y, w(p + "self_attn.k_proj.weight")).view(n, 8, 128).transpose(0, 1)
             v = F.linear(y, w(p + "self_attn.v_proj.weight")).view(n, 8, 128).transpose(0, 1)
-            q = rms(q, w(p + "self_attn.q_norm.weight"), 1e-6)
-            k = rms(k, w(p + "self_attn.k_norm.weight"), 1e-6)
+            q = rms16(q, w(p + "self_attn.q_norm.weight"))
+            k = rms16(k, w(p + "self_attn.k_norm.weight"))
             q, k = q * cos + rot(q) * sin, k * cos + rot(k) * sin
             k = torch.cat([self.pre_k[l], k], 1).repeat_interleave(2, 0)  # [16, 256, 128]
             v = torch.cat([self.pre_v[l], v], 1).repeat_interleave(2, 0)
             o = torch.softmax((q * (128 ** -0.5)) @ k.transpose(-1, -2) + mask_add, -1) @ v
             x = x + F.linear(o.transpose(0, 1).reshape(n, D), w(p + "self_attn.o_proj.weight")) * (1.0 / C)
-            y = rms(x, w(p + "post_attention_layernorm.weight"), eps)
+            y = rms16(x, w(p + "post_attention_layernorm.weight"))
             g = F.linear(y, w(p + "mlp.gate_proj.weight"))
             u = F.linear(y, w(p + "mlp.up_proj.weight"))
             x = x + F.linear(F.silu(g) * u, w(p + "mlp.down_proj.weight")) * (1.0 / C)
@@ -150,7 +153,7 @@ class LLM(nn.Module):
                 at = 0
                 for vw in range(2):
                     s0 = self.img0[vw] - PRE
-                    rows += [x[at:s0], x[s0:s0 + 64] + ds[l, vw * 64:(vw + 1) * 64] * (1.0 / C)]
+                    rows += ([x[at:s0]] if s0 > at else []) + [x[s0:s0 + 64] + ds[l, vw * 64:(vw + 1) * 64] * (1.0 / C)]
                     at = s0 + 64
                 rows.append(x[at:])
                 x = torch.cat(rows, 0)
@@ -160,7 +163,7 @@ class LLM(nn.Module):
 class Head(nn.Module):
     """VLA-JEPA's flow-matching DiT, 4 Euler steps unrolled; the per-step timestep tables are constants."""
 
-    C = 16.0
+    C = 1.0  # activations stay within 1,189; the LayerNorms are ln16 (fp16-safe on the HTP)
 
     def __init__(self, w):
         super().__init__()
@@ -179,7 +182,7 @@ class Head(nn.Module):
         self.tau = torch.cat([torch.sin(f2), torch.cos(f2)], -1)  # [4, 768]
 
     def ln(self, x, eps):
-        return F.layer_norm(x, (768,), None, None, eps)
+        return ln16(x, eps=eps * self.C * self.C)  # the eps the callers pass is already divided by C^2
 
     def forward(self, vl, state, noise):
         w, C = self.w, self.C

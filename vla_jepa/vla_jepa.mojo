@@ -6,7 +6,9 @@
 #   VK_REMOTE_PORT=<port> MODULAR_DRIVER_PLUGINS=vulkan@<plugin> VJ_REMOTE=<the official .pt on the laptop> \
 #       VJ_REMOTE_INDEX=build/vla_jepa/pt_offsets.txt vla_jepa <vla_jepa.safetensors> <ref dir> [runs]
 #
-# VJ_REPLAY=<k>: a chunk on the laptop's own clock (OP_RECORD / OP_REPLAY), five times over.
+# VJ_REPLAY=<k>: a chunk on the laptop's own clock (OP_RECORD / OP_REPLAY), five times over. VJ_MMA16=1: the ViT,
+# mergers and LLM on the fp16 matrix units. GPU+NPU: VJ_NPU_VISION / VJ_NPU_LLM name compiled graphs on the laptop
+# (vla_jepa/export_npu.py; the server is vk_server_npu.exe); those stages run on the NPU, the rest on the GPU.
 from std.os import getenv
 from std.sys import argv
 from max.gpu.host import DeviceContext
@@ -32,6 +34,55 @@ def two(i: Int) -> String:
     return ("0" if i < 10 else "") + String(i)
 
 
+def x_check(ctx: DeviceContext, m: VLAJEPA, r: String, what: String) raises:
+    """The final x (7 x 7, normalized) against the reference's last step."""
+    var xr = read_f32(r + "x.f32")
+    var a = fetch(ctx, m.act, AH * AX)
+    var c = Check()
+    for i in range(AH):
+        for j in range(AH):
+            c.add(a[i * AX + j], xr[((STEPS - 1) * AH + i) * AH + j])
+    show("actions (7 x 7, normalized)" + what, c)
+
+
+def gpu_npu(mut m: VLAJEPA, ctx: DeviceContext, r: String, runs: Int) raises:
+    """GPU+NPU: the vision and/or LLM graphs on the NPU, the rest on the GPU; checked, then timed."""
+    if m.npu_vision >= 0:
+        m.vision_npu()
+        show("merger from the NPU (2 x 64 x 2048)", compare(fetch(ctx, m.vis, 128 * D), D,
+                                                            read_f32(r + "vit_merger.f32"), D, span(128), D))
+        for k in range(3):
+            show("DeepStack " + String(k) + " from the NPU", compare(fetch(ctx, m.ds[k], 128 * D), D,
+                                                                    read_f32(r + "vit_deepstack" + String(k) + ".f32"),
+                                                                    D, span(128), D))
+        print("NPU vision graph:", round(m.npu_time(), 1), "ms (server clock)")
+    else:
+        m.vit()
+    m.embed()
+    if m.npu_llm >= 0:
+        m.llm_npu()
+        show("embodied hidden states from the NPU (32 x 2048)", compare(fetch(ctx, m.vl, NE * D), D,
+                                                                        read_f32(r + "embodied_hidden.f32"), D,
+                                                                        span(NE), D))
+        print("NPU LLM graph:", round(m.npu_time(), 1), "ms (server clock)")
+    else:
+        m.llm()
+    m.head()
+    x_check(ctx, m, r, ", GPU+NPU")
+    for run in range(runs):
+        var a0 = now_ms()
+        m.chunk()
+        ctx.synchronize()
+        print("run", run, ": chunk", round(now_ms() - a0, 1), "ms (Mac clock)")
+    if getenv("VJ_REPLAY"):
+        var k = Int(getenv("VJ_REPLAY"))
+        var line = String("replay: chunk, ") + String(k) + " chunks a replay, ms a chunk (server clock):"
+        for _ in range(5):
+            line += " " + String(round(replay(m, ctx, k), 1))
+        print(line)
+    print("done")
+
+
 def main() raises:
     var args = argv()
     if len(args) < 3:
@@ -42,7 +93,8 @@ def main() raises:
     print("device:", ctx.name())
     var t0 = now_ms()
     var m = VLAJEPA(ctx, String(args[1]))
-    print("weights:", Float64(m.bytes) / 1e9, "GB (bf16), loaded in", round((now_ms() - t0) / 1e3, 2), "s")
+    print("weights:", Float64(m.bytes) / 1e9, "GB (bf16), loaded in", round((now_ms() - t0) / 1e3, 2), "s;",
+          "fp16 matrix units" if m.mma16 else "baseline")
     var ids = read_i32(r + "input_ids.i32")
     var S = len(ids)
     var imgp = read_i32(r + "image_token_positions.i32")
@@ -53,6 +105,9 @@ def main() raises:
     m.set_inputs(read_f32(r + "pixel_values.f32"), ids, S, img0, emb0, read_i32(r + "position_ids.i32"),
                  read_f32(r + "state_raw.f32"), read_f32(r + "noise.f32"))
     print("prompt", S, "rows; images at", img0[0], img0[1], "; embodied tokens at", emb0)
+    if m.npu_vision >= 0 or m.npu_llm >= 0:  # GPU+NPU
+        gpu_npu(m, ctx, r, runs)
+        return
 
     var tc = now_ms()
     show("ViT position grid (256 x 1024)", compare(fetch(ctx, m.posemb, NP * VD), VD, read_f32(r + "vit_pos_embed.f32"),
@@ -108,6 +163,7 @@ def main() raises:
             var u = Float32(0.5) * (v + 1) * (amax[j] - amin[j]) + amin[j] if j < 6 else (Float32(1) if v >= 0.5 else Float32(0))
             cu.add(u, au[i * AH + j])
     show("actions (7 x 7, LIBERO units)", cu)
+    x_check(ctx, m, r, "")
     print("checked in", round((now_ms() - tc) / 1e3, 2), "s")
 
     for run in range(runs):
