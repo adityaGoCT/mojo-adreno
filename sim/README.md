@@ -7,7 +7,7 @@ Cloud.
 
 The loop, every 12 simulator steps:
 1. **On the Mac:** the simulator renders the two 256 × 256 cameras, agent view and wrist.
-2. **To the laptop:** the Mac sends the cameras and the arm's state through an SSH tunnel.
+2. **To the laptop:** the Mac sends the cameras (as PNG) and the arm's state through an SSH tunnel.
 3. **On the laptop's NPU:** TurboVLA computes a 12-step action chunk.
 4. **Back on the Mac:** the arm executes the chunk.
 
@@ -16,15 +16,18 @@ run, and keeps every episode as an MP4.
 
 ## Result: LIBERO-Spatial, all 10 tasks, 2 episodes each
 
-**20 of 20 episodes succeeded** (2026-11-07), with every action chunk computed on the laptop's NPU in fp16:
+**20 of 20 episodes succeeded** (2026-11-07), with every action chunk computed on the laptop's NPU in fp16. Two
+runs, which differ only in how the cameras cross the tunnel, took exactly the same number of steps in every
+episode:
 
-| | median | range |
+| | Cameras as PNG (default) | Cameras as fp16 pixels (first run) |
 |---|---|---|
-| Steps to success (limit 220) | 99.5 | 74–133 |
-| Action chunks per episode | 9 | |
-| NPU time per chunk (text + vision + head graphs) | 114 ms | |
-| Round trip per chunk, Mac to laptop and back | 602 ms | |
-| Wall time per episode (simulation included) | 10.3 s | 7.1–13.3 s |
+| Steps to success (limit 220), median and range | 99.5 (74–133) | the same |
+| Action chunks per episode | 9 | 9 |
+| NPU time per chunk (text + vision + head graphs) | 113 ms | 114 ms |
+| Round trip per chunk, Mac to laptop and back | 504 ms | 602 ms |
+| Wall time per episode (simulation included) | 9.5 s | 10.3 s |
+| Bytes per chunk through the tunnel | about 185 KB | 786 KB |
 
 - **For scale:** TurboVLA's paper reports 97.6% average success over the four LIBERO suites (50 episodes a task,
   bf16 on a GPU).
@@ -32,9 +35,18 @@ run, and keeps every episode as an MP4.
   2.3e-2 of PyTorch fp32 on a fixed input).
 - **What it does not show:** 20 episodes are not the benchmark's 500.
 
-The tunnel dominates the round trip: 114 ms of it is NPU work, and the remaining 490 ms or so is the SSH tunnel,
-carrying the two cameras (0.8 MB as fp16) plus its own latency. A policy running next to the simulator would see
-only the NPU time.
+**The tunnel's speed drifts, so the fair comparison is back to back.** Measured just before the PNG run, a chunk
+took 1.2 s with fp16 pixels and 0.44 s with PNG frames.
+
+**Where the 0.5 s per chunk goes:**
+- the tunnel's bare round trip, about 290 ms (a 32-byte request);
+- the NPU, 113 ms;
+- the PNG frames' transfer, the rest.
+
+The frames are lossless PNG (two 256 × 256 RGB views, about 185 KB). The laptop decodes them and normalizes them as
+DINOv3's processor does (x / 255, ImageNet's mean and std, in fp32): its pixels match the official preprocessing
+within 2.4e-7. That is more exact than the fp16 pixels the first run sent. A policy running next to the simulator
+would see only the NPU time.
 
 ## How it fits together
 
@@ -43,6 +55,8 @@ only the NPU time.
   - the instruction's tensors are set once per episode;
   - each chunk sends the cameras (fp16) and the state;
   - all of it is pipelined into one round trip.
+- **The cameras: `--transport png` (the default).** Frames go to the server as PNG (`graph_tool serve`'s SET format 2,
+  decoded with [stb_image](../npu/third_party/stb_image.h)). `--transport fp16` sends the processor's pixels instead.
 - **The Mac: [`libero_demo.py`](libero_demo.py)** follows TurboVLA's own LIBERO evaluation protocol: 10 settling
   steps, then the policy up to the suite's step limit, 12 actions executed per chunk. It uses the official policy
   class (`suite_policy.TurboVLAPolicy`) for:
@@ -98,3 +112,21 @@ build/libero/venv/bin/python sim/libero_demo.py --suite libero_spatial --tasks a
 Open http://localhost:8765/ for the live page. Episodes are saved in `build/sim/turbovla/videos`, with a summary in
 `results.json`. `--suite` takes `libero_spatial`, `libero_object`, `libero_goal` or `libero_10`. TurboVLA's
 checkpoint covers all four.
+
+## Simulating on the laptop itself: blocked on this QDC image
+
+Running LIBERO on the laptop too would remove the tunnel from the loop. It does not work on the X Elite laptop QDC
+assigned (Windows 11 25H2, build 26200.6584):
+- **No ARM64 MuJoCo.** MuJoCo publishes no Windows-on-ARM build: not on PyPI, conda-forge or its GitHub releases.
+- **No AVX under emulation.** The x64 build needs AVX. This image's x64 emulator exposes none to x64 apps (an x64
+  Python sees SSE4.2 but no AVX), so importing MuJoCo dies with an illegal instruction (0xC000001D). Microsoft's
+  newer emulator exposes AVX and AVX2 to x64 apps by default on updated Windows 11.
+- **No WSL.** It is not installed, and installing it needs admin rights and a reboot.
+
+[`laptop_sim.py`](laptop_sim.py) and [`make_bundle.py`](make_bundle.py) are ready for a laptop where MuJoCo runs:
+- **`laptop_sim.py`** runs the same evaluation protocol with no PyTorch, reaching `graph_tool serve` on localhost.
+  It does in numpy what the official policy class does; `make_bundle.py` checks that against the class.
+- **`make_bundle.py`** precomputes, on the Mac, each instruction's text tensors and LIBERO's initial states.
+
+`laptop_sim.py` has not yet run end to end; the setup it needs (x64 Python 3.10 from NuGet, the same pins without
+PyTorch, and LIBERO's source) installs and imports on the laptop up to MuJoCo.

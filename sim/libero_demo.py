@@ -78,11 +78,12 @@ def serve_dir(out, port):
     return srv
 
 
-def make_policy(backend, port):
+def make_policy(backend, port, transport="png"):
     import torch
     from turbovla.evaluation import suite_policy
     from turbovla.evaluation.policy import sanitize_pred_chunk, state_from_libero_obs
 
+    from npu_client import NPUChain
     base = suite_policy.TurboVLAPolicy
 
     class NPUPolicy(base):
@@ -90,8 +91,10 @@ def make_policy(backend, port):
 
         def __init__(self, *a, **k):
             super().__init__(*a, **k)
-            from npu_client import NPUChain
             self.chain = NPUChain(port)
+            self.transport = transport
+            cfg = json.loads((B / "dinov3/preprocessor_config.json").read_text())  # DINOv3's processor's own
+            self.mean, self.std = cfg["image_mean"], cfg["image_std"]
             self.instruction = None
             self.last = dict(npu_ms=0.0, round_trip_ms=0.0)
 
@@ -123,9 +126,13 @@ def make_policy(backend, port):
                 self.set_instruction(instruction)
             state = state_from_libero_obs(state_or_obs) if isinstance(state_or_obs, dict) else state_or_obs
             samples, states = self._build_batch([primary_image], [wrist_image], [state])
-            pix = samples["dinov3"].float().cpu().numpy()  # [1, 2, 3, 256, 256]
             st = states.float().cpu().numpy()  # [1, 8]
-            out, ms, rt = self.chain.run([(SLOTS["pixels"], pix, True), (SLOTS["state"], st, False)])
+            if self.transport == "png":  # the frames as PNG; the laptop normalizes them as DINOv3's processor does
+                frames = (SLOTS["pixels"], NPUChain.png_frames([primary_image, wrist_image], self.mean, self.std),
+                          "png")
+            else:  # the processor's pixels [1, 2, 3, 256, 256] as fp16
+                frames = (SLOTS["pixels"], samples["dinov3"].float().cpu().numpy(), True)
+            out, ms, rt = self.chain.run([frames, (SLOTS["state"], st, False)])
             self.last = dict(npu_ms=ms, round_trip_ms=rt)
             return sanitize_pred_chunk(out.reshape(12, 7))
 
@@ -154,6 +161,8 @@ def main():
     ap.add_argument("--open-loop", type=int, default=12, help="actions executed per chunk")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--hold", action="store_true", help="keep serving the dashboard after the last episode")
+    ap.add_argument("--transport", default="png", choices=["png", "fp16"],
+                    help="camera frames to the laptop: PNG (normalized there, exact) or the processor's fp16 pixels")
     a = ap.parse_args()
 
     a.out.mkdir(parents=True, exist_ok=True)
@@ -168,7 +177,7 @@ def main():
     import imageio
 
     set_seed_everywhere(a.seed)
-    policy = make_policy(a.backend, a.port)
+    policy = make_policy(a.backend, a.port, a.transport)
     suite = benchmark.get_benchmark_dict()[a.suite]()
     tasks = range(suite.n_tasks) if a.tasks == "all" else [int(t) for t in a.tasks.split(",")]
     max_steps = MAX_STEPS[a.suite]

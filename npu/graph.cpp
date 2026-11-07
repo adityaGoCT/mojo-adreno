@@ -383,10 +383,15 @@ static int chain(int argc, char** argv) {
 // client at a time. An input is a file (its initial content), @g:i (graph g's output i) or - (zeros until set). Every
 // input that is not an @ reference is a slot, numbered in chain order. Requests, little-endian:
 //   SET  {u32 1, u32 slot, u32 format, u32 0, u64 n} + n bytes   the slot's content: format 0 the graph's own type
-//                                                                (fp32 or int32), 1 fp16 for an fp32 input; answer
-//                                                                {i32 status, u32 0, f64 0}
+//                                                                (fp32 or int32), 1 fp16 for an fp32 input, 2 images
+//                                                                as PNG for an fp32 [.., V, 3, H, W] input (below);
+//                                                                answer {i32 status, u32 0, f64 0}
+//   GET  {u32 3, u32 slot, u32 0, u32 0, u64 0}                  answer {i32 status, u32 n, f64 0} + the slot's bytes
 //   RUN  {u32 2, u32 0, u32 0, u32 0, u64 0}                     the chain once; answer {i32 status, u32 n, f64 ms}
 //                                                                + n bytes: the last graph's outputs (fp32), in order
+// Format 2 (camera frames through a slow link): {u32 V, f32 mean[3], f32 std[3]} then V times {u32 length, PNG bytes},
+// each an H x W RGB image; the slot gets (x * (1/255) - mean[c]) / std[c] in fp32, channels first, view by view, the
+// arithmetic of the policies' own preprocessors (x / 255 normalized with the backbone's mean and std).
 // A failed request answers status 1 with the message as its n bytes. The client sends RUN after its SETs; inputs
 // keep their content between runs (an instruction's tensors are set once).
 #ifdef _WIN32
@@ -428,6 +433,44 @@ static float f16_to_f32(uint16_t h) {
   float f;
   memcpy(&f, &bits, 4);
   return f;
+}
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#include "third_party/stb_image.h"
+
+// SET format 2: V PNG images into an fp32 [.., V, 3, H, W] slot of `bytes` bytes; an empty string on success.
+static std::string set_png(const std::vector<char>& in, std::vector<char>& slot) {
+  if (in.size() < 28) return "PNG set: short header";
+  uint32_t nv;
+  float mean[3], sd[3];
+  memcpy(&nv, in.data(), 4);
+  memcpy(mean, in.data() + 4, 12);
+  memcpy(sd, in.data() + 16, 12);
+  if (nv == 0 || slot.size() % (nv * 3 * 4)) return "PNG set: the slot is not V x 3 x H x W fp32";
+  size_t hw = slot.size() / (nv * 3 * 4), at = 28;
+  float* dst = (float*)slot.data();
+  const float scale = 1.0f / 255.0f;
+  for (uint32_t v = 0; v < nv; v++) {
+    uint32_t len;
+    if (at + 4 > in.size()) return "PNG set: truncated";
+    memcpy(&len, in.data() + at, 4);
+    at += 4;
+    if (at + len > in.size()) return "PNG set: truncated";
+    int w, h, c;
+    unsigned char* px = stbi_load_from_memory((const unsigned char*)in.data() + at, (int)len, &w, &h, &c, 3);
+    at += len;
+    if (!px) return std::string("PNG set: ") + stbi_failure_reason();
+    if (size_t(w) * size_t(h) != hw) {
+      stbi_image_free(px);
+      return "PNG set: image " + std::to_string(w) + " x " + std::to_string(h) + " does not fit the slot";
+    }
+    for (int ch = 0; ch < 3; ch++)
+      for (size_t i = 0; i < hw; i++) dst[(v * 3 + ch) * hw + i] = ((float)px[3 * i + ch] * scale - mean[ch]) / sd[ch];
+    stbi_image_free(px);
+  }
+  return "";
 }
 
 static int serve(int argc, char** argv) {
@@ -524,7 +567,9 @@ static int serve(int argc, char** argv) {
         if (hdr[1] >= slots.size()) msg = "no such slot";
         else {
           auto& sl = slots[hdr[1]];
-          if (hdr[2] == 1 && sl.fp32 && n * 2 == sl.buf->size()) {
+          if (hdr[2] == 2 && sl.fp32) {
+            msg = set_png(payload, *sl.buf);
+          } else if (hdr[2] == 1 && sl.fp32 && n * 2 == sl.buf->size()) {
             const uint16_t* hp = (const uint16_t*)payload.data();
             float* fp = (float*)sl.buf->data();
             for (uint64_t i = 0; i < n / 2; i++) fp[i] = f16_to_f32(hp[i]);
@@ -535,6 +580,9 @@ static int serve(int argc, char** argv) {
                   std::to_string(hdr[2]) + ", want " + std::to_string(sl.buf->size()) + " (fp32/int32)";
           }
         }
+      } else if (hdr[0] == 3) {
+        if (hdr[1] >= slots.size()) msg = "no such slot";
+        else reply.assign(slots[hdr[1]].buf->begin(), slots[hdr[1]].buf->end());
       } else if (hdr[0] == 2) {
         double t0 = now_ms(), each = 0;
         for (size_t g = 0; g < steps.size() && msg.empty(); g++)
