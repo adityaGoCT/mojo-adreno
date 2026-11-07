@@ -255,8 +255,8 @@ staged in `$D/plain`, on two phones with the same chip:
 - **The Galaxy Z Fold SM-F976U** (Samsung Remote Test Lab, build `CP2A.260605.016.F976USQU1AZGI`), a retail phone
   like Pipette's: every point up to 2,048 input tokens. The lab dropped it as the 4,096-token point began.
 - **An SM8850 QRD** (Qualcomm Device Cloud's "Canoe" reference phone, Android 16 userdebug, 24 GB): the 4,096-token
-  points, DSpark, and the 1,024-token points again, to compare the two. It has no internet, so the Mac pushed it
-  the GGUF and the drafter (the same SHA-256s).
+  points, DSpark, and the other lengths down to 512 tokens (all-NPU down to 1,024) before its session ended.
+  It has no internet, so the Mac pushed it the GGUF and the drafter (the same SHA-256s).
 
 The protocol:
 - **Prompts** are synthesized to an exact token count: the start-of-text token, then the repo's long passages
@@ -306,9 +306,11 @@ The sweep (Pipette's line is its leaderboard's data for the S26 Ultra's CPU, q4_
 |---|---|---|---|---|---|
 | 256 | Galaxy Z Fold SM-F976U | 1,388 ms, 36.6 tok/s, 8,579 ms | 703 ms, 36.4 tok/s, 7,961 ms | 109 ms, 35.7 tok/s, 9,177 ms | 111 ms, 17.7 tok/s, 17,568 ms |
 | 512 | Galaxy Z Fold SM-F976U | 2,937 ms, 35.0 tok/s, 10,290 ms | 1,334 ms, 36.1 tok/s, 8,913 ms | 226 ms, 35.9 tok/s, 9,556 ms | 208 ms, 18.3 tok/s, 16,942 ms |
+| 512 | SM8850 QRD (Qualcomm Device Cloud) | 2,937 ms, 35.0 tok/s, 10,290 ms | 1,451 ms, 37.2 tok/s, 8,329 ms | 211 ms, 37.1 tok/s, 7,934 ms |  |
 | 1,024 | Galaxy Z Fold SM-F976U | 6,844 ms, 34.0 tok/s, 13,995 ms | 2,787 ms, 34.7 tok/s, 10,560 ms | 664 ms, 35.4 tok/s, 9,939 ms | 647 ms, 18.2 tok/s, 17,423 ms |
 | 1,024 | SM8850 QRD (Qualcomm Device Cloud) | 6,844 ms, 34.0 tok/s, 13,995 ms | 3,047 ms, 36.7 tok/s, 10,034 ms | 619 ms, 37.0 tok/s, 8,382 ms | 619 ms, 19.6 tok/s, 15,030 ms |
 | 2,048 | Galaxy Z Fold SM-F976U | 15,025 ms, 26.7 tok/s, 22,124 ms | 5,991 ms, 33.2 tok/s, 14,605 ms | 3,325 ms, 33.5 tok/s, 13,636 ms | 3,368 ms, 15.1 tok/s, 24,175 ms |
+| 2,048 | SM8850 QRD (Qualcomm Device Cloud) | 15,025 ms, 26.7 tok/s, 22,124 ms | 6,588 ms, 35.4 tok/s, 13,817 ms | 3,237 ms, 35.3 tok/s, 11,409 ms | 3,226 ms, 16.6 tok/s, 20,129 ms |
 | 4,096 | SM8850 QRD (Qualcomm Device Cloud) | 36,442 ms, 22.7 tok/s, 44,139 ms | 14,850 ms, 33.0 tok/s, 22,593 ms | 6,534 ms, 32.9 tok/s, 15,263 ms | 6,466 ms, 16.6 tok/s, 23,225 ms |
 
 What the numbers say:
@@ -325,12 +327,13 @@ What the numbers say:
   the 4,352-slot graphs), because its int8 weights are 3.36 GB a token.
 - **End to end** (to the 256th output token), GPU + NPU is best from 1,024 tokens on:
   - 9.9 s against 14.0 s (1.41×) on the Fold, and 8.4 s on the QRD;
-  - 13.6 against 22.1 s at 2,048 (1.62×);
+  - 13.6 against 22.1 s at 2,048 (1.62×), and 11.4 s on the QRD;
   - 15.3 against 44.1 s at 4,096 (2.9×).
 
   At 256 and 512 tokens the GPU alone is best (7.96 and 8.91 s: 1.08× and 1.15×). GPU + NPU's E2E includes loading
   the GPU's weights after the NPU's prefill, 1.3–1.8 s on the Fold, more than its faster prefill saves on a short
-  prompt. The same load takes 0.8–1.0 s on the QRD, likely because its 24 GB keep the weights file cached. All-NPU's
+  prompt. The same load takes 0.8–1.0 s on the QRD, likely because its 24 GB keep the weights file cached, so there
+  GPU + NPU is already best at 512 tokens (7.93 against 8.33 s). All-NPU's
   E2E is longer than llama.cpp's up to 2,048 tokens (half the decode rate, plus a 1.1–2.7 s context swap) and 1.9×
   shorter at 4,096.
 - **Against Pipette's iPhone 17 Pro** (llama.cpp on its GPU, 1,024 tokens: TTFT 1,059 ms, decode 39 tokens/s, E2E
@@ -340,8 +343,9 @@ What the numbers say:
   (a passage to continue, not a chat question) the drafter averages 2.6 tokens per target pass (4.5 on the chat
   prompt above), too few to pay for its steps. Its later outputs go better: E2E is 10.1 s, the same as plain
   decoding's 10.0 s. Its TTFT includes the drafter's context of the prompt (+171 ms).
-- **The two phones** at 1,024 tokens: the QRD's GPU prefill is 9% slower (3,047 against 2,787 ms), and its decode
-  is 4–8% faster in every configuration. The chip is the same; the driver and firmware builds are not.
+- **The two phones:** the QRD's GPU prefill is 9–10% slower than the Fold's at every length both ran (3,047 against
+  2,787 ms at 1,024 tokens), and its decode 3–10% faster in every configuration. The chip is the same; the driver
+  and firmware builds are not.
 - **Peak RAM.** By Pipette's measure (VmHWM + swap), the GPU configuration holds 1.55 GB, under llama.cpp's
   1.87 GB. But 1.50 GB of that is the mapped weights file. The GPU's own pages are outside it: 2.14 GB for the
   weights, an 8,192-position cache and the prefill's buffers. All-NPU's 0.69–0.89 GB leaves out its HTP contexts in
