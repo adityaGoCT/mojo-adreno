@@ -68,6 +68,10 @@ against the official models. All on the X Elite's NPU, a chunk takes 6.10 s for 
 the vision encoder dominates) and 1.30 s for VLA-JEPA (2.0e-3). Their GPU rows wait on the X Elite's Adreno X1-85,
 whose driver crashes compiling one of the ports' kernels.
 
+**[LIBERO, closed loop](sim/README.md)**: TurboVLA on the X Elite laptop's NPU drives a simulated Franka arm in
+LIBERO (MuJoCo on the Mac), with a live dashboard of the cameras and the success tally. All 20 episodes of
+LIBERO-Spatial's 10 pick-and-place tasks succeeded, at 114 ms of NPU time per 12-step action chunk.
+
 Since Mojo's compiler went open source (August 2026), there is a second route: a prototype
 `adreno710` target inside the compiler itself, in
 [adityaGoCT/modular, branch `adreno-spirv-target`](https://github.com/adityaGoCT/modular/tree/adreno-spirv-target),
@@ -602,6 +606,8 @@ octo/              Octo-Small on the X2 Elite laptop: model.mojo (GPU), export_n
 vla_adapter/       VLA-Adapter Pro: model.mojo (GPU), export_npu.py (NPU graphs), reference.py, npu_check.py
 evo1/              Evo-1 (LIBERO): model.mojo (GPU), export_npu.py (NPU graphs), reference.py, npu_check.py
 vla_jepa/          VLA-JEPA (LIBERO): model.mojo (GPU), export_npu.py (NPU graphs), reference.py, npu_check.py
+sim/               LIBERO closed loop: libero_demo.py (simulator + policy on the laptop's NPU), npu_client.py
+                   (graph_tool serve's client), dashboard.html (the live page)
 qcom/              prompt kernels for VK_QCOM_cooperative_matrix_conversion (GLSL; runners load them
                    when a driver has the extension; see its README)
 bonsai/            Bonsai 2 2B (ternary) on the Adreno 840: the Android port's Mojo kernels, unchanged,
