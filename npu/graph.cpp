@@ -183,6 +183,19 @@ int npug_open(const char* ctx, double* ms) {
   }
 }
 
+const char* npug_name(int h, int output, int i) {
+  if (h < 0 || h >= int(graphs.size())) return nullptr;
+  auto& names = output ? graphs[h]->out_names : graphs[h]->in_names;
+  return i >= 0 && i < int(names.size()) ? names[i].c_str() : nullptr;
+}
+
+int npug_close(int h) {
+  if (h < 0 || h >= int(graphs.size())) return fail("no such graph");
+  graphs[h]->session = Ort::Session(nullptr);  // the context's memory goes; the handle stays (unusable)
+  graphs[h]->path.clear();
+  return 0;
+}
+
 int npug_count(int h, int output) {
   if (h < 0 || h >= int(graphs.size())) return -1;
   return int(output ? graphs[h]->out_names.size() : graphs[h]->in_names.size());

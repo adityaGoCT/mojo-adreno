@@ -7,6 +7,9 @@
   python3 npu/build.py pi0       # build/npu/pi0phone: pi0npu (pi0/pi0npu.mojo: π0's prefix on the NPU)
   python3 npu/build.py hybrid_qwen3  # hybrid_qwen3: ternary Qwen3-8B, NPU prefill and GPU decode
   python3 npu/build.py convert   # pc_convert, qwen3_lpbq: the quantized graphs' weights, written on the phone
+  python3 npu/build.py graphtool # graph_tool: graph.cpp (any static graph: compile, run, chain) for the phone
+  python3 npu/build.py lfm2npu   # lfm2_npu: LFM2.5-2.6B all on the NPU (lfm2/npu_lfm2.cpp on graph.cpp)
+  python3 npu/build.py lfm2hybrid  # lfm2_hybrid: lfm2/hybrid.mojo (NPU prefill, lfm2/model.mojo's GPU decode)
 
 Both link ONNX Runtime for Android with the QNN execution provider (Maven Central's
 com.microsoft.onnxruntime:onnxruntime-android-qnn) and stage Qualcomm's QNN runtime next to the executable
@@ -117,6 +120,34 @@ def hybrid_qwen3():
     ab.stage(OUT)
 
 
+def graphtool():
+    """graph_tool (graph.cpp with -DNPU_TOOL): compile, run and chain static ONNX graphs on the phone's HTP."""
+    stage_npu()
+    sh(*compile_shim(["-DNPU_TOOL"], "graph.cpp"), "-static-libstdc++", "-o", OUT / "graph_tool")
+
+
+def lfm2npu():
+    """lfm2_npu: lfm2/npu_lfm2.cpp's prefill and decode on the HTP (export_npu.py's graphs), on graph.cpp."""
+    stage_npu()
+    sh(CXX, "-O2", "-std=c++17", f"-I{ORT / 'headers'}", "-DLFM2_NPU_MAIN", ROOT / "lfm2/npu_lfm2.cpp",
+       HERE / "graph.cpp", f"-L{OUT}", "-lonnxruntime", "-Wl,-rpath,$ORIGIN", "-static-libstdc++",
+       "-o", OUT / "lfm2_npu")
+
+
+def lfm2hybrid():
+    """lfm2/hybrid.mojo (NPU prefill of LFM2.5-2.6B, then lfm2/model.mojo's GPU decode), linked with npu_lfm2.cpp and
+    graph.cpp, staged with QNN, MAX's runtime and the driver plugin, as hybrid is."""
+    spec = importlib.util.spec_from_file_location("android_build", ROOT / "android/build.py")
+    ab = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ab)
+    stage_npu()
+    ab.mojo_object(ROOT / "lfm2/hybrid.mojo", OUT / "lfm2_hybrid.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels"])
+    sh(CXX, "-O2", "-std=c++17", f"-I{ORT / 'headers'}", ROOT / "lfm2/npu_lfm2.cpp", HERE / "graph.cpp",
+       OUT / "lfm2_hybrid.o", f"-L{OUT}", "-lonnxruntime", f"-L{ab.BUILD / 'runtime'}", "-lKGENCompilerRTShared",
+       "-ldl", "-Wl,-rpath,$ORIGIN", "-o", OUT / "lfm2_hybrid")
+    ab.stage(OUT)
+
+
 def convert():
     """The quantized graphs' weights.bin, written on the phone instead of pushed: pc_convert (npu/export.py's
     per-channel forms, from the fp16 weights.bin and export.py's recipe.txt) and qwen3_lpbq (npu/export_qwen3.py's,
@@ -128,7 +159,7 @@ def convert():
 
 def main():
     steps = {"tool": tool, "hybrid": hybrid, "decode": decode, "pi0tool": pi0tool, "pi0": pi0,
-             "hybrid_qwen3": hybrid_qwen3, "convert": convert}
+             "hybrid_qwen3": hybrid_qwen3, "convert": convert, "graphtool": graphtool, "lfm2npu": lfm2npu, "lfm2hybrid": lfm2hybrid}
     for name in sys.argv[1:] or ["tool"]:
         if name not in steps:
             sys.exit(f"unknown step {name}: one of {' '.join(steps)}")

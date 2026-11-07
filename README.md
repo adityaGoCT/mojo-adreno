@@ -34,6 +34,17 @@ instead of 5.2 s.
 **[Ternary Qwen3-8B on the Adreno 840](qwen3/README.md)**: PrismML's Ternary-Bonsai-8B on the same
 ternary kernels plus seven small Mojo kernels: 25 tokens/s, all 16 checked steps matching MLX's greedy tokens.
 
+**[LFM2.5-2.6B on the Adreno 840 and the Hexagon NPU](lfm2/README.md)**: Liquid AI's hybrid of short-convolution and
+attention layers, from its quantization-aware-distilled Q4_0 GGUF, in four configurations on a Galaxy Z Fold, each
+checked against transformers' LFM2 layers and the fp32 checkpoint. A 415-token prompt and 64 tokens:
+- GPU, fp16 weights, no matrix units: 57 tokens/s prefill and 86.7 ms a token.
+- GPU, int4 with prefill on the matrix units: 319 tokens/s and 31.2 ms (logits within 1.1e-4 of transformers on the
+  same weights).
+- Prefill on the Hexagon NPU, decode on the GPU: 2,082 tokens/s and 31.7 ms.
+- All on the NPU: 2,096 tokens/s and 53.6 ms.
+
+Against fp32, every row stays within 0.01 of KL of the int4 model itself.
+
 **[Qwen3-30B-A3B (mixture of experts) on a Snapdragon X2 Elite laptop](qwen3moe/README.md)**: 30.5B parameters,
 128 experts with 8 per token, in int4 (15.75 GB, inside the X2-90's 16.8 GB heap). It decodes at 31–37 tokens/s,
 with the GPU's logits within 1e-4 of transformers' layers on the same weights. The laptop reads its own weights
