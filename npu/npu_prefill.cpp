@@ -453,7 +453,8 @@ int main(int argc, char** argv) {
         size_t count = io ? s.GetOutputCount() : s.GetInputCount();
         for (size_t i = 0; i < count; i++) {
           names.push_back(io ? s.GetOutputNameAllocated(i, alloc) : s.GetInputNameAllocated(i, alloc));
-          auto info = (io ? s.GetOutputTypeInfo(i) : s.GetInputTypeInfo(i)).GetTensorTypeAndShapeInfo();
+          auto type = io ? s.GetOutputTypeInfo(i) : s.GetInputTypeInfo(i);  // owns what info views
+          auto info = type.GetTensorTypeAndShapeInfo();
           std::vector<int64_t> shape = info.GetShape();
           size_t n = 1;
           for (int64_t d : shape) n *= size_t(d);

@@ -214,7 +214,27 @@ static void npu_answered(uint32_t op, const char* p, uint32_t n) {
 }
 #endif
 
+// A crash (access violation and the like) says where it happened before the process dies: the module and offset.
+static LONG WINAPI on_crash(EXCEPTION_POINTERS* e) {
+  void* at = e->ExceptionRecord->ExceptionAddress;
+  HMODULE mod = NULL;
+  char name[MAX_PATH] = "?";
+  if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         (LPCSTR)at, &mod))
+    GetModuleFileNameA(mod, name, sizeof name);
+  fprintf(stderr, "vk_server: exception 0x%08lx at %s+0x%llx", (unsigned long)e->ExceptionRecord->ExceptionCode, name,
+          (unsigned long long)((char*)at - (char*)mod));
+  if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2)
+    fprintf(stderr, " (%s address 0x%llx)", e->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+            (unsigned long long)e->ExceptionRecord->ExceptionInformation[1]);
+  fprintf(stderr, "\n");
+  fflush(stderr);
+  fflush(stdout);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int main(int argc, char** argv) {
+  SetUnhandledExceptionFilter(on_crash);
   int port = argc > 1 ? atoi(argv[1]) : DEFAULT_PORT;
   WSADATA wsa;
   if (WSAStartup(MAKEWORD(2, 2), &wsa)) {

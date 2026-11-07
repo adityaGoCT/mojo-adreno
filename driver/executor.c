@@ -160,7 +160,15 @@ static int make_buffer(buffer_t* b, uint64_t size) {
     return -1;
   }
   vkBindBufferMemory(dev, b->buf, b->mem, 0);
-  vkMapMemory(dev, b->mem, 0, b->size, 0, (void**)&b->map);
+  if (vkMapMemory(dev, b->mem, 0, b->size, 0, (void**)&b->map) != VK_SUCCESS || !b->map) {
+    fprintf(stderr, "executor: vkMapMemory failed for a buffer of %llu bytes (memory type %u)\n",
+            (unsigned long long)b->size, ti);
+    vkFreeMemory(dev, b->mem, NULL);
+    vkDestroyBuffer(dev, b->buf, NULL);
+    b->buf = VK_NULL_HANDLE;
+    b->map = NULL;
+    return -1;
+  }
   return 0;
 }
 
@@ -599,6 +607,14 @@ int vkx_init(int submit_every_default) {
   vkGetPhysicalDeviceProperties2(pd, &p2);
   props = p2.properties;
   vkGetPhysicalDeviceMemoryProperties(pd, &memprops);
+  if (getenv("VKX_MEMINFO")) {  // the device's memory heaps and types (which one buffers come from: make_buffer)
+    for (uint32_t i = 0; i < memprops.memoryHeapCount; ++i)
+      fprintf(stderr, "executor: heap %u: %.2f GB, flags 0x%x\n", i, memprops.memoryHeaps[i].size / 1e9,
+              memprops.memoryHeaps[i].flags);
+    for (uint32_t i = 0; i < memprops.memoryTypeCount; ++i)
+      fprintf(stderr, "executor: memory type %u: heap %u, flags 0x%x\n", i, memprops.memoryTypes[i].heapIndex,
+              memprops.memoryTypes[i].propertyFlags);
+  }
   uint32_t nq = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, NULL);
   VkQueueFamilyProperties qf[16];

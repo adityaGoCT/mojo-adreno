@@ -11,7 +11,8 @@
 //                                                           graphs back to back, timed end to end; an input @g:i is
 //                                                           graph g's output i (the same host buffer)
 // Environment: NPU_LOG=v (ONNX Runtime's verbose log), NPU_FALLBACK=1 (allow nodes on the CPU; otherwise every node
-// must run on the HTP), NPU_OPT=<0..3> (QNN's graph finalization optimization mode, default 3).
+// must run on the HTP), NPU_OPT=<0..3> (QNN's graph finalization optimization mode, default 3), NPU_FILE_MAP=1
+// (ONNX Runtime's file-mapped weights; off by default, see options()).
 //
 // Built for Windows on ARM (the Snapdragon X2 Elite laptop) by npu/build_win.sh, and for Android by npu/build.py.
 #include "graph.h"
@@ -104,12 +105,15 @@ Ort::SessionOptions options(const std::string& ctx_out) {
       {"htp_graph_finalization_optimization_mode", opt ? opt : "3"},
       {"enable_htp_fp16_precision", "1"},
   };
+  // File-mapped weights: where the HTP lacks them (the X1 Elite's V73), ONNX Runtime 1.24.4's fallback reads a large
+  // context binary out of bounds (an access violation in memcpy); off unless NPU_FILE_MAP=1.
+  if (!getenv("NPU_FILE_MAP")) qnn["disable_file_mapped_weights"] = "1";
   so.AppendExecutionProvider("QNN", qnn);
   if (!getenv("NPU_FALLBACK")) so.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   if (!ctx_out.empty()) {
     so.AddConfigEntry("ep.context_enable", "1");
     so.AddConfigEntry("ep.context_file_path", ctx_out.c_str());
-    so.AddConfigEntry("ep.context_embed_mode", "0");
+    so.AddConfigEntry("ep.context_embed_mode", getenv("NPU_EMBED") ? "1" : "0");  // NPU_EMBED=1: inside the .onnx
   }
   return so;
 }
@@ -152,7 +156,8 @@ int npug_open(const char* ctx, double* ms) {
     Ort::AllocatorWithDefaultOptions alloc;
     for (size_t i = 0; i < g->session.GetInputCount(); i++) {
       g->in_names.push_back(g->session.GetInputNameAllocated(i, alloc).get());
-      auto info = g->session.GetInputTypeInfo(i).GetTensorTypeAndShapeInfo();
+      auto type = g->session.GetInputTypeInfo(i);  // owns what info views: keep it alive while info is used
+      auto info = type.GetTensorTypeAndShapeInfo();
       g->in_shapes.push_back(info.GetShape());
       g->in_types.push_back(info.GetElementType());
     }
@@ -227,7 +232,53 @@ static std::vector<char> read_file(const std::string& p) {
 
 static int tool(int argc, char** argv);
 
+#ifdef _WIN32
+// A crash says where it happened (module and offset) before the process dies; stdout is unbuffered so nothing printed
+// before it is lost.
+static LONG WINAPI on_crash(EXCEPTION_POINTERS* e) {
+  void* at = e->ExceptionRecord->ExceptionAddress;
+  HMODULE mod = NULL;
+  char name[MAX_PATH] = "?";
+  if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         (LPCSTR)at, &mod))
+    GetModuleFileNameA(mod, name, sizeof name);
+  fprintf(stderr, "graph_tool: exception 0x%08lx at %s+0x%llx", (unsigned long)e->ExceptionRecord->ExceptionCode, name,
+          (unsigned long long)((char*)at - (char*)mod));
+  if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2)
+    fprintf(stderr, " (%s address 0x%llx)", e->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+            (unsigned long long)e->ExceptionRecord->ExceptionInformation[1]);
+  fprintf(stderr, "\n");
+#if defined(_M_ARM64) || defined(__aarch64__)
+  CONTEXT c = *e->ContextRecord;  // the callers, by unwinding from the faulting frame
+  for (int i = 0; i < 12 && c.Pc; i++) {
+    DWORD64 base = 0;
+    PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(c.Pc, &base, NULL);
+    if (f) {
+      void* hd;
+      DWORD64 ef;
+      RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Pc, f, &c, &hd, &ef, NULL);
+    } else {
+      c.Pc = c.Lr;  // a leaf
+    }
+    mod = NULL;
+    strcpy(name, "?");
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)c.Pc, &mod))
+      GetModuleFileNameA(mod, name, sizeof name);
+    const char* tail = strrchr(name, '\\');
+    fprintf(stderr, "  called from %s+0x%llx\n", tail ? tail + 1 : name, (unsigned long long)(c.Pc - (DWORD64)mod));
+  }
+#endif
+  fflush(stderr);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  SetUnhandledExceptionFilter(on_crash);
+#endif
+  setvbuf(stdout, NULL, _IONBF, 0);
   int rc = tool(argc, argv);
   fflush(stdout);
   fflush(stderr);
