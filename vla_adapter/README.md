@@ -24,6 +24,10 @@ The rows come from two different laptops:
   Adreno X1-85, the driver's shader compiler (`qcgpuarm64xcompilercore.dll`) crashes on one of our kernels (a null
   read). That blocks the GPU rows and GPU+NPU there for now.
 
+**On a phone: not yet.** The GPU rows on a Galaxy Z Fold (SM-F976U, Adreno 840) are staged but not yet measured:
+`build/vla_adapter/run_phone.sh`, with the weights downloaded by the phone itself. The Remote Test Lab bridge
+dropped, and the phone came back wiped.
+
 **Measurement:**
 - *GPU rows:* replays of 2 chunks on the laptop's clock (`VLA_REPLAY`), 5 of them, without the SSH tunnel.
 - *All-NPU:* `graph_tool chain`, 10 chunks in one process; the times varied by under 1%.

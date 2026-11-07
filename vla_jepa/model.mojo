@@ -363,6 +363,10 @@ struct VLAJEPA(Movable):
             self.ctx.enqueue_memset(dst, Float16(0))
             self.ctx.enqueue_function[vak.to_f16_from_bf16](src, dst, Int32(n), grid_dim=groups(n, 256), block_dim=256)
             self.wv.halves[nm] = dst
+            # the bf16 original is no longer read (these projections go through hproj): freed as we go, so the fp16
+            # copies do not double the weights' memory (VLA-JEPA's would not fit on an 11 GB phone)
+            self.ctx.synchronize()
+            _ = self.w.halves.pop(nm)
         self.ctx.synchronize()
 
     def cat16(mut self, key: String, names: List[String]) raises:
@@ -376,6 +380,11 @@ struct VLAJEPA(Movable):
             self.ctx.enqueue_copy(buf.create_sub_buffer[DType.uint16](at, len(src)), src)
             at += len(src)
         self.w.halves[key] = buf
+        # the parts are read only through the concatenation: freed, or the LLM's matrices would be held twice (1.9 GB
+        # for VLA-JEPA, too much beside the fp16 copies on an 11 GB phone)
+        self.ctx.synchronize()
+        for nm in names:
+            _ = self.w.halves.pop(nm)
 
     def tables(mut self) raises:
         """The ViT's position grid (Qwen3-VL's bilinear interpolation of the 48 x 48 table to 16 x 16, in the merge

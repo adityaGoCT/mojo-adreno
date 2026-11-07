@@ -13,17 +13,21 @@ stage is checked against the official PyTorch model in fp32.
 
 | Configuration | Device | Chunk | Actions vs fp32 (normalized, max abs) |
 |---|---|---|---|
-| GPU baseline: bf16 weights, fp32 matrix units | — | not yet measured | — |
-| GPU optimized: ViT, mergers and LLM on the fp16 matrix units (`VJ_MMA16`) | — | not yet measured | — |
+| GPU baseline: bf16 weights, fp32 matrix units | Galaxy Z Fold (Adreno 840) | 947–966 ms (phone clock) | 9.2e-7 |
+| GPU optimized: ViT, mergers and LLM on the fp16 matrix units (`VJ_MMA16`) | Galaxy Z Fold | not yet | — |
 | GPU+NPU: vision and LLM on the NPU, the DiT on the GPU | — | not yet measured | — |
 | **All-NPU**: vision, LLM and DiT on the HTP | X Elite (Hexagon V73) | **0.786 s** (325 + 374 + 87 ms) | 1.7e-3 |
 | *The released bf16 model, for scale* | | | 3.4e-3 |
 
-**Why the GPU rows are empty.** The GPU port ([`model.mojo`](model.mojo)) is written and builds, but it has not run
-yet:
-- The X2 Elite laptop it was written for was replaced by an X Elite (X1E80100 CRD) in the next QDC session.
-- On that laptop's Adreno X1-85, the driver's shader compiler crashes on one of our kernels (see
-  [`../vla_adapter`](../vla_adapter)).
+**The GPU rows are from a phone.** The X Elite laptop's Adreno X1-85 driver crashes compiling one of our kernels
+(see [`../vla_adapter`](../vla_adapter)), so the GPU port ([`model.mojo`](model.mojo)) ran on a Galaxy Z Fold
+(SM-F976U, Adreno 840) in Samsung Remote Test Lab.
+- **Baseline:** its first run matched the official model at every stage (actions within 9.2e-7, normalized).
+  A chunk took 947–966 ms over two sessions of 5 replays on the phone's clock (`VJ_REPLAY=1`, after a 90 s
+  cool-down, `REPLAY_SLEEP=90`).
+- **`VJ_MMA16` is not yet measured.** Its first attempt kept both the bf16 matrices and their fp16 copies, plus the
+  fused LLM matrices' parts: about 10 GB on an 11 GB phone. The phone dropped off adb while it loaded. The originals
+  are now freed as they are copied (about 4.6 GB), built but not yet run.
 
 **Measurement:** the all-NPU time is `graph_tool chain`, 10 chunks in one process (781–787 ms).
 
