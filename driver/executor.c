@@ -4,7 +4,7 @@
 // Launches, device-side copies and fills are recorded into command buffers of `submit_every`
 // commands each, every command after a barrier on the ones before it, and a command buffer is
 // submitted once full: nothing waits for the GPU until the host needs memory (WRITE, READ, FREE, a
-// fill Vulkan cannot do) or at SYNC. A launch of BIG_LAUNCH threads or more ends its command buffer
+// fill Vulkan cannot do) or at SYNC. A launch of BIG_LAUNCH threads (VK_BIG_LAUNCH) or more ends its command buffer
 // and is submitted at once: 64 large prefill launches together outlast the driver's watchdog and
 // lose the device, while decode's launches (under 100K threads) stay batched. The remote device
 // submits each command alone: one submission of many slow kernels can outlast the GPU driver's
@@ -61,6 +61,7 @@ VK_FUNCS(DECL)
 #define MAX_SUBMITS 256
 #define PARAMS_ARENA (1 << 20)
 #define BIG_LAUNCH (1 << 18)
+static long big_launch = BIG_LAUNCH;  // VK_BIG_LAUNCH=<threads> overrides it
 
 static VkDevice dev;
 static VkQueue queue;
@@ -412,7 +413,7 @@ static void launch(const char* p, uint32_t n) {
   vkCmdDispatch(cmd, l->groups[0], l->groups[1], l->groups[2]);
   end_command();
   uint64_t threads = (uint64_t)l->groups[0] * l->groups[1] * l->groups[2] * l->block[0] * l->block[1] * l->block[2];
-  if (threads >= BIG_LAUNCH) submit();
+  if (threads >= big_launch) submit();
   if (profile > 1) flush();  // VK_SERVER_PROFILE=2: each launch on its own, to time it
 }
 
@@ -585,6 +586,8 @@ static int has_extension(VkPhysicalDevice pd, const char* name) {
 int vkx_init(int submit_every_default) {
   const char* env = getenv("VK_SERVER_PROFILE");
   profile = env && *env ? atoi(env) : 0;
+  env = getenv("VK_BIG_LAUNCH");  // with VK_SUBMIT_EVERY > 1: launches this large go alone, smaller ones batch
+  if (env && atol(env) > 0) big_launch = atol(env);
   env = getenv("VK_SUBMIT_EVERY");
   submit_every = env && atoi(env) > 0 ? atoi(env) : submit_every_default > 0 ? submit_every_default : 1;
   void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);

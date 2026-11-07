@@ -118,6 +118,23 @@ def main() raises:
     if m.npu_vision >= 0 or m.npu_llm >= 0:  # GPU+NPU
         gpu_npu(m, ctx, r, runs)
         return
+    if getenv("EVO1_TIME_ONLY"):  # no checks: straight to the timing
+        m.record = False
+        m.vision()
+        m.embed()
+        m.llm()
+        m.head()
+        ctx.synchronize()
+        if getenv("EVO1_REPLAY"):
+            var k = Int(getenv("EVO1_REPLAY"))
+            var what = getenv("EVO1_REPLAY_STAGE") if getenv("EVO1_REPLAY_STAGE") else String("chunk")
+            var line = String("replay: ") + what + ", " + String(k) + " a replay, ms each (server clock):"
+            for _ in range(5):
+                line += " " + String(round(replay(m, ctx, k), 1))
+            print(line)
+        actions_check(ctx, m, r, ", after the timing")
+        print("done")
+        return
 
     var tc = now_ms()
     var vrows = List[Int]()
