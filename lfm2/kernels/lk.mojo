@@ -256,11 +256,12 @@ def add_norm(x: F32, y: F32, w: F32, xn: F32, n: Int32, add: Int32):
         xn[o + j] = x[o + j] * r * w[j]
 
 
-def short_conv(bcx: F32, w: F32, state: F32, y: F32, p0: Int32, count: Int32, d: Int32, update: Int32):
+def short_conv(bcx: F32, w: F32, state: F32, y: F32, p0: Int32, count: Int32, d: Int32, update: Int32, bxo: F32):
     """The double-gated short convolution of rows t < count: bcx rows are B | C | x (3 d), Bx = B * x, and
     y[t, c] = C * (w[c, 0] Bx[p - 2] + w[c, 1] Bx[p - 1] + w[c, 2] Bx[p]) at position p = p0 + t (causal, zero before
     the sequence). Bx of earlier rows of the batch from bcx, of earlier positions from the state ring (slot p % 3,
-    zeroed at the start). update (decode, count 1): also write Bx[p] into its slot (a slot no thread reads here)."""
+    zeroed at the start). update 1 (decode, count 1): also write Bx[p] into its slot (a slot no thread reads here);
+    update 2 (a speculative verify): write each row's Bx into bxo [count, d], for dsk.conv_commit."""
     var i = global_idx.x
     var D = Int(d)
     if i >= Int(count) * D:
@@ -280,8 +281,10 @@ def short_conv(bcx: F32, w: F32, state: F32, y: F32, p0: Int32, count: Int32, d:
                 bx[k - 1] = state[(p % 3) * D + c]
     var out = w[c * 3] * bx[1] + w[c * 3 + 1] * bx[0] + w[c * 3 + 2] * bx0
     y[t * D + c] = r[D + c] * out
-    if update != 0:
+    if update == 1:
         state[((Int(p0) + t) % 3) * D + c] = bx0
+    elif update == 2:
+        bxo[t * D + c] = bx0
 
 
 def conv_state(bcx: F32, state: F32, p0: Int32, count: Int32, d: Int32):

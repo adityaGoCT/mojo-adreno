@@ -11,6 +11,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py vla         # build/android/smolvla/ and pi0/: the robot models (SmolVLA, pi0) on vla/
   python3 android/build.py gemma4      # build/android/gemma4/: gemma4/gemma4.mojo (Gemma 4 E2B / E4B), gemma4_convert
   python3 android/build.py lfm2        # build/android/lfm2/: lfm2/lfm2.mojo (LFM2.5-2.6B), lfm2_convert
+  python3 android/build.py lfm2bench   # build/android/lfm2bench/: lfm2/bench_rows.mojo (few-row product kernels)
 
 Each program's directory holds everything it needs on the phone: the executable, MAX's runtime
 libraries, NDK libc++ and the driver plugin. Its DeviceContext loads the plugin named in
@@ -192,6 +193,14 @@ def lfm2():
        ROOT / "lfm2/convert.c")
 
 
+def lfm2bench():
+    """lfm2/bench_rows.mojo: the speculative verify's few-row int4 products against the alternatives."""
+    out = BUILD / "lfm2bench"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "lfm2/bench_rows.mojo", out / "bench_rows.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels"])
+    link(out, "bench_rows", [out / "bench_rows.o"])
+
+
 def bonsai():
     out = BUILD / "bonsai"
     src = out / "src"
@@ -215,7 +224,7 @@ def bonsai():
 
 def main():
     steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
-             "vla": vla, "gemma4": gemma4, "lfm2": lfm2}
+             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
         if name not in steps:

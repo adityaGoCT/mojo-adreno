@@ -11,9 +11,11 @@ from std.collections import Dict
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
+import dsk
 import lk
 
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of gemm_q4's 128)
+comptime TAPS = (2, 9, 17, 21, 27)  # the layers whose residual stream the DSpark drafter reads
 
 
 def groups(n: Int, per: Int) -> Int:
@@ -48,6 +50,14 @@ struct LFM2(Movable):
     var gu: DeviceBuffer[DType.float32]
     var act: DeviceBuffer[DType.float32]
     var logits: DeviceBuffer[DType.float32]
+    var tap_on: Bool  # prefill and verify keep the TAPS layers' rows in `taps` (for the drafter)
+    var taps: DeviceBuffer[DType.float32]  # [PMAX, 5 D]
+    var vbx: Dict[Int, DeviceBuffer[DType.float32]]  # verify: each conv layer's B x rows [MR, D]
+    var vlog: DeviceBuffer[DType.float32]  # verify: logits rows [MR, V]
+    var vt: DeviceBuffer[DType.int32]  # verify: each row's argmax
+    var head8: Bool  # few-row heads read the int8 copy (build_head8)
+    var hq8: DeviceBuffer[DType.uint32]  # the head as int8, 4 a word
+    var hs16: DeviceBuffer[DType.float32]  # its scale per 16
     var dump: String  # prefill: append each layer's residual stream rows (fp32) to this file (stage checks)
     var wide: Bool  # decode: int4 rows a block of 32 (16 bytes) a lane a step (LFM2_GEMV=word: a word a lane)
     var prof: Bool  # step(): wait after each launch and add its time to times[kind] (LFM2_PROFILE)
@@ -107,6 +117,18 @@ struct LFM2(Movable):
         self.act = ctx.enqueue_create_buffer[DType.float32](PMAX * self.F)
         self.logits = ctx.enqueue_create_buffer[DType.float32](self.V)
         self.dump = ""
+        self.tap_on = False
+        self.taps = ctx.enqueue_create_buffer[DType.float32](PMAX * 5 * D)
+        self.vbx = Dict[Int, DeviceBuffer[DType.float32]]()
+        for l in range(self.L):
+            if not self.attn[l]:
+                self.vbx[l] = ctx.enqueue_create_buffer[DType.float32](dsk.MR * D)
+        self.vlog = ctx.enqueue_create_buffer[DType.float32](dsk.MR * self.V)
+        self.vt = ctx.enqueue_create_buffer[DType.int32](16)
+        self.head8 = False
+        self.hq8 = ctx.enqueue_create_buffer[DType.uint32](1)
+        self.hs16 = ctx.enqueue_create_buffer[DType.float32](1)
+        self.taps.enqueue_fill(0)
         self.prof = False
         self.wide = True
         self.times = Dict[String, Float64]()
@@ -235,6 +257,136 @@ struct LFM2(Movable):
         self.times[kind] = self.times.get(kind, 0.0) + (t - self.mark)
         self.mark = t
 
+    def tap(self, l: Int, count: Int) raises:
+        """If l is one of the drafter's TAPS and tapping is on: its residual stream rows into taps."""
+        if not self.tap_on:
+            return
+        comptime for k in range(5):
+            if l == TAPS[k]:
+                self.ctx.enqueue_function[dsk.copy_tap](self.x, self.taps, Int32(k), Int32(count), Int32(self.D),
+                                                        grid_dim=groups(count * self.D, 64), block_dim=64)
+
+    def rows(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], cols: Int, n: Int,
+             count: Int) raises:
+        """y[count, n] = x[count, cols] W^T for up to MR rows, the int4 matrix read once (verify)."""
+        var wq = self.words[name + ".q"]
+        var ws = self.halves[name + ".s"]
+        var a = (Int32(cols), Int32(n), Int32(count))
+        if count <= 4:
+            self.ctx.enqueue_function[dsk.rows_q4[1]](wq, ws, x, y, a[0], a[1], a[2], grid_dim=n // dsk.TR,
+                                                      block_dim=64)
+        elif count <= 8:
+            self.ctx.enqueue_function[dsk.rows_q4[2]](wq, ws, x, y, a[0], a[1], a[2], grid_dim=n // dsk.TR,
+                                                      block_dim=64)
+        else:
+            self.ctx.enqueue_function[dsk.rows_q4[3]](wq, ws, x, y, a[0], a[1], a[2], grid_dim=n // dsk.TR,
+                                                      block_dim=64)
+
+    def build_head8(mut self) raises:
+        """An int8 copy of the Q6_K head (the same weights, 0.33 GB) for the few-row heads of a speculative step."""
+        var D = self.D
+        self.hq8 = self.ctx.enqueue_create_buffer[DType.uint32](self.V * D // 4)
+        self.hs16 = self.ctx.enqueue_create_buffer[DType.float32](self.V * D // 16)
+        self.ctx.enqueue_function[dsk.q6_to_q8](self.words["embed.q"], self.halves["embed.d"], self.hq8, self.hs16,
+                                                Int32(D), Int32(self.V), grid_dim=groups(self.V * D // 16, 64),
+                                                block_dim=64)
+        self.ctx.synchronize()
+        self.head8 = True
+
+    def head_rows(self, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], count: Int) raises:
+        """The tied head's logits of x's first `count` rows (up to MR) into y [count, V]."""
+        if self.head8:
+            var a8 = (Int32(self.D), Int32(self.V), Int32(count))
+            var g8 = self.V // dsk.TR
+            if count <= 4:
+                self.ctx.enqueue_function[dsk.head_q8_rows[1]](self.hq8, self.hs16, x, y, a8[0], a8[1], a8[2],
+                                                               grid_dim=g8, block_dim=64)
+            elif count <= 8:
+                self.ctx.enqueue_function[dsk.head_q8_rows[2]](self.hq8, self.hs16, x, y, a8[0], a8[1], a8[2],
+                                                               grid_dim=g8, block_dim=64)
+            else:
+                self.ctx.enqueue_function[dsk.head_q8_rows[3]](self.hq8, self.hs16, x, y, a8[0], a8[1], a8[2],
+                                                               grid_dim=g8, block_dim=64)
+            return
+        var wq = self.words["embed.q"]
+        var wd = self.halves["embed.d"]
+        var a = (Int32(self.D), Int32(self.V), Int32(count))
+        var grid = self.V // dsk.TR
+        if count <= 4:
+            self.ctx.enqueue_function[dsk.head_q6_rows[1]](wq, wd, x, y, a[0], a[1], a[2], grid_dim=grid, block_dim=64)
+        elif count <= 8:
+            self.ctx.enqueue_function[dsk.head_q6_rows[2]](wq, wd, x, y, a[0], a[1], a[2], grid_dim=grid, block_dim=64)
+        else:
+            self.ctx.enqueue_function[dsk.head_q6_rows[3]](wq, wd, x, y, a[0], a[1], a[2], grid_dim=grid, block_dim=64)
+
+    def verify(mut self, p0: Int, count: Int) raises:
+        """A speculative step's check: the tokens ids[p0 .. p0 + count - 1] (the anchor and the drafts, count <= MR)
+        through the model, as a prefill batch but with the few-row kernels; each row's argmax into vt, each conv
+        layer's B x rows into vbx (dsk.conv_commit keeps those of the accepted rows), the TAPS rows into taps. The
+        conv states are left as they were (commit() sets them); K/V rows past the accepted ones are rewritten later."""
+        var ctx = self.ctx
+        var D = self.D
+        var H = self.H
+        var KVH = self.KVH
+        var c = Int32(count)
+        if not self.q4:
+            raise Error("speculative decoding runs the q4 storage")
+        if self.prof:
+            self.ctx.synchronize()
+            self.mark = Float64(perf_counter_ns()) / 1e6
+        self.embed(p0, count)
+        self.tick("v: embed")
+        for l in range(self.L):
+            var n = "l" + String(l) + "."
+            if self.attn[l]:
+                var w = (H + 2 * KVH) * lk.HD
+                self.rows(n + "qkv", self.xn, self.mix, D, w, count)
+                self.tick("v: qkv")
+                ctx.enqueue_function[lk.qk_norm_rope](self.mix, self.floats[n + "q_norm"], self.floats[n + "k_norm"],
+                                                      self.rope, self.kc[l], self.vc[l], Int32(p0), Int32(H),
+                                                      Int32(KVH), Float32(0.125), grid_dim=Dim(H + 2 * KVH, count),
+                                                      block_dim=64)
+                ctx.enqueue_function[lk.attention](self.mix, self.kc[l], self.vc[l], self.att, Int32(p0), Int32(H),
+                                                   Int32(KVH), grid_dim=Dim(H, count), block_dim=64)
+                self.tick("v: attention")
+                self.rows(n + "o", self.att, self.tmp, H * lk.HD, D, count)
+                self.tick("v: o")
+            else:
+                self.rows(n + "in", self.xn, self.mix, D, 3 * D, count)
+                self.tick("v: in")
+                ctx.enqueue_function[lk.short_conv](self.mix, self.floats[n + "conv"], self.cs[l], self.att,
+                                                    Int32(p0), c, Int32(D), Int32(2), self.vbx[l],
+                                                    grid_dim=groups(count * D, 64), block_dim=64)
+                self.tick("v: conv")
+                self.rows(n + "out", self.att, self.tmp, D, D, count)
+                self.tick("v: out")
+            ctx.enqueue_function[lk.add_norm](self.x, self.tmp, self.floats[n + "ffn_norm"], self.xn, Int32(D),
+                                              Int32(1), grid_dim=count, block_dim=64)
+            self.tick("v: norms")
+            self.rows(n + "gu", self.xn, self.gu, D, 2 * self.F, count)
+            self.tick("v: gu")
+            ctx.enqueue_function[lk.silu_mul](self.gu, self.act, Int32(self.F), c,
+                                              grid_dim=groups(count * self.F, 64), block_dim=64)
+            self.rows(n + "down", self.act, self.tmp, self.F, D, count)
+            self.tick("v: down")
+            ctx.enqueue_function[lk.add_norm](self.x, self.tmp, self.floats[self.next_norm(l)], self.xn, Int32(D),
+                                              Int32(1), grid_dim=count, block_dim=64)
+            self.tap(l, count)
+            self.tick("v: norms")
+        self.head_rows(self.xn, self.vlog, count)
+        self.tick("v: head")
+        ctx.enqueue_function[dsk.argmax_rows](self.vlog, Int32(self.V), self.vt, Int32(0), grid_dim=count,
+                                              block_dim=256)
+        self.tick("v: argmax")
+
+    def commit(self, p0: Int, accepted: Int) raises:
+        """After verify(p0, ..) kept `accepted` drafts: each conv layer's state as after position p0 + accepted."""
+        for l in range(self.L):
+            if not self.attn[l]:
+                self.ctx.enqueue_function[dsk.conv_commit](self.vbx[l], self.cs[l], Int32(p0), Int32(accepted),
+                                                           Int32(self.D), grid_dim=groups(2 * self.D, 64),
+                                                           block_dim=64)
+
     def next_norm(self, l: Int) -> String:
         return "l" + String(l + 1) + ".in_norm" if l + 1 < self.L else "final_norm"
 
@@ -270,7 +422,7 @@ struct LFM2(Movable):
                 self.gemv(n + "in", self.xn, self.mix, D, 3 * D)
                 self.tick("in_proj (conv layers)")
                 ctx.enqueue_function[lk.short_conv](self.mix, self.floats[n + "conv"], self.cs[l], self.att,
-                                                    Int32(pos), Int32(1), Int32(D), Int32(1),
+                                                    Int32(pos), Int32(1), Int32(D), Int32(1), self.att,
                                                     grid_dim=groups(D, 64), block_dim=64)
                 self.tick("short conv")
                 self.gemv(n + "out", self.att, self.tmp, D, D)
@@ -347,7 +499,7 @@ struct LFM2(Movable):
                 self.gemm(n + "in", self.xn, self.mix, 3 * D, D, R)
                 self.tick("p: in_proj")
                 ctx.enqueue_function[lk.short_conv](self.mix, self.floats[n + "conv"], self.cs[l], self.att,
-                                                    Int32(p0), c, Int32(D), Int32(0),
+                                                    Int32(p0), c, Int32(D), Int32(0), self.att,
                                                     grid_dim=groups(count * D, 64), block_dim=64)
                 ctx.enqueue_function[lk.conv_state](self.mix, self.cs[l], Int32(p0), c, Int32(D),
                                                     grid_dim=groups(2 * D, 64), block_dim=64)
@@ -366,6 +518,7 @@ struct LFM2(Movable):
             self.tick("p: down")
             ctx.enqueue_function[lk.add_norm](self.x, self.tmp, self.floats[self.next_norm(l)], self.xn, Int32(D),
                                               Int32(1), grid_dim=count, block_dim=64)
+            self.tap(l, count)
             if self.dump:
                 self.write_rows(out, rows, count)
         if self.dump:

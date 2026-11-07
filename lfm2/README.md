@@ -18,6 +18,9 @@ generates 64 greedy tokens. Times are the phone's own clock, warm (after an unti
 | **GPU+NPU**: prefill on the Hexagon NPU (HTP), decode on the Adreno 840 | NPU: int8 w8a16 + fp16 down projections, 3.4 GB; GPU: Q4_0 | **199 ms (2,084 tokens/s)**; + 81 ms handoff | **27.5 ms/token** | 64 of 64 (KL 2.5e-4) | 61 of 64, KL 0.060 |
 | **All-NPU**: Hexagon NPU (HTP) | w8a16 + fp16 down projections, 3.4 GB | **198 ms (2,096 tokens/s)**; + 2.47 s handoff | **53.6 ms/token** | 63 of 64 (KL 3.8e-4) | 62 of 64, KL 0.068 |
 
+With Liquid AI's DSpark drafter (speculative decoding, [below](#speculative-decoding-with-dspark)), the GPU decodes the
+same 64 tokens at **19.9 ms a token (50.2 tokens/s), 1.38× faster** than its plain 27.5.
+
 - **Exact on its weights.** Both GPU configurations reproduce transformers' own LFM2 layers running the same
   weights. Every layer's residual stream matches to 4e-6 (relative), and the logits to 1e-4 at every checked
   position over a range of -19 … 37. All 64 tokens are the reference's argmax ([Checks](#checks)).
@@ -169,6 +172,79 @@ with a 2-D view only around each projection. The prompt now takes 199 ms (`../ev
 shapes on the X Elite's HTP). Compiling the 5 prefill parts takes 4 minutes, and the decode parts and the head
 1 minute, once. Loading the prefill contexts takes 3.1–3.4 s per process.
 
+## Speculative decoding with DSpark
+
+[`LiquidAI/LFM2.5-2.6B-DSpark`](https://huggingface.co/LiquidAI/LFM2.5-2.6B-DSpark) (revision `458cedab`, license
+`lfm1.0`, not gated) is Liquid AI's drafter for this model: 327.7M parameters in bf16, 655 MB, which the phone downloads
+itself (SHA-256 `a464fec8…`) and reads in place. With it the GPU decodes the same tokens 1.38× faster. Three runs of
+each, interleaved, each after the phone had been idle 20 s, and no other process on it during the run:
+
+| | Plain greedy decode (GPU optimized) | With the DSpark drafter |
+|---|---|---|
+| Decode, 64 tokens after the 415-token prompt | 27.52, 27.77, 27.53 ms/token (36.3 tokens/s) | **19.92, 19.90, 19.91 ms/token (50.2 tokens/s)** |
+| Target passes | 63 | 14 (4.5 tokens a pass) |
+| Prompt | 1.30 s | 1.39 s (+85 ms: the drafter's context of the 415 rows) |
+| GPU memory | 1.59 GB | + 0.68 GB drafter, + 0.33 GB an int8 copy of the head |
+| Tokens | 64 | the same 64, in all six runs |
+
+**How it works**, from SGLang's implementation (sgl-project/sglang#31041: `models/dspark.py`, `models/dflash.py`,
+`speculative/dspark_components`); `dspark_ref.py` is the same in PyTorch:
+- **Context.** The drafter reads the target's residual stream after layers 2, 9, 17, 21 and 27 (5 × 2048 values a
+  position), projects it (`fc`, 10240 → 2048, then an RMSNorm) and keeps, in each of its 5 attention layers, the K
+  (k_norm, then RoPE on interleaved pairs, θ 10⁷) and V of every committed position.
+- **A draft.** The anchor (the target's newest token, not yet through the target) and 8 mask tokens (id 125017), at
+  positions p … p + 8, go through the drafter's layers, attending to its context and to the whole block (not causal).
+  Row j's final hidden state through the target's tied head gives base logits for position p + j + 1. The Markov
+  head adds W₂ W₁[previous token] (rank 256) for the anchor, then each draft in turn, and greedy picks d_j.
+- **The check.** The target runs the anchor and the drafts as one batch (`model.verify`). A draft is accepted while
+  it equals the target's argmax at its position, and the target's argmax after the last accepted one is the next
+  anchor. So the output is exactly greedy decode's. The conv layers' states are rewound to the last accepted position
+  from the B ⊙ x values the pass kept (`dsk.conv_commit`); K/V rows past it are overwritten later. The accepted rows'
+  taps go into the drafter's context.
+- **7 drafts a step** (`LFM2_DSPARK_DRAFTS`, up to 9). The block is always 9 rows, as the drafter was trained, but only 7
+  go through the head, the Markov steps and the check. That makes the check 8 rows, which fits the cheaper 2-slot
+  products below. On this prompt it still takes 14 passes.
+
+**Checks.** `dspark_ref.py --simulate` drafts at every anchor along a recorded greedy run (one target pass gives every
+position's taps): 0, 1, 1, 6, 4, 5, 8, 5, 2, 3, 3, 6, 5 drafts accepted (4.57 tokens a pass). The phone's drafter, with
+9 drafts a step, accepted exactly those counts at each of those 13 steps, and its output was greedy decode's 64
+tokens.
+
+**Products for a few rows.** A check multiplies every weight by 8 rows instead of 1. Each design was timed alone on
+gate/up's shape (21504 × 2048, int4 Q4_0, random weights, 8 rows; `bench_rows.mojo`):
+
+| Design | ms | |
+|---|---|---|
+| decode's matrix-vector kernel, 1 row | 0.38 | 66 GB/s: the memory's rate |
+| cooperative matrices, weights as M (64) and rows as N (16) | 2.35 | each lane unpacks its weights into shared memory for an N of only 16: staging alone took 2.0 ms |
+| a lane a weight row, x by broadcast loads | 2.55 | row-strided weight loads: 1.95 ms even for 1 row |
+| 64 lanes across k, 2 weight rows a workgroup | 1.42 | x re-read from cache for every 2 rows |
+| **8 weight rows a workgroup; 4 groups of 16 lanes split x's rows; FMA chains** (`dsk.rows_q4`) | **0.69** (2 x slots, ≤ 8 rows), 0.83 (3 slots, ≤ 12) | each x element loaded once a workgroup, each weight unpacked once a group |
+
+Holding more in registers (16 weight rows, or 2 groups with 5 x rows each) was slower. The head's few-row product reads
+an int8 copy of the Q6_K head (`dsk.q6_to_q8`: q − 32 and the fp32 scale d·sc per 16, the same weights), as Q6_K's
+unpacking cost more than its bytes: 7.7 ms a call against 10.5.
+
+Where a step goes (`LFM2_PROFILE=verify`: a wait after each launch, about 0.2 ms each, so the parts add up to more than
+a normal step's 89.6 ms):
+
+| Draft | ms | Check (8 rows) | ms |
+|---|---|---|---|
+| the 5 layers' products (bf16) | 13.1 | int4 products (gate/up 27.5, down 19.9, in_proj 10.2, out_proj 7.2, q/k/v 2.8, o 2.7) | 70.2 |
+| q/k norms, RoPE, attention | 5.7 | residual adds + norms | 16.5 |
+| head (7 rows) | 7.7 | head (8 rows) | 7.7 |
+| 7 Markov steps (each reads W₂, 65 MB) | 10.0 | short convolutions, attention | 10.8 |
+| **all** | **38.7** | **all** | **106.1** |
+
+```bash
+build/vla/venv/bin/python lfm2/dspark_ref.py --export         # build/lfm2/dspark/manifest.txt, from model.safetensors there
+lfm2/stage_phone.sh gpu dspark                                 # the phone downloads the GGUF and the drafter
+D=/data/local/tmp/lfm2
+adb shell "cd $D; LD_LIBRARY_PATH=$D/lfm2 MODULAR_DRIVER_PLUGINS=vulkan@$D/lfm2/libM_driver_vulkan.so LFM2_PREFILL=1 LFM2_WARM=1 LFM2_DSPARK=$D/dspark ./lfm2/lfm2 $D/q4 $D/q4/lfm2_q4.bin 64 @$D/runs/ids_long.txt"
+build/vla/venv/bin/python lfm2/dspark_ref.py --simulate build/lfm2/runs/q4_long_prefill.json   # acceptance, on the Mac
+python3 android/build.py lfm2bench                             # bench_rows: the few-row products above
+```
+
 ## Checks
 
 `reference.py` runs transformers' own LFM2 one decoder layer at a time in fp32:
@@ -248,6 +324,11 @@ $PY lfm2/fp32_check.py                                                      # ev
   not build (`../npu`), and per-channel int4 is far coarser than Q4_0.
 - **One set of NPU weights** for the prefill and decode graphs (QNN weight sharing) would remove all-NPU's 2.5 s
   handoff.
+- **A cheaper DSpark step.**
+  - The 7 Markov steps read the 65 MB W₂ in bf16 each time, and the drafter's layers are bf16 too. int8 copies would
+    halve both, but the drafts would then differ slightly from the reference.
+  - The confidence head (unused here) could pick each step's number of drafts.
+  - The down projection's few-row product runs only 256 workgroups. Splitting k would raise that.
 
 ## Files
 
@@ -259,11 +340,16 @@ $PY lfm2/fp32_check.py                                                      # ev
 | `export.py` | the q4, f16 and npu files' layouts (`recipe.txt`, `manifest.txt`) and the RoPE table |
 | `convert.c` | the GGUF to those files, on the phone or the Mac (the same bytes) |
 | `kernels/lk.mojo` | the GPU kernels: int4 / fp16 / Q6_K matrix-vector products, short convolution, q/k norms + RoPE, attention, norms, prefill products |
-| `model.mojo`, `lfm2.mojo` | the model (`step`, `prefill`) and the program |
+| `model.mojo`, `lfm2.mojo` | the model (`step`, `prefill`, `verify`) and the program (`LFM2_DSPARK`: speculative decoding) |
 | `run.py` | tokenize, run a configuration on the phone, check against the reference |
 | `export_npu.py` | calibration, the NPU graphs, their CPU check |
 | `npu_lfm2.cpp` | the NPU side: prefill, handoff, decode (`lfm2_npu` with `-DLFM2_NPU_MAIN`) |
 | `hybrid.mojo` | NPU prefill, GPU decode |
 | `compile_npu.sh` | compile the graphs on the phone |
 | `fp32_check.py` | every run against the fp32 model |
+| `dspark_ref.py` | the DSpark drafter in PyTorch (from SGLang's implementation); `--simulate` acceptance along a recorded run, `--export` its manifest |
+| `dspark.mojo` | the drafter on the GPU: context cache from the target's taps, the block, the head and the Markov steps |
+| `kernels/dsk.mojo` | speculative decoding's kernels: few-row int4 / bf16 / head products, the drafter's attention, Markov steps, conv-state rewind |
+| `bench_rows.mojo` | the few-row products against the designs they replaced |
+| `stage_phone.sh` | re-stage a wiped lab phone: the phone downloads the GGUF (and the drafter) and converts |
 | `prompts/long.txt` | the 415-token prompt |
