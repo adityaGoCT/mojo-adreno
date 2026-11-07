@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LIBERO live run</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #e3e1dc;
+    --ok: #1f7a4d; --bad: #b3261e; --accent: #2b59c3; --bar: #e9e7e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1f1f1d; --ink: #ecebe7; --muted: #a09e98; --line: #34332f;
+            --ok: #52c08a; --bad: #f2867c; --accent: #8fb0ff; --bar: #2c2b28; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .cams { width: 100%; aspect-ratio: 2 / 1; border-radius: 6px; background: #000; display: block; object-fit: contain; }
+  .labels { display: flex; justify-content: space-around; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .instr { font-size: 16px; font-weight: 600; margin: 12px 0 4px; }
+  .bar { height: 8px; background: var(--bar); border-radius: 4px; overflow: hidden; margin: 8px 0 4px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .row { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .stat:last-child { border-bottom: 0; }
+  .stat b { font-variant-numeric: tabular-nums; }
+  .big { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .state { display: inline-block; padding: 2px 8px; border-radius: 10px; background: var(--bar); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; }
+  .ok { color: var(--ok); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; }
+  a { color: var(--accent); cursor: pointer; }
+  video { width: 100%; border-radius: 6px; margin-top: 10px; display: none; background: #000; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LIBERO, closed loop</h1>
+  <div class="sub" id="sub">Simulator on the Mac · policy on the laptop</div>
+  <div class="grid">
+    <section class="panel">
+      <img class="cams" id="cams" alt="the agent-view and wrist cameras">
+      <div class="labels"><span>agent view</span><span>wrist camera</span></div>
+      <div class="instr" id="instr">waiting for the first task…</div>
+      <div class="bar"><div id="prog"></div></div>
+      <div class="row"><span id="steps">step 0</span><span id="state" class="state">starting</span></div>
+      <video id="vid" controls muted playsinline></video>
+    </section>
+    <section class="panel">
+      <div class="row">success so far</div>
+      <div class="big" id="score">0 / 0</div>
+      <div class="stat"><span>policy</span><b id="model">TurboVLA</b></div>
+      <div class="stat"><span>runs on</span><b id="backend">laptop NPU</b></div>
+      <div class="stat"><span>suite · task</span><b id="task">–</b></div>
+      <div class="stat"><span>episode · chunk</span><b id="ep">–</b></div>
+      <div class="stat"><span>NPU time per chunk</span><b id="npu">–</b></div>
+      <div class="stat"><span>round trip per chunk</span><b id="rt">–</b></div>
+    </section>
+  </div>
+  <section class="panel" style="margin-top:16px">
+    <div class="row">episodes</div>
+    <table>
+      <thead><tr><th>task</th><th>instruction</th><th>ep</th><th>result</th><th>steps</th><th>chunks</th><th>NPU ms</th><th>round trip ms</th><th>video</th></tr></thead>
+      <tbody id="eps"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let seen = 0;
+  async function tick() {
+    try {
+      const s = await (await fetch("status.json?" + Date.now())).json();
+      $("cams").src = "live.jpg?" + Date.now();
+      $("model").textContent = s.model || "";
+      $("backend").textContent = s.backend || "";
+      $("sub").textContent = "Simulator (MuJoCo, robosuite) on the Mac · policy on the " + (s.backend || "");
+      $("instr").textContent = s.instruction || "waiting for the first task…";
+      $("state").textContent = s.state || "";
+      $("task").textContent = (s.suite || "") + " · " + (s.task_id ?? "–");
+      $("ep").textContent = (s.episode ?? "–") + " · " + (s.chunk ?? "–");
+      $("npu").textContent = s.npu_ms ? s.npu_ms.toFixed(1) + " ms" : "–";
+      $("rt").textContent = s.round_trip_ms ? s.round_trip_ms.toFixed(0) + " ms" : "–";
+      const st = s.step || 0, mx = s.max_steps || 1;
+      $("prog").style.width = Math.min(100, 100 * st / mx) + "%";
+      $("steps").textContent = "step " + st + " of at most " + mx;
+      const eps = s.episodes || [];
+      $("score").textContent = eps.filter(e => e.success).length + " / " + eps.length;
+      if (eps.length !== seen) {
+        seen = eps.length;
+        $("eps").innerHTML = eps.map((e, i) => `<tr><td>${e.task_id}</td><td>${e.instruction}</td><td>${e.episode}</td>
+          <td class="${e.success ? "ok" : "bad"}">${e.success ? "success" : "failure"}</td><td>${e.steps}</td>
+          <td>${e.chunks}</td><td>${e.npu_ms}</td><td>${e.round_trip_ms}</td>
+          <td><a data-v="${e.video}">play</a></td></tr>`).reverse().join("");
+        document.querySelectorAll("a[data-v]").forEach(a => a.onclick = () => {
+          const v = $("vid"); v.src = a.dataset.v; v.style.display = "block"; v.play(); });
+      }
+    } catch (e) { /* the run has not written status.json yet */ }
+  }
+  setInterval(tick, 300);
+  tick();
+</script>
+</body>
+</html>

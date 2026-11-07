@@ -10,9 +10,12 @@
 //   graph_tool chain <runs> <context.onnx> <inputs...> [+ <context.onnx> <inputs...>]... [-o <dir>]
 //                                                           graphs back to back, timed end to end; an input @g:i is
 //                                                           graph g's output i (the same host buffer)
+//   graph_tool serve <port> <context.onnx> <inputs or ->... [+ ...]...
+//                                                           a chain kept open for a TCP client (see serve())
 // Environment: NPU_LOG=v (ONNX Runtime's verbose log), NPU_FALLBACK=1 (allow nodes on the CPU; otherwise every node
 // must run on the HTP), NPU_OPT=<0..3> (QNN's graph finalization optimization mode, default 3), NPU_FILE_MAP=1
-// (ONNX Runtime's file-mapped weights; off by default, see options()).
+// (ONNX Runtime's file-mapped weights; off by default, see options()), NPU_PROFILE=basic|detailed|optrace (QNN's
+// profile, as CSV to NPU_PROFILE_FILE).
 //
 // Built for Windows on ARM (the Snapdragon X2 Elite laptop) by npu/build_win.sh, and for Android by npu/build.py.
 #include "graph.h"
@@ -108,6 +111,13 @@ Ort::SessionOptions options(const std::string& ctx_out) {
   // File-mapped weights: where the HTP lacks them (the X1 Elite's V73), ONNX Runtime 1.24.4's fallback reads a large
   // context binary out of bounds (an access violation in memcpy); off unless NPU_FILE_MAP=1.
   if (!getenv("NPU_FILE_MAP")) qnn["disable_file_mapped_weights"] = "1";
+  // NPU_PROFILE=basic|detailed|optrace: QNN's profile of each run (per op with detailed), as CSV to NPU_PROFILE_FILE
+  // (default qnn_profile.csv in the working directory).
+  if (const char* prof = getenv("NPU_PROFILE")) {
+    qnn["profiling_level"] = prof;
+    const char* f = getenv("NPU_PROFILE_FILE");
+    qnn["profiling_file_path"] = f ? f : "qnn_profile.csv";
+  }
   so.AppendExecutionProvider("QNN", qnn);
   if (!getenv("NPU_FALLBACK")) so.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   if (!ctx_out.empty()) {
@@ -368,8 +378,192 @@ static int chain(int argc, char** argv) {
   return 0;
 }
 
+// graph_tool serve <port> <context.onnx> <inputs...> [+ <context.onnx> <inputs...>]...
+// A chain (as chain's arguments) kept open for a client on 127.0.0.1:<port> (through ssh -L from another machine), one
+// client at a time. An input is a file (its initial content), @g:i (graph g's output i) or - (zeros until set). Every
+// input that is not an @ reference is a slot, numbered in chain order. Requests, little-endian:
+//   SET  {u32 1, u32 slot, u32 format, u32 0, u64 n} + n bytes   the slot's content: format 0 the graph's own type
+//                                                                (fp32 or int32), 1 fp16 for an fp32 input; answer
+//                                                                {i32 status, u32 0, f64 0}
+//   RUN  {u32 2, u32 0, u32 0, u32 0, u64 0}                     the chain once; answer {i32 status, u32 n, f64 ms}
+//                                                                + n bytes: the last graph's outputs (fp32), in order
+// A failed request answers status 1 with the message as its n bytes. The client sends RUN after its SETs; inputs
+// keep their content between runs (an instruction's tensors are set once).
+#ifdef _WIN32
+#include <winsock2.h>
+typedef SOCKET sock_t;
+#define CLOSESOCK closesocket
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+typedef int sock_t;
+#define CLOSESOCK close
+#define INVALID_SOCKET (-1)
+#endif
+
+static bool io_all(sock_t c, void* data, size_t n, bool out) {
+  char* p = (char*)data;
+  while (n) {
+    int k = out ? send(c, p, n > (1u << 30) ? (1 << 30) : (int)n, 0) : recv(c, p, n > (1u << 30) ? (1 << 30) : (int)n, 0);
+    if (k <= 0) return false;
+    p += k;
+    n -= (size_t)k;
+  }
+  return true;
+}
+
+static float f16_to_f32(uint16_t h) {
+  uint32_t sign = (uint32_t)(h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+  if (e == 0) {
+    if (m == 0) bits = sign;
+    else {  // subnormal: normalize
+      e = 127 - 15 + 1;
+      while (!(m & 0x400)) { m <<= 1; e--; }
+      bits = sign | (e << 23) | ((m & 0x3ff) << 13);
+    }
+  } else if (e == 31) bits = sign | 0x7f800000 | (m << 13);
+  else bits = sign | ((e + 127 - 15) << 23) | (m << 13);
+  float f;
+  memcpy(&f, &bits, 4);
+  return f;
+}
+
+static int serve(int argc, char** argv) {
+  int port = atoi(argv[2]);
+  struct Step {
+    int h;
+    std::vector<std::string> args;
+  };
+  std::vector<Step> steps;
+  for (int a = 3; a < argc; a++) {
+    std::string s = argv[a];
+    if (s == "+" || steps.empty()) {
+      if (s == "+") s = argv[++a];
+      double ms = 0;
+      int h = npug_open(s.c_str(), &ms);
+      if (h < 0) return 1;
+      printf("graph %zu: %s opened in %.1f ms\n", steps.size(), s.c_str(), ms);
+      steps.push_back({h, {}});
+    } else {
+      steps.back().args.push_back(s);
+    }
+  }
+  std::vector<std::vector<std::vector<float>>> out(steps.size());
+  std::vector<std::vector<std::vector<char>>> slots_in(steps.size());  // each step's own input buffers
+  std::vector<std::vector<const void*>> ip(steps.size());
+  std::vector<std::vector<float*>> op(steps.size());
+  struct Slot {
+    std::vector<char>* buf;
+    bool fp32;
+  };
+  std::vector<Slot> slots;
+  for (size_t g = 0; g < steps.size(); g++) {
+    int h = steps[g].h;
+    out[g].resize(npug_count(h, 1));
+    for (int i = 0; i < int(out[g].size()); i++) {
+      out[g][i].resize(npug_numel(h, 1, i));
+      op[g].push_back(out[g][i].data());
+    }
+    if (int(steps[g].args.size()) != npug_count(h, 0))
+      return fail("graph " + std::to_string(g) + " needs " + std::to_string(npug_count(h, 0)) + " inputs"), 1;
+    slots_in[g].reserve(steps[g].args.size());
+    for (int i = 0; i < int(steps[g].args.size()); i++) {
+      auto& s = steps[g].args[i];
+      int64_t bytes = npug_numel(h, 0, i) * 4;
+      if (s[0] == '@') {
+        size_t c = s.find(':');
+        int src = atoi(s.substr(1, c - 1).c_str()), k = atoi(s.substr(c + 1).c_str());
+        if (src < 0 || src >= int(g) || k < 0 || k >= int(out[src].size())) return fail("bad reference " + s), 1;
+        ip[g].push_back(out[src][k].data());
+        continue;
+      }
+      slots_in[g].push_back(s == "-" ? std::vector<char>(bytes, 0) : read_file(s));
+      auto& b = slots_in[g].back();
+      if (int64_t(b.size()) != bytes)
+        return fail("graph " + std::to_string(g) + " input " + std::to_string(i) + ": " + std::to_string(b.size()) +
+                    " bytes, want " + std::to_string(bytes)), 1;
+      ip[g].push_back(b.data());
+      slots.push_back({&b, graphs[h]->in_types[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT});
+      printf("slot %zu: graph %zu input %d (%s), %lld bytes\n", slots.size() - 1, g, i, graphs[h]->in_names[i].c_str(),
+             (long long)bytes);
+    }
+  }
+#ifdef _WIN32
+  WSADATA wsa;
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+  sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof one);
+  sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(s, (sockaddr*)&addr, sizeof addr) || listen(s, 1)) return fail("serve: cannot listen on the port"), 1;
+  printf("serving on 127.0.0.1:%d\n", port);
+  std::vector<char> payload, reply;
+  for (;;) {
+    sock_t c = accept(s, NULL, NULL);
+    if (c == INVALID_SOCKET) continue;
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
+    printf("client connected\n");
+    uint32_t hdr[6];  // op, slot, format, 0, n (u64)
+    while (io_all(c, hdr, sizeof hdr, false)) {
+      uint64_t n;
+      memcpy(&n, hdr + 4, 8);
+      payload.resize(n);
+      if (n && !io_all(c, payload.data(), n, false)) break;
+      int32_t status = 0;
+      uint32_t rn = 0;
+      double ms = 0;
+      std::string msg;
+      reply.clear();
+      if (hdr[0] == 1) {
+        if (hdr[1] >= slots.size()) msg = "no such slot";
+        else {
+          auto& sl = slots[hdr[1]];
+          if (hdr[2] == 1 && sl.fp32 && n * 2 == sl.buf->size()) {
+            const uint16_t* hp = (const uint16_t*)payload.data();
+            float* fp = (float*)sl.buf->data();
+            for (uint64_t i = 0; i < n / 2; i++) fp[i] = f16_to_f32(hp[i]);
+          } else if (hdr[2] == 0 && n == sl.buf->size()) {
+            memcpy(sl.buf->data(), payload.data(), n);
+          } else {
+            msg = "slot " + std::to_string(hdr[1]) + ": " + std::to_string(n) + " bytes in format " +
+                  std::to_string(hdr[2]) + ", want " + std::to_string(sl.buf->size()) + " (fp32/int32)";
+          }
+        }
+      } else if (hdr[0] == 2) {
+        double t0 = now_ms(), each = 0;
+        for (size_t g = 0; g < steps.size() && msg.empty(); g++)
+          if (npug_run(steps[g].h, ip[g].data(), op[g].data(), &each)) msg = error;
+        ms = now_ms() - t0;
+        if (msg.empty())
+          for (auto& o : out.back()) reply.insert(reply.end(), (char*)o.data(), (char*)(o.data() + o.size()));
+      } else {
+        msg = "unknown request";
+      }
+      if (!msg.empty()) {
+        status = 1;
+        reply.assign(msg.begin(), msg.end());
+      }
+      rn = (uint32_t)reply.size();
+      char head[16];
+      memcpy(head, &status, 4);
+      memcpy(head + 4, &rn, 4);
+      memcpy(head + 8, &ms, 8);
+      if (!io_all(c, head, 16, true) || (rn && !io_all(c, reply.data(), rn, true))) break;
+    }
+    CLOSESOCK(c);
+    printf("client left\n");
+  }
+}
+
 static int tool(int argc, char** argv) {
   if (argc >= 4 && std::string(argv[1]) == "chain") return chain(argc, argv);
+  if (argc >= 4 && std::string(argv[1]) == "serve") return serve(argc, argv);
   if (argc == 4 && std::string(argv[1]) == "compile") {
     double ms = 0;
     if (npug_compile(argv[2], argv[3], &ms)) return 1;
@@ -379,7 +573,7 @@ static int tool(int argc, char** argv) {
   if (argc < 4 || std::string(argv[1]) != "run") {
     fprintf(stderr, "usage: graph_tool compile <model.onnx> <context.onnx> | run <context.onnx> <runs> <inputs...> "
                     "[-o <dir>] | chain <runs> <context.onnx> <inputs...> [+ <context.onnx> <inputs...>]... "
-                    "[-o <dir>]\n");
+                    "[-o <dir>] | serve <port> <context.onnx> <inputs or -...> [+ ...]...\n");
     return 2;
   }
   double ms = 0;
