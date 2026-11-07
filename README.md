@@ -38,9 +38,9 @@ ternary kernels plus seven small Mojo kernels: 25 tokens/s, all 16 checked steps
 attention layers, from its quantization-aware-distilled Q4_0 GGUF, in four configurations on a Galaxy Z Fold, each
 checked against transformers' LFM2 layers and the fp32 checkpoint. A 415-token prompt and 64 tokens:
 - GPU, fp16 weights, no matrix units: 57 tokens/s prefill and 86.7 ms a token.
-- GPU, int4 with prefill on the matrix units: 319 tokens/s and 31.2 ms (logits within 1.1e-4 of transformers on the
+- GPU, int4 with prefill on the matrix units: 319 tokens/s and 27.5 ms (logits within 1.1e-4 of transformers on the
   same weights).
-- Prefill on the Hexagon NPU, decode on the GPU: 2,082 tokens/s and 31.7 ms.
+- Prefill on the Hexagon NPU, decode on the GPU: 2,084 tokens/s and 27.5 ms.
 - All on the NPU: 2,096 tokens/s and 53.6 ms.
 
 Against fp32, every row stays within 0.01 of KL of the int4 model itself.

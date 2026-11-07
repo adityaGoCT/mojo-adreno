@@ -53,6 +53,26 @@ def dot_q4(wq: U32, ws: F16, row: Int, cols: Int, x: F32, t: Int) -> Float32:
 
 
 @always_inline
+def dot_q4b(wq: U32, ws: F16, row: Int, cols: Int, x: F32, t: Int) -> Float32:
+    """dot_q4 a block of 32 weights (4 words, one scale) a lane a step: one 16-byte load of W and one scale."""
+    var blocks = cols // G
+    var acc = Float32(0)
+    var wr = wq + row * (cols // 8)
+    for i in range((blocks + 63) // 64):
+        var b = i * 64 + t
+        if b < blocks:
+            var w4 = wr.load[width=4](b * 4)
+            var part = Float32(0)
+            comptime for k in range(4):
+                var xv = x.load[width=8](b * 32 + k * 8)
+                comptime for j in range(8):
+                    var q = Int32((w4[k] >> UInt32(4 * j)) & 15) ^ 8
+                    part += Float32(q - 8) * xv[j]
+            acc += part * ws[row * blocks + b].cast[DType.float32]()
+    return acc
+
+
+@always_inline
 def dot_h(w: F16, row: Int, cols: Int, x: F32, t: Int) -> Float32:
     """Lane t's share of W[row] . x, W fp16: 8 weights a lane a step."""
     var chunks = cols // 8
@@ -111,10 +131,14 @@ def q6_chunk[DEQ: Bool](wq: U32, wd: F16, row: Int, cols: Int, c: Int, x: F32, y
 # ---- matrix-vector products (decode) ------------------------------------------------------------------------------
 
 
-def gemv_q4(wq: U32, ws: F16, x: F32, y: F32, cols: Int32):
-    """y[r] = W[r] . x, int4 W: a workgroup a row."""
+def gemv_q4[B: Bool = False](wq: U32, ws: F16, x: F32, y: F32, cols: Int32):
+    """y[r] = W[r] . x, int4 W: a workgroup a row (B: dot_q4b's 16-byte loads)."""
     var r = Int(block_idx.x)
-    var s = warp_sum(dot_q4(wq, ws, r, Int(cols), x, Int(thread_idx.x)))
+    var s: Float32
+    comptime if B:
+        s = warp_sum(dot_q4b(wq, ws, r, Int(cols), x, Int(thread_idx.x)))
+    else:
+        s = warp_sum(dot_q4(wq, ws, r, Int(cols), x, Int(thread_idx.x)))
     if thread_idx.x == 0:
         y[r] = s
 
@@ -127,12 +151,18 @@ def gemv_h(w: F16, x: F32, y: F32, cols: Int32):
         y[r] = s
 
 
-def gate_up_q4(wq: U32, ws: F16, x: F32, a: F32, cols: Int32, f: Int32):
+def gate_up_q4[B: Bool = False](wq: U32, ws: F16, x: F32, a: F32, cols: Int32, f: Int32):
     """a[j] = silu(w1[j] . x) * (w3[j] . x): rows j and f + j of the fused gate|up matrix, workgroup j."""
     var j = Int(block_idx.x)
     var t = Int(thread_idx.x)
-    var g = warp_sum(dot_q4(wq, ws, j, Int(cols), x, t))
-    var u = warp_sum(dot_q4(wq, ws, Int(f) + j, Int(cols), x, t))
+    var g: Float32
+    var u: Float32
+    comptime if B:
+        g = warp_sum(dot_q4b(wq, ws, j, Int(cols), x, t))
+        u = warp_sum(dot_q4b(wq, ws, Int(f) + j, Int(cols), x, t))
+    else:
+        g = warp_sum(dot_q4(wq, ws, j, Int(cols), x, t))
+        u = warp_sum(dot_q4(wq, ws, Int(f) + j, Int(cols), x, t))
     if t == 0:
         a[j] = silu(g) * u
 
@@ -450,4 +480,3 @@ def gemm_q4(wq: U32, ws: F16, x: F32, y: F32, n: Int64, k: Int64):
             acc = at.multiply_add(bt, acc)
         barrier()
     acc.store(out, ldy)
-

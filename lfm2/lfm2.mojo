@@ -9,6 +9,8 @@
 #     LFM2_DUMP=<file>      with LFM2_PREFILL: the residual stream after the embedding and after each layer (fp32)
 #     LFM2_WARM=n           run the prompt n times untimed first (the pipelines and clocks warm up)
 #     LFM2_PROFILE=1        decode steps wait after each launch; prints the time per kind of launch (ms a token)
+#     LFM2_PROFILE=prefill  the same for the prompt
+#     LFM2_GEMV=word        int4 decode with a word (8 weights) a lane a step instead of a block of 32 (dot_q4b)
 #
 # Greedy decode; the argmax is the GPU's. Prints "tok <id> <ms>" per generated token and the prompt's and decode's
 # times on the phone's clock.
@@ -59,6 +61,7 @@ def main() raises:
     print("device:", ctx.name())
     var t_load = now_ms()
     var model = LFM2(ctx, String(args[1]), String(args[2]))
+    model.wide = getenv("LFM2_GEMV") != "word"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", storage", "q4" if model.q4 else "f16", ", context", model.CAP)
     var P = len(prompt)
@@ -81,6 +84,7 @@ def main() raises:
 
     model.set_ids(0, prompt)
     model.dump = getenv("LFM2_DUMP")
+    model.prof = getenv("LFM2_PROFILE") == "prefill"
     var t0 = now_ms()
     run_prompt(model, P, prefill)
     ctx.enqueue_copy(tok.unsafe_ptr(), model.ids.create_sub_buffer[DType.int32](P, 1))
@@ -90,7 +94,10 @@ def main() raises:
     print("prompt:", P, "tokens in", round(t_prompt, 1), "ms (", round(Float64(P) * 1000.0 / t_prompt, 1),
           "tokens/s,", "batched prefill )" if prefill else "a token at a time )")
 
-    model.prof = getenv("LFM2_PROFILE") != ""
+    if model.prof:
+        for e in model.times.items():
+            print("profile:", e.key, round(e.value, 1), "ms (the prompt)")
+    model.prof = getenv("LFM2_PROFILE") == "1"
     var gen = 0
     var t_dec = 0.0
     var ms = t_prompt

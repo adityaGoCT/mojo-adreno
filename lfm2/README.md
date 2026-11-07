@@ -14,8 +14,8 @@ generates 64 greedy tokens. Times are the phone's own clock, warm (after an unti
 | Config, device (all on the Galaxy Z Fold SM-F976U) | Weights | Prefill, 415 tokens | Decode | vs the GGUF's int4 model (transformers) | vs fp32 (QAD source): greedy, KL |
 |---|---|---|---|---|---|
 | **GPU baseline**: Adreno 840, Mojo kernels, no matrix units | fp16 (the GGUF dequantized), 5.4 GB | 7.25 s (**57 tokens/s**) | **86.7 ms/token** | logits within 7.4e-5 (same fp16 weights); 64 of 64 tokens | 61 of 64, KL 0.059 |
-| **GPU optimized**: Adreno 840, int4 matrix-vector kernels, prefill on fp32 cooperative matrices | the GGUF's own Q4_0 + Q6_K head, 1.59 GB | 1.30 s (**319 tokens/s**) | **31.2 ms/token** | logits within 1.1e-4; 64 of 64 | 61 of 64, KL 0.059 |
-| **GPU+NPU**: prefill on the Hexagon NPU (HTP), decode on the Adreno 840 | NPU: int8 w8a16 + fp16 down projections, 3.4 GB; GPU: Q4_0 | **199 ms (2,082 tokens/s)**; + 75 ms handoff | **31.7 ms/token** | 64 of 64 (KL 2.5e-4) | 61 of 64, KL 0.060 |
+| **GPU optimized**: Adreno 840, int4 matrix-vector kernels, prefill on fp32 cooperative matrices | the GGUF's own Q4_0 + Q6_K head, 1.59 GB | 1.30 s (**319 tokens/s**) | **27.5 ms/token** | logits within 1.1e-4; 64 of 64 | 61 of 64, KL 0.059 |
+| **GPU+NPU**: prefill on the Hexagon NPU (HTP), decode on the Adreno 840 | NPU: int8 w8a16 + fp16 down projections, 3.4 GB; GPU: Q4_0 | **199 ms (2,084 tokens/s)**; + 81 ms handoff | **27.5 ms/token** | 64 of 64 (KL 2.5e-4) | 61 of 64, KL 0.060 |
 | **All-NPU**: Hexagon NPU (HTP) | w8a16 + fp16 down projections, 3.4 GB | **198 ms (2,096 tokens/s)**; + 2.47 s handoff | **53.6 ms/token** | 63 of 64 (KL 3.8e-4) | 62 of 64, KL 0.068 |
 
 - **Exact on its weights.** Both GPU configurations reproduce transformers' own LFM2 layers running the same
@@ -29,11 +29,11 @@ generates 64 greedy tokens. Times are the phone's own clock, warm (after an unti
   configuration's first difference from fp32 is the answer's first token, where Q4_0 itself differs.
 - **Prefill:** the NPU reads the prompt **6.5× faster** than the GPU's best (199 against 1,300 ms), and 36× faster
   than the baseline.
-- **Decode:** memory-bound everywhere. Each token reads the weights once: 1.59 GB in 31.2 ms on the GPU (51 GB/s),
+- **Decode:** memory-bound everywhere. Each token reads the weights once: 1.59 GB in 27.5 ms on the GPU (58 GB/s),
   5.4 GB of fp16 in 86.7 ms (62 GB/s), and 3.36 GB in 53.6 ms on the NPU (63 GB/s). So the GPU with 4-bit weights
-  decodes 1.7× faster than the NPU, whose fast path needs 8-bit weights.
-- **Handoffs:** GPU+NPU's 75 ms is releasing the NPU's contexts (66 ms) and copying 8 layers' K/V and 22 conv states
-  into the GPU (8 ms). The GPU's weights then load in 1.4 s, not counted, as in `../npu`'s Qwen3 run: the two models
+  decodes 2.0× faster than the NPU, whose fast path needs 8-bit weights.
+- **Handoffs:** GPU+NPU's 81 ms is releasing the NPU's contexts (75 ms) and copying 8 layers' K/V and 22 conv states
+  into the GPU (7 ms). The GPU's weights then load in 1.2 s, not counted, as in `../npu`'s Qwen3 run: the two models
   are not held in memory together. All-NPU's 2.47 s is releasing the prefill contexts and loading the decode
   contexts (3.4 GB each, too much for this 11 GB phone at once).
 
@@ -99,10 +99,14 @@ The row kernels take all rows at once. `short_conv` reads earlier rows of the ba
 from the state, and `conv_state` keeps the last two rows. Attention is one workgroup per head and row.
 
 The int4 prefill reaches 1.55 TFLOP/s (2.02 TFLOP for the 415 rows in 1.30 s), the rate `p_gemm_q4` reaches for
-Llama and Gemma 4. Fetching the next k step into registers during the products (double buffering) gave 1.33 s.
+Llama and Gemma 4. Its products are 1.25 of the 1.39 s that `LFM2_PROFILE=prefill` measures (gate/up 0.64 s, down
+0.36 s), attention 0.07 s. Two tries did not help:
+- fetching the next k step into registers during the products (double buffering): 1.33 s;
+- skipping the 64-row tiles past the prompt (415 rows pad to 512 in 128-row blocks): 1.40 s, as a branch around the
+  products slows every tile more than the skipped rows save.
 
-Where a decode step goes (`LFM2_PROFILE=1`: a wait after each launch, so about 0.2 ms of waiting each; a normal step
-is 31 ms):
+Where a decode step went (`LFM2_PROFILE=1`: a wait after each launch, so about 0.2 ms of waiting each), with the first
+int4 kernels, which read a word (8 weights) a lane a step; a normal step was 31.2 ms:
 
 | Launches | ms a token |
 |---|---|
@@ -115,7 +119,9 @@ is 31 ms):
 | q/k/v, attention + q/k norms + RoPE, o (attention layers) | 2.2, 2.2, 2.0 |
 | **all, each waited for** | **74.3** |
 
-Net of the waits, the int4 matrix-vector kernels read their weights at 46–61 GB/s, and the fp16 ones at 62 GB/s.
+Net of the waits, those int4 matrix-vector kernels read their weights at 46–61 GB/s, where the fp16 ones reach
+62 GB/s. Reading a block of 32 weights (16 bytes and its scale) a lane a step instead (`dot_q4b`, now the default;
+`LFM2_GEMV=word` for the first ones) brought a step from 31.2–32.7 to 27.4–28.9 ms (58 GB/s), with the same results.
 
 ## The NPU
 
@@ -236,8 +242,8 @@ $PY lfm2/fp32_check.py                                                      # ev
 
 - **GPU prefill in fp16.** The int4 products are nearly all of the GPU's prompt time, on fp32 cooperative matrices
   at 1.55 TFLOP/s. The 840's fp16 product is about twice that, but it has fp16 accumulators only.
-- **GPU decode.** The int4 matrix-vector kernels read at 46–61 GB/s, where fp16 reaches 62. Wider loads or several
-  rows a workgroup might close that, about 5 ms a token.
+- **GPU decode.** The int4 matrix-vector kernels read at 58 GB/s, where fp16 reaches 62. Fewer launches (60 of the
+  222 are single-workgroup norms and residual adds) might close part of that.
 - **NPU decode with 4-bit weights** would read half the bytes. On this stack, block-quantized int4 is slow or does
   not build (`../npu`), and per-channel int4 is far coarser than Q4_0.
 - **One set of NPU weights** for the prefill and decode graphs (QNN weight sharing) would remove all-NPU's 2.5 s

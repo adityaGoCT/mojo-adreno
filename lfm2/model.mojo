@@ -49,6 +49,7 @@ struct LFM2(Movable):
     var act: DeviceBuffer[DType.float32]
     var logits: DeviceBuffer[DType.float32]
     var dump: String  # prefill: append each layer's residual stream rows (fp32) to this file (stage checks)
+    var wide: Bool  # decode: int4 rows a block of 32 (16 bytes) a lane a step (LFM2_GEMV=word: a word a lane)
     var prof: Bool  # step(): wait after each launch and add its time to times[kind] (LFM2_PROFILE)
     var times: Dict[String, Float64]
     var mark: Float64
@@ -107,6 +108,7 @@ struct LFM2(Movable):
         self.logits = ctx.enqueue_create_buffer[DType.float32](self.V)
         self.dump = ""
         self.prof = False
+        self.wide = True
         self.times = Dict[String, Float64]()
         self.mark = 0
         self.reset()
@@ -175,9 +177,12 @@ struct LFM2(Movable):
 
     def gemv(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], cols: Int,
              rows: Int) raises:
-        if self.q4:
-            self.ctx.enqueue_function[lk.gemv_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y,
-                                                  Int32(cols), grid_dim=rows, block_dim=64)
+        if self.q4 and self.wide:
+            self.ctx.enqueue_function[lk.gemv_q4[True]](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                        Int32(cols), grid_dim=rows, block_dim=64)
+        elif self.q4:
+            self.ctx.enqueue_function[lk.gemv_q4[False]](self.words[name + ".q"], self.halves[name + ".s"], x, y,
+                                                         Int32(cols), grid_dim=rows, block_dim=64)
         else:
             self.ctx.enqueue_function[lk.gemv_h](self.halves[name + ".h"], x, y, Int32(cols), grid_dim=rows,
                                                  block_dim=64)
@@ -273,10 +278,14 @@ struct LFM2(Movable):
             ctx.enqueue_function[lk.add_norm](self.x, self.tmp, self.floats[n + "ffn_norm"], self.xn, Int32(D),
                                               Int32(1), grid_dim=1, block_dim=64)
             self.tick("residual adds + norms")
-            if self.q4:
-                ctx.enqueue_function[lk.gate_up_q4](self.words[n + "gu.q"], self.halves[n + "gu.s"], self.xn,
-                                                    self.act, Int32(D), Int32(self.F), grid_dim=self.F,
-                                                    block_dim=64)
+            if self.q4 and self.wide:
+                ctx.enqueue_function[lk.gate_up_q4[True]](self.words[n + "gu.q"], self.halves[n + "gu.s"], self.xn,
+                                                          self.act, Int32(D), Int32(self.F), grid_dim=self.F,
+                                                          block_dim=64)
+            elif self.q4:
+                ctx.enqueue_function[lk.gate_up_q4[False]](self.words[n + "gu.q"], self.halves[n + "gu.s"], self.xn,
+                                                           self.act, Int32(D), Int32(self.F), grid_dim=self.F,
+                                                           block_dim=64)
             else:
                 ctx.enqueue_function[lk.gate_up_h](self.halves[n + "gu.h"], self.xn, self.act, Int32(D),
                                                    Int32(self.F), grid_dim=self.F, block_dim=64)
@@ -292,7 +301,7 @@ struct LFM2(Movable):
 
     # ---- the prompt --------------------------------------------------------------------------------------------------
 
-    def prefill(self, p0: Int, count: Int) raises:
+    def prefill(mut self, p0: Int, count: Int) raises:
         """Positions p0 .. p0 + count - 1 (ids set) in batches of up to PMAX rows; the last row's logits and argmax as
         step() leaves them (into ids[p0 + count])."""
         var c0 = 0
@@ -301,14 +310,18 @@ struct LFM2(Movable):
             self.prefill_batch(p0 + c0, c, c0 + c == count)
             c0 += c
 
-    def prefill_batch(self, p0: Int, count: Int, last: Bool) raises:
+    def prefill_batch(mut self, p0: Int, count: Int, last: Bool) raises:
         var ctx = self.ctx
         var D = self.D
         var H = self.H
         var KVH = self.KVH
         var R = groups(count, 128) * 128
         var c = Int32(count)
+        if self.prof:
+            self.ctx.synchronize()
+            self.mark = Float64(perf_counter_ns()) / 1e6
         self.embed(p0, count)
+        self.tick("p: embed + norm")
         var out = FileHandle()
         var rows = List[Float32]()
         if self.dump:
@@ -320,32 +333,44 @@ struct LFM2(Movable):
             if self.attn[l]:
                 var w = (H + 2 * KVH) * lk.HD
                 self.gemm(n + "qkv", self.xn, self.mix, w, D, R)
+                self.tick("p: q/k/v")
                 ctx.enqueue_function[lk.qk_norm_rope](self.mix, self.floats[n + "q_norm"], self.floats[n + "k_norm"],
                                                       self.rope, self.kc[l], self.vc[l], Int32(p0), Int32(H),
                                                       Int32(KVH), Float32(0.125), grid_dim=Dim(H + 2 * KVH, count),
                                                       block_dim=64)
                 ctx.enqueue_function[lk.attention](self.mix, self.kc[l], self.vc[l], self.att, Int32(p0), Int32(H),
                                                    Int32(KVH), grid_dim=Dim(H, count), block_dim=64)
+                self.tick("p: q/k norm, RoPE, attention")
                 self.gemm(n + "o", self.att, self.tmp, D, H * lk.HD, R)
+                self.tick("p: o")
             else:
                 self.gemm(n + "in", self.xn, self.mix, 3 * D, D, R)
+                self.tick("p: in_proj")
                 ctx.enqueue_function[lk.short_conv](self.mix, self.floats[n + "conv"], self.cs[l], self.att,
                                                     Int32(p0), c, Int32(D), Int32(0),
                                                     grid_dim=groups(count * D, 64), block_dim=64)
                 ctx.enqueue_function[lk.conv_state](self.mix, self.cs[l], Int32(p0), c, Int32(D),
                                                     grid_dim=groups(2 * D, 64), block_dim=64)
+                self.tick("p: short conv")
                 self.gemm(n + "out", self.att, self.tmp, D, D, R)
+                self.tick("p: out_proj")
             ctx.enqueue_function[lk.add_norm](self.x, self.tmp, self.floats[n + "ffn_norm"], self.xn, Int32(D),
                                               Int32(1), grid_dim=count, block_dim=64)
+            self.tick("p: adds + norms")
             self.gemm(n + "gu", self.xn, self.gu, 2 * self.F, D, R)
+            self.tick("p: gate/up")
             ctx.enqueue_function[lk.silu_mul](self.gu, self.act, Int32(self.F), c,
                                               grid_dim=groups(count * self.F, 64), block_dim=64)
+            self.tick("p: SiLU product")
             self.gemm(n + "down", self.act, self.tmp, D, self.F, R)
+            self.tick("p: down")
             ctx.enqueue_function[lk.add_norm](self.x, self.tmp, self.floats[self.next_norm(l)], self.xn, Int32(D),
                                               Int32(1), grid_dim=count, block_dim=64)
             if self.dump:
                 self.write_rows(out, rows, count)
         if self.dump:
             out.close()
+        self.tick("p: adds + norms")
         if last:
             self.head(count - 1, p0 + count)
+            self.tick("p: head")
