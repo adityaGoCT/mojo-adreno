@@ -12,6 +12,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py gemma4      # build/android/gemma4/: gemma4/gemma4.mojo (Gemma 4 E2B / E4B), gemma4_convert
   python3 android/build.py lfm2        # build/android/lfm2/: lfm2/lfm2.mojo (LFM2.5-2.6B), lfm2_convert
   python3 android/build.py lfm2bench   # build/android/lfm2bench/: lfm2/bench_rows.mojo (few-row product kernels)
+  python3 android/build.py qwen3_4b    # build/android/qwen3_4b/: qwen3_4b/qwen3_4b.mojo (Qwen3-4B), qwen3_4b_convert
 
 Each program's directory holds everything it needs on the phone: the executable, MAX's runtime
 libraries, NDK libc++ and the driver plugin. Its DeviceContext loads the plugin named in
@@ -201,6 +202,20 @@ def lfm2bench():
     link(out, "bench_rows", [out / "bench_rows.o"])
 
 
+def qwen3_4b():
+    """qwen3_4b/qwen3_4b.mojo: qwen3_4b/model.mojo's forward pass on lfm2's int4 kernels, qwen3's attention kernels,
+    gemma4's prefill attention and qwen3_4b/kernels; and qwen3_4b_convert (qwen3_4b/convert.c), which writes the
+    weight file on the phone from the bf16 checkpoint it downloads."""
+    out = BUILD / "qwen3_4b"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "qwen3_4b/qwen3_4b.mojo", out / "qwen3_4b.o",
+                includes=[ROOT / "qwen3_4b", ROOT / "qwen3_4b/kernels", ROOT / "lfm2/kernels", ROOT / "qwen3/kernels",
+                          ROOT / "gemma4/kernels"])
+    link(out, "qwen3_4b", [out / "qwen3_4b.o"])
+    sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-ffp-contract=off", "-o", out / "qwen3_4b_convert",
+       ROOT / "qwen3_4b/convert.c")
+
+
 def bonsai():
     out = BUILD / "bonsai"
     src = out / "src"
@@ -224,7 +239,8 @@ def bonsai():
 
 def main():
     steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
-             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench}
+             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench,
+             "qwen3_4b": qwen3_4b}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
         if name not in steps:

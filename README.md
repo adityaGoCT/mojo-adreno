@@ -45,6 +45,13 @@ checked against transformers' LFM2 layers and the fp32 checkpoint. A 415-token p
 
 Against fp32, every row stays within 0.01 of KL of the int4 model itself.
 
+**[Qwen3-4B on the Adreno 840](qwen3_4b/README.md)**: Qwen's dense hybrid-thinking 4B. The phone downloads the bf16
+checkpoint and quantizes it in 13 s to Q4_0 projections and a Q6_K tied head (2.36 GB), which LFM2's int4 kernels run
+with qwen3/'s attention kernels and a new chunked decode attention. On a Galaxy Z Fold, a 404-token prompt prefills
+at 178 tokens/s and decodes at 43.2 ms a token. Logits are within 1.6e-4 of transformers on the same weights, and the
+model agrees with bf16 exactly as often as the int4 model itself (62 of 64). Under Pipette's protocol at 1,024 tokens:
+TTFT 4.7 s, 20.9 tokens/s, E2E 18.9 s.
+
 **[Qwen3-30B-A3B (mixture of experts) on a Snapdragon X2 Elite laptop](qwen3moe/README.md)**: 30.5B parameters,
 128 experts with 8 per token, in int4 (15.75 GB, inside the X2-90's 16.8 GB heap). It decodes at 31–37 tokens/s,
 with the GPU's logits within 1e-4 of transformers' layers on the same weights. The laptop reads its own weights

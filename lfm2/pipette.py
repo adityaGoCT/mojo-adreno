@@ -32,6 +32,10 @@ whole generation's decode time, so each of its repetitions is two runs: 1024 -> 
 --model 8b measures LFM2.5-8B-A1B (Liquid AI's mixture of experts, lfm2moe/) the same way, on the GPU only, from
 Pipette's LFM2.5-8B-A1B-Q4_0.gguf in /data/local/tmp/lfm2/plain8b; results in build/lfm2moe/pipette/.
   build/vla/venv/bin/python lfm2/pipette.py gpu --model 8b --input 1024
+--model qwen3-4b measures Qwen3-4B (qwen3_4b/: Q4_0 projections, Q6_K tied head, staged in /data/local/tmp/q4b by
+qwen3_4b/stage_phone.sh) the same way, on the GPU only; its prompts are the same passages in Qwen3's tokenizer (no BOS:
+Qwen3's GGUFs don't add one), results in build/qwen3_4b/pipette/.
+  build/vla/venv/bin/python lfm2/pipette.py gpu --model qwen3-4b --input 1024
 """
 
 import argparse
@@ -47,11 +51,13 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lfm2"))
-MODEL = "2.6b"  # --model: 2.6b (lfm2/: gpu, hybrid, npu, spec) or 8b (LFM2.5-8B-A1B, lfm2moe/: gpu)
-BASES = {"2.6b": ROOT / "build/lfm2/pipette", "8b": ROOT / "build/lfm2moe/pipette"}
+MODEL = "2.6b"  # --model: 2.6b (lfm2/: gpu, hybrid, npu, spec), 8b (LFM2.5-8B-A1B, lfm2moe/: gpu), qwen3-4b (gpu)
+BASES = {"2.6b": ROOT / "build/lfm2/pipette", "8b": ROOT / "build/lfm2moe/pipette",
+         "qwen3-4b": ROOT / "build/qwen3_4b/pipette"}
 OUT = BASES[MODEL]  # PIPETTE_OUT: another phone's directory (set in main)
 D = "/data/local/tmp/lfm2"
 D8 = f"{D}/plain8b"  # the 8B: bin/ (build/android/lfm2moe), q4_0.gguf, rope.f32, q4/{manifest,recipe}.txt, lfm2moe_q4.bin
+DQ = "/data/local/tmp/q4b"  # Qwen3-4B: qwen3_4b/ (build/android/qwen3_4b), rope.f32, q4/qwen3_4b_q4.bin (stage_phone.sh)
 P = 1024  # input tokens (--input)
 DECODE = 100
 E2E = 256  # output tokens a timed run generates (--new); decode is timed over outputs 1 .. 100 of it
@@ -87,6 +93,17 @@ PIPETTE_SWEEP_8B = {256: (111.29, 2300.38, 52.79, 7401.36, 4919.68), 512: (108.9
                     4096: (76.88, 53275.43, 32.64, 58486.64, 5344.66)}
 
 
+# Pipette has no Qwen3-4B. For scale only, its rows for the nearest model it has, Qwen3.5-4B (unsloth/Qwen3.5-4B-GGUF;
+# a different architecture and a newer model, so not a like-for-like comparison), at 1,024 tokens (the leaderboard's
+# data, pipette.liquid.ai/api/query?q=explore, read 2026-11-13; llama.cpp b11988). Its S26 Ultra q4_0 row has no
+# decode figure. Peak RAM in GiB.
+PIPETTE_Q4B = [
+    ("Galaxy S26 Ultra", "llama.cpp CPU, Qwen3.5-4B", "q4_0", None, 76, 13555, 26463, 3.16),
+    ("Galaxy S26 Ultra", "llama.cpp CPU, Qwen3.5-4B", "q4_k_m", 14.5, 57, 17861, 33110, 3.31),
+    ("iPhone 17 Pro", "llama.cpp GPU, Qwen3.5-4B", "q4_0", 22.3, 515, 1990, 13414, 3.17),
+]
+
+
 def adb(*args, check=True):
     r = subprocess.run(["adb", *args], capture_output=True, text=True)
     if check and r.returncode:
@@ -94,18 +111,23 @@ def adb(*args, check=True):
     return r.stdout
 
 
+def ids_path():
+    return ROOT / (f"build/qwen3_4b/pipette/ids{P}.txt" if MODEL == "qwen3-4b" else f"build/lfm2/pipette/ids{P}.txt")
+
+
 def prompt_ids():
     """Exactly P tokens: the start-of-text token and the first P - 1 of the repo's long passages, then its BLOG.md and
     BLOG-COOPMAT.md (one token list for every length, each shorter prompt a prefix of the longer; kept in
     build/lfm2/pipette/ids<P>.txt, so later edits to those files don't change them)."""
-    f = ROOT / f"build/lfm2/pipette/ids{P}.txt"  # the same prompts on every phone
+    f = ids_path()  # the same prompts on every phone
     if f.exists():
         return [int(t) for t in f.read_text().split()]
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(ROOT / "build/lfm2")
+    qwen = MODEL == "qwen3-4b"
+    tok = AutoTokenizer.from_pretrained(ROOT / ("build/qwen3_4b/hf" if qwen else "build/lfm2"))
     text = (ROOT / "gemma4/prompts/long.txt").read_text() + "\n\n" + (ROOT / "llama/prompts/long.txt").read_text()
     more = (ROOT / "BLOG.md").read_text() + "\n\n" + (ROOT / "BLOG-COOPMAT.md").read_text()  # beyond 1,293 tokens
-    ids = [tok.bos_token_id] + tok(text, add_special_tokens=False)["input_ids"]
+    ids = ([] if qwen else [tok.bos_token_id]) + tok(text, add_special_tokens=False)["input_ids"]
     ids += tok("\n\n" + more, add_special_tokens=False)["input_ids"]
     assert len(ids) >= P, len(ids)
     return ids[:P]
@@ -131,7 +153,7 @@ def ready(last_end):
     t0 = time.time()
     while True:
         busy = adb("shell", "ps -A", check=False)
-        others = [l for l in busy.splitlines() if re.search(r"lfm2|graph_tool|vk_server", l)]
+        others = [l for l in busy.splitlines() if re.search(r"lfm2|graph_tool|vk_server|qwen3", l)]
         temp = temperature()
         if not others and time.time() - last_end >= 20 and temp <= TEMP_MAX:
             return temp
@@ -142,6 +164,10 @@ def ready(last_end):
 
 
 def command(config, new, ids_file, peak=False):
+    if MODEL == "qwen3-4b":
+        return (f"cd {DQ}; LD_LIBRARY_PATH={DQ}/qwen3_4b MODULAR_DRIVER_PLUGINS=vulkan@{DQ}/qwen3_4b/libM_driver_vulkan.so "
+                f"QWEN3_PREFILL=1 QWEN3_WARM={0 if peak else 1} QWEN3_CTX={P + new + 64} ./qwen3_4b/qwen3_4b {DQ}/q4 "
+                f"{DQ}/q4/qwen3_4b_q4.bin {new} @{ids_file}")
     if MODEL == "8b":
         return (f"cd {D8}; LD_LIBRARY_PATH={D8}/bin MODULAR_DRIVER_PLUGINS=vulkan@{D8}/bin/libM_driver_vulkan.so "
                 f"LFM2MOE_PREFILL=1 LFM2MOE_WARM={0 if peak else 1} ./bin/lfm2moe {D8}/q4 {D8}/lfm2moe_q4.bin {new} "
@@ -163,11 +189,11 @@ def command(config, new, ids_file, peak=False):
 
 
 def others_running():
-    """Model processes on the phone that are not this benchmark's (ours read from .../plain/ or .../plain8b/)."""
+    """Model processes on the phone that are not this benchmark's (ours read from .../plain/, .../plain8b/ or .../q4b/)."""
     out = adb("shell", "ps -A -o PID,ARGS", check=False)  # a bracketed name with no arguments: one of ours exiting
-    return [l for l in out.splitlines() if re.search(r"lfm2|graph_tool|vk_server|hybrid", l)
-            and not re.search(r"/plain8?b?/", l) and "ps -A" not in l
-            and not re.fullmatch(r"\s*\d+ \[(lfm2|lfm2_hybrid|lfm2_npu|lfm2moe)\]\s*", l)]
+    return [l for l in out.splitlines() if re.search(r"lfm2|graph_tool|vk_server|hybrid|qwen3", l)
+            and not re.search(r"/plain8?b?/|/q4b/", l) and "ps -A" not in l
+            and not re.fullmatch(r"\s*\d+ \[(lfm2|lfm2_hybrid|lfm2_npu|lfm2moe|qwen3_4b)\]\s*", l)]
 
 
 def npu_graphs():
@@ -181,7 +207,7 @@ def npu_graphs():
 
 def run(config, new, ids_file, peak=False, watch=None):
     """One run on the phone. watch (a list): filled with any other model process seen while it ran (polled every 5 s)."""
-    log = f"{D}/runs/pipette_{config}.log"
+    log = f"{DQ if MODEL == 'qwen3-4b' else D}/runs/pipette_{config}.log"
     stop = threading.Event()
 
     def monitor():
@@ -296,7 +322,7 @@ def peak_memory(config, ids_file):
     stop = threading.Event()
 
     hwm = [0, 0]  # VmHWM, VmSwap (kB), sampled
-    name = "lfm2moe" if MODEL == "8b" else {"gpu": "lfm2", "spec": "lfm2", "hybrid": "lfm2_hybrid", "npu": "lfm2_npu"}[config]
+    name = "lfm2moe" if MODEL == "8b" else "qwen3_4b" if MODEL == "qwen3-4b" else {"gpu": "lfm2", "spec": "lfm2", "hybrid": "lfm2_hybrid", "npu": "lfm2_npu"}[config]
 
     def sample():
         """One adb call a second (a lab bridge drops under a stream of adb calls during a long GPU run)."""
@@ -355,11 +381,13 @@ def results(c, n):
 
 
 def sweep_table():
-    names = {"gpu": "GPU (int4)"} if MODEL == "8b" else {"gpu": "GPU (int4)", "hybrid": "GPU + NPU prefill", "npu": "NPU"}
+    names = {"gpu": "GPU (int4)"} if MODEL in ("8b", "qwen3-4b") else {"gpu": "GPU (int4)", "hybrid": "GPU + NPU prefill", "npu": "NPU"}
     print("| Input tokens | Phone | llama.cpp CPU (Pipette, S26 Ultra): TTFT, decode, E2E (→256) | " +
           " | ".join(f"{v}: TTFT, decode, E2E (→256)" for v in names.values()) + " |")
     print("|---|---|---|" + "---|" * len(names))
-    for n, (pre, ttft, dec, e2e, ram) in (PIPETTE_SWEEP_8B if MODEL == "8b" else PIPETTE_SWEEP).items():
+    sweep = {"8b": PIPETTE_SWEEP_8B, "qwen3-4b": {}}.get(MODEL, PIPETTE_SWEEP)
+    for n in sorted(set(sweep) | {int(p.stem.split("_")[-1]) for p in BASES[MODEL].rglob("gpu_*.json")}):
+        pre, ttft, dec, e2e, ram = sweep.get(n, (0, 0, 0, 0, 0))
         for d, phone in PHONES:
             cells = []
             for c in names:
@@ -368,7 +396,8 @@ def sweep_table():
                 cells.append(f"{s['ttft_ms'][0]:,.0f} ms, {s['decode_tps'][0]:.1f} tok/s, {s['e2e_ms'][0]:,.0f} ms"
                              if s else "")
             if any(cells):
-                print(f"| {n:,} | {phone} | {ttft:,.0f} ms, {dec:.1f} tok/s, {e2e:,.0f} ms | " + " | ".join(cells) + " |")
+                ref = f"{ttft:,.0f} ms, {dec:.1f} tok/s, {e2e:,.0f} ms" if ttft else "(no Pipette row)"
+                print(f"| {n:,} | {phone} | {ref} | " + " | ".join(cells) + " |")
 
 
 def table():
@@ -376,8 +405,9 @@ def table():
              "npu": "Hexagon NPU (w8a16)", "spec": "Mojo GPU (int4) + DSpark speculative decoding"}
     print("| Device, engine | Quant | Decode (1024→100) | Prefill (1024) | TTFT (1024) | E2E (1024→256) | Peak RAM |")
     print("|---|---|---|---|---|---|---|")
-    for dev, eng, q, dec, pre, ttft, e2e, ram in (PIPETTE_8B if MODEL == "8b" else PIPETTE):
-        print(f"| {dev}, {eng} (Pipette) | {q} | {dec} tok/s | {pre} tok/s | {ttft:,} ms | {e2e:,} ms | {ram:.2f} GB |")
+    for dev, eng, q, dec, pre, ttft, e2e, ram in {"8b": PIPETTE_8B, "qwen3-4b": PIPETTE_Q4B}.get(MODEL, PIPETTE):
+        d = f"{dec} tok/s" if dec else "(none)"
+        print(f"| {dev}, {eng} (Pipette) | {q} | {d} | {pre} tok/s | {ttft:,} ms | {e2e:,} ms | {ram:.2f} GB |")
     for c in ("gpu", "hybrid", "npu", "spec"):
         for phone, r in results(c, 1024):
             s, m = r["summary"], r.get("memory", {})
@@ -396,13 +426,13 @@ def main():
     ap.add_argument("--memory-only", action="store_true", help="redo only the peak-memory run of <config>_<input>.json")
     ap.add_argument("--input", type=int, default=1024)
     ap.add_argument("--new", type=int, default=256)
-    ap.add_argument("--model", choices=["2.6b", "8b"], default="2.6b")
+    ap.add_argument("--model", choices=["2.6b", "8b", "qwen3-4b"], default="2.6b")
     a = ap.parse_args()
     global P, E2E, MODEL, OUT
     P, E2E, MODEL = a.input, a.new, a.model
     OUT = pathlib.Path(os.environ["PIPETTE_OUT"]) if os.environ.get("PIPETTE_OUT") else BASES[MODEL]
     for c in a.configs:
-        if c not in (("gpu",) if MODEL == "8b" else ("gpu", "hybrid", "npu", "spec")):
+        if c not in (("gpu",) if MODEL in ("8b", "qwen3-4b") else ("gpu", "hybrid", "npu", "spec")):
             sys.exit(f"unknown configuration {c} for {MODEL}")
     if a.table:
         table()
@@ -410,9 +440,9 @@ def main():
         return sweep_table()
     OUT.mkdir(parents=True, exist_ok=True)
     ids = prompt_ids()
-    f = ROOT / f"build/lfm2/pipette/ids{P}.txt"
+    f = ids_path()
     f.write_text(" ".join(map(str, ids)) + "\n")
-    ids_file = f"{D}/runs/ids{P}.txt"
+    ids_file = f"{DQ if MODEL == 'qwen3-4b' else D}/runs/ids{P}.txt"
     adb("push", str(f), ids_file)
     for c in a.configs:
         if a.memory_only:
