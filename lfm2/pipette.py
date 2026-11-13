@@ -36,6 +36,10 @@ Pipette's LFM2.5-8B-A1B-Q4_0.gguf in /data/local/tmp/lfm2/plain8b; results in bu
 qwen3_4b/stage_phone.sh) the same way, on the GPU only; its prompts are the same passages in Qwen3's tokenizer (no BOS:
 Qwen3's GGUFs don't add one), results in build/qwen3_4b/pipette/.
   build/vla/venv/bin/python lfm2/pipette.py gpu --model qwen3-4b --input 1024
+--model qwen3.5-4b measures Qwen3.5-4B (qwen3_5_4b/: unsloth's Q4_0 GGUF, the file of Pipette's Qwen3.5-4B q4_0 rows,
+staged in /data/local/tmp/q35 by qwen3_5_4b/stage_phone.sh) the same way, on the GPU only; the same passages in
+Qwen3.5's tokenizer (no BOS), results in build/qwen3_5_4b/pipette/.
+  build/vla/venv/bin/python lfm2/pipette.py gpu --model qwen3.5-4b --input 1024
 """
 
 import argparse
@@ -51,13 +55,16 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lfm2"))
-MODEL = "2.6b"  # --model: 2.6b (lfm2/: gpu, hybrid, npu, spec), 8b (LFM2.5-8B-A1B, lfm2moe/: gpu), qwen3-4b (gpu)
+MODEL = "2.6b"  # --model: 2.6b (lfm2/: gpu, hybrid, npu, spec), 8b (LFM2.5-8B-A1B, lfm2moe/: gpu), qwen3-4b,
+#                 qwen3.5-4b (gpu)
 BASES = {"2.6b": ROOT / "build/lfm2/pipette", "8b": ROOT / "build/lfm2moe/pipette",
-         "qwen3-4b": ROOT / "build/qwen3_4b/pipette"}
+         "qwen3-4b": ROOT / "build/qwen3_4b/pipette", "qwen3.5-4b": ROOT / "build/qwen3_5_4b/pipette"}
+QWEN = ("qwen3-4b", "qwen3.5-4b")  # GPU-only models with their own phone directory and tokenizer
 OUT = BASES[MODEL]  # PIPETTE_OUT: another phone's directory (set in main)
 D = "/data/local/tmp/lfm2"
 D8 = f"{D}/plain8b"  # the 8B: bin/ (build/android/lfm2moe), q4_0.gguf, rope.f32, q4/{manifest,recipe}.txt, lfm2moe_q4.bin
 DQ = "/data/local/tmp/q4b"  # Qwen3-4B: qwen3_4b/ (build/android/qwen3_4b), rope.f32, q4/qwen3_4b_q4.bin (stage_phone.sh)
+DQ35 = "/data/local/tmp/q35"  # Qwen3.5-4B: qwen3_5_4b/ (build/android/qwen3_5_4b), rope.f32, q4/qwen3_5_4b_q4.bin
 P = 1024  # input tokens (--input)
 DECODE = 100
 E2E = 256  # output tokens a timed run generates (--new); decode is timed over outputs 1 .. 100 of it
@@ -93,10 +100,10 @@ PIPETTE_SWEEP_8B = {256: (111.29, 2300.38, 52.79, 7401.36, 4919.68), 512: (108.9
                     4096: (76.88, 53275.43, 32.64, 58486.64, 5344.66)}
 
 
-# Pipette has no Qwen3-4B. For scale only, its rows for the nearest model it has, Qwen3.5-4B (unsloth/Qwen3.5-4B-GGUF;
-# a different architecture and a newer model, so not a like-for-like comparison), at 1,024 tokens (the leaderboard's
-# data, pipette.liquid.ai/api/query?q=explore, read 2026-11-13; llama.cpp b11988). Its S26 Ultra q4_0 row has no
-# decode figure. Peak RAM in GiB.
+# Pipette has no Qwen3-4B. Its rows for Qwen3.5-4B (unsloth/Qwen3.5-4B-GGUF), at 1,024 tokens (the leaderboard's data,
+# pipette.liquid.ai/api/query?q=explore, read 2026-11-13; llama.cpp b11988): --model qwen3.5-4b's own comparison, and
+# for --model qwen3-4b the nearest model, for scale only (a different architecture and a newer model). Its S26 Ultra
+# q4_0 row has no decode figure. Peak RAM in GiB.
 PIPETTE_Q4B = [
     ("Galaxy S26 Ultra", "llama.cpp CPU, Qwen3.5-4B", "q4_0", None, 76, 13555, 26463, 3.16),
     ("Galaxy S26 Ultra", "llama.cpp CPU, Qwen3.5-4B", "q4_k_m", 14.5, 57, 17861, 33110, 3.31),
@@ -111,8 +118,12 @@ def adb(*args, check=True):
     return r.stdout
 
 
+def phone_dir():
+    return {"qwen3-4b": DQ, "qwen3.5-4b": DQ35}.get(MODEL, D)
+
+
 def ids_path():
-    return ROOT / (f"build/qwen3_4b/pipette/ids{P}.txt" if MODEL == "qwen3-4b" else f"build/lfm2/pipette/ids{P}.txt")
+    return (BASES[MODEL] if MODEL in QWEN else ROOT / "build/lfm2/pipette") / f"ids{P}.txt"
 
 
 def prompt_ids():
@@ -123,8 +134,9 @@ def prompt_ids():
     if f.exists():
         return [int(t) for t in f.read_text().split()]
     from transformers import AutoTokenizer
-    qwen = MODEL == "qwen3-4b"
-    tok = AutoTokenizer.from_pretrained(ROOT / ("build/qwen3_4b/hf" if qwen else "build/lfm2"))
+    qwen = MODEL in QWEN
+    tok = AutoTokenizer.from_pretrained(ROOT / {"qwen3-4b": "build/qwen3_4b/hf", "qwen3.5-4b": "build/qwen3_5_4b/hf"}
+                                        .get(MODEL, "build/lfm2"))
     text = (ROOT / "gemma4/prompts/long.txt").read_text() + "\n\n" + (ROOT / "llama/prompts/long.txt").read_text()
     more = (ROOT / "BLOG.md").read_text() + "\n\n" + (ROOT / "BLOG-COOPMAT.md").read_text()  # beyond 1,293 tokens
     ids = ([] if qwen else [tok.bos_token_id]) + tok(text, add_special_tokens=False)["input_ids"]
@@ -168,6 +180,11 @@ def command(config, new, ids_file, peak=False):
         return (f"cd {DQ}; LD_LIBRARY_PATH={DQ}/qwen3_4b MODULAR_DRIVER_PLUGINS=vulkan@{DQ}/qwen3_4b/libM_driver_vulkan.so "
                 f"QWEN3_PREFILL=1 QWEN3_WARM={0 if peak else 1} QWEN3_CTX={P + new + 64} ./qwen3_4b/qwen3_4b {DQ}/q4 "
                 f"{DQ}/q4/qwen3_4b_q4.bin {new} @{ids_file}")
+    if MODEL == "qwen3.5-4b":
+        return (f"cd {DQ35}; LD_LIBRARY_PATH={DQ35}/qwen3_5_4b "
+                f"MODULAR_DRIVER_PLUGINS=vulkan@{DQ35}/qwen3_5_4b/libM_driver_vulkan.so QWEN35_PREFILL=1 "
+                f"QWEN35_WARM={0 if peak else 1} QWEN35_CTX={P + new + 64} ./qwen3_5_4b/qwen3_5_4b {DQ35}/q4 "
+                f"{DQ35}/q4/qwen3_5_4b_q4.bin {new} @{ids_file}")
     if MODEL == "8b":
         return (f"cd {D8}; LD_LIBRARY_PATH={D8}/bin MODULAR_DRIVER_PLUGINS=vulkan@{D8}/bin/libM_driver_vulkan.so "
                 f"LFM2MOE_PREFILL=1 LFM2MOE_WARM={0 if peak else 1} ./bin/lfm2moe {D8}/q4 {D8}/lfm2moe_q4.bin {new} "
@@ -189,11 +206,12 @@ def command(config, new, ids_file, peak=False):
 
 
 def others_running():
-    """Model processes on the phone that are not this benchmark's (ours read from .../plain/, .../plain8b/ or .../q4b/)."""
+    """Model processes on the phone that are not this benchmark's (ours read from .../plain/, .../plain8b/, .../q4b/ or
+    .../q35/)."""
     out = adb("shell", "ps -A -o PID,ARGS", check=False)  # a bracketed name with no arguments: one of ours exiting
     return [l for l in out.splitlines() if re.search(r"lfm2|graph_tool|vk_server|hybrid|qwen3", l)
-            and not re.search(r"/plain8?b?/|/q4b/", l) and "ps -A" not in l
-            and not re.fullmatch(r"\s*\d+ \[(lfm2|lfm2_hybrid|lfm2_npu|lfm2moe|qwen3_4b)\]\s*", l)]
+            and not re.search(r"/plain8?b?/|/q4b/|/q35/", l) and "ps -A" not in l
+            and not re.fullmatch(r"\s*\d+ \[(lfm2|lfm2_hybrid|lfm2_npu|lfm2moe|qwen3_4b|qwen3_5_4b)\]\s*", l)]
 
 
 def npu_graphs():
@@ -207,7 +225,7 @@ def npu_graphs():
 
 def run(config, new, ids_file, peak=False, watch=None):
     """One run on the phone. watch (a list): filled with any other model process seen while it ran (polled every 5 s)."""
-    log = f"{DQ if MODEL == 'qwen3-4b' else D}/runs/pipette_{config}.log"
+    log = f"{phone_dir()}/runs/pipette_{config}.log"
     stop = threading.Event()
 
     def monitor():
@@ -322,7 +340,7 @@ def peak_memory(config, ids_file):
     stop = threading.Event()
 
     hwm = [0, 0]  # VmHWM, VmSwap (kB), sampled
-    name = "lfm2moe" if MODEL == "8b" else "qwen3_4b" if MODEL == "qwen3-4b" else {"gpu": "lfm2", "spec": "lfm2", "hybrid": "lfm2_hybrid", "npu": "lfm2_npu"}[config]
+    name = {"8b": "lfm2moe", "qwen3-4b": "qwen3_4b", "qwen3.5-4b": "qwen3_5_4b"}.get(MODEL) or {"gpu": "lfm2", "spec": "lfm2", "hybrid": "lfm2_hybrid", "npu": "lfm2_npu"}[config]
 
     def sample():
         """One adb call a second (a lab bridge drops under a stream of adb calls during a long GPU run)."""
@@ -381,11 +399,11 @@ def results(c, n):
 
 
 def sweep_table():
-    names = {"gpu": "GPU (int4)"} if MODEL in ("8b", "qwen3-4b") else {"gpu": "GPU (int4)", "hybrid": "GPU + NPU prefill", "npu": "NPU"}
+    names = {"gpu": "GPU (int4)"} if MODEL in ("8b", *QWEN) else {"gpu": "GPU (int4)", "hybrid": "GPU + NPU prefill", "npu": "NPU"}
     print("| Input tokens | Phone | llama.cpp CPU (Pipette, S26 Ultra): TTFT, decode, E2E (→256) | " +
           " | ".join(f"{v}: TTFT, decode, E2E (→256)" for v in names.values()) + " |")
     print("|---|---|---|" + "---|" * len(names))
-    sweep = {"8b": PIPETTE_SWEEP_8B, "qwen3-4b": {}}.get(MODEL, PIPETTE_SWEEP)
+    sweep = {"8b": PIPETTE_SWEEP_8B, "qwen3-4b": {}, "qwen3.5-4b": {}}.get(MODEL, PIPETTE_SWEEP)
     for n in sorted(set(sweep) | {int(p.stem.split("_")[-1]) for p in BASES[MODEL].rglob("gpu_*.json")}):
         pre, ttft, dec, e2e, ram = sweep.get(n, (0, 0, 0, 0, 0))
         for d, phone in PHONES:
@@ -405,7 +423,7 @@ def table():
              "npu": "Hexagon NPU (w8a16)", "spec": "Mojo GPU (int4) + DSpark speculative decoding"}
     print("| Device, engine | Quant | Decode (1024→100) | Prefill (1024) | TTFT (1024) | E2E (1024→256) | Peak RAM |")
     print("|---|---|---|---|---|---|---|")
-    for dev, eng, q, dec, pre, ttft, e2e, ram in {"8b": PIPETTE_8B, "qwen3-4b": PIPETTE_Q4B}.get(MODEL, PIPETTE):
+    for dev, eng, q, dec, pre, ttft, e2e, ram in {"8b": PIPETTE_8B, "qwen3-4b": PIPETTE_Q4B, "qwen3.5-4b": PIPETTE_Q4B}.get(MODEL, PIPETTE):
         d = f"{dec} tok/s" if dec else "(none)"
         print(f"| {dev}, {eng} (Pipette) | {q} | {d} | {pre} tok/s | {ttft:,} ms | {e2e:,} ms | {ram:.2f} GB |")
     for c in ("gpu", "hybrid", "npu", "spec"):
@@ -426,13 +444,13 @@ def main():
     ap.add_argument("--memory-only", action="store_true", help="redo only the peak-memory run of <config>_<input>.json")
     ap.add_argument("--input", type=int, default=1024)
     ap.add_argument("--new", type=int, default=256)
-    ap.add_argument("--model", choices=["2.6b", "8b", "qwen3-4b"], default="2.6b")
+    ap.add_argument("--model", choices=["2.6b", "8b", *QWEN], default="2.6b")
     a = ap.parse_args()
     global P, E2E, MODEL, OUT
     P, E2E, MODEL = a.input, a.new, a.model
     OUT = pathlib.Path(os.environ["PIPETTE_OUT"]) if os.environ.get("PIPETTE_OUT") else BASES[MODEL]
     for c in a.configs:
-        if c not in (("gpu",) if MODEL in ("8b", "qwen3-4b") else ("gpu", "hybrid", "npu", "spec")):
+        if c not in (("gpu",) if MODEL in ("8b", *QWEN) else ("gpu", "hybrid", "npu", "spec")):
             sys.exit(f"unknown configuration {c} for {MODEL}")
     if a.table:
         table()
@@ -442,7 +460,7 @@ def main():
     ids = prompt_ids()
     f = ids_path()
     f.write_text(" ".join(map(str, ids)) + "\n")
-    ids_file = f"{DQ if MODEL == 'qwen3-4b' else D}/runs/ids{P}.txt"
+    ids_file = f"{phone_dir()}/runs/ids{P}.txt"
     adb("push", str(f), ids_file)
     for c in a.configs:
         if a.memory_only:

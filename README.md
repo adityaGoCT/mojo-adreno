@@ -52,6 +52,14 @@ at 178 tokens/s and decodes at 43.2 ms a token. Logits are within 1.6e-4 of tran
 model agrees with bf16 exactly as often as the int4 model itself (62 of 64). Under Pipette's protocol at 1,024 tokens:
 TTFT 4.7 s, 20.9 tokens/s, E2E 18.9 s.
 
+**[Qwen3.5-4B on the Adreno 840](qwen3_5_4b/README.md)**: Qwen's hybrid of Gated DeltaNet linear attention (24 layers)
+and gated full attention (8), from unsloth's Q4_0 GGUF, the file behind Pipette's Qwen3.5-4B rows. The phone downloads
+the GGUF and repacks it in seconds. Its Q4_1 and Q5_K tensors go into an exact affine int4 storage. New kernels run
+the delta rule a row after another, with each head's 128 × 128 state in registers. On a Galaxy Z Fold, a 410-token
+prompt prefills at 210 tokens/s and decodes at 48.1 ms a token. Logits are within 1.2e-4 of transformers on the
+GGUF's weights, with all 128 tokens matching. Against bf16 the phone's KL is the file's own (0.0065-0.012). Under
+Pipette's protocol at 1,024 tokens: TTFT 4.2 s and E2E 18.7 s, against the S26 Ultra llama.cpp CPU's 13.6 s and 26.5 s.
+
 **[Qwen3-30B-A3B (mixture of experts) on a Snapdragon X2 Elite laptop](qwen3moe/README.md)**: 30.5B parameters,
 128 experts with 8 per token, in int4 (15.75 GB, inside the X2-90's 16.8 GB heap). It decodes at 31–37 tokens/s,
 with the GPU's logits within 1e-4 of transformers' layers on the same weights. The laptop reads its own weights
