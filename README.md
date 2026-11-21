@@ -25,9 +25,9 @@ Vulkan SPIR-V target, KHR cooperative matrices from Mojo, and Llama 3.2 1B on a 
 (Adreno 840): a 431-token prompt in 0.63 s on the matrix units instead of 17.7 s, decode at 42 ms/token, and
 with 4-bit weights 13-15 ms/token.
 
-Part 5: **[AdrenoBLAS: fp16 GEMM at 93% of a Phone GPU's Matrix Peak](BLOG-ABLAS.md)**: a cuBLAS-style GEMM
-library for the Adreno 850's matrix units ([`ablas/`](ablas/)): 14.7 TFLOP/s at 2048³ and 16.4 at 4096³ (93%) against a
-measured 17.5 peak, what assembly can and can't do on the 850 and the 840 ([`asm/`](asm/)), and seven driver bugs
+Part 5: **[AdrenoBLAS: fp16 GEMM at 97% of a Phone GPU's Matrix Peak](BLOG-ABLAS.md)**: a cuBLAS-style GEMM
+library for the Adreno 850's matrix units ([`ablas/`](ablas/)): 17.0 TFLOP/s at 4096 x 4096 x 8192 (97%) and 16.4 at
+4096³ against a measured 17.5 peak, what assembly can and can't do on the 850 and the 840 ([`asm/`](asm/)), and seven driver bugs
 with estimated gains if fixed ([`urgent_matter.md`](urgent_matter.md)).
 
 **[Bonsai 2 2B (ternary weights) on the Adreno 840](bonsai/README.md)**: the Mojo kernels of

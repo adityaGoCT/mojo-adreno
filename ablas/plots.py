@@ -42,14 +42,15 @@ def progress():
             ("4096³, TN", 8.77),
             ("4096³, panels, 64×32 tiles", 12.78),
             ("4096³, panels, one 64×64 tile per subgroup", 15.34),
-            ("4096³, + K contiguous inside each tile", 16.36)]
-    fig, ax = plt.subplots(figsize=(8.4, 5.2), dpi=150)
+            ("4096³, + K contiguous inside each tile", 16.36),
+            ("4096² × 8192, same kernel", 16.99)]
+    fig, ax = plt.subplots(figsize=(8.4, 5.6), dpi=150)
     y = list(range(len(rows)))[::-1]
     bars(ax, y, [v for _, v in rows], BLUE, 0.5)
     for yi, (_, v) in zip(y, rows):
         ax.text(v + 0.2, yi, f"{v:.2f}", va="center", color=INK, fontsize=9)
     ax.set_yticks(y, [r for r, _ in rows])
-    ax.axhline(3.5, color=GRID, lw=0.8)
+    ax.axhline(4.5, color=GRID, lw=0.8)
     frame(ax, 19, "fp16 GEMM on the Adreno 850, step by step", "2048³ unless marked; library calls with operands pre-packed where noted; every call checked against fp32")
     ax.set_ylim(-0.6, len(rows) - 0.1)
     ref(ax, 8.36, "fp16 ALU peak 8.36", len(rows) - 0.4, "right")

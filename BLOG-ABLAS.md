@@ -1,4 +1,4 @@
-# AdrenoBLAS: fp16 GEMM at 93% of a Phone GPU's Matrix Peak
+# AdrenoBLAS: fp16 GEMM at 97% of a Phone GPU's Matrix Peak
 
 *Part 5 of [Bringing PyTorch LLMs to a Mid-Range Adreno GPU with IREE](https://github.com/adityaGoCT/iree-adreno-genai-tuner/blob/main/BLOG.md) (Part 4: [A Native GPU Target, and Llama Prefill on the Matrix Units](BLOG-COOPMAT.md)) · November 21, 2026 · Aditya*
 
@@ -8,7 +8,7 @@ I set out to build a GEMM library for Adreno GPUs in the spirit of cuBLAS and ro
 
 The target was an **Adreno 850** on a Qualcomm Device Cloud reference phone (SM8975, Android 17, 1.45 GHz). I measured its peaks first: 4.41 TFLOP/s for fp32, 8.36 for fp16 on the ALUs, and **17.5 TFLOP/s for fp16 on its matrix hardware**, which Vulkan exposes as cooperative matrices. The best fp16 GEMM I had at the start, a Mojo kernel tuned on the Adreno 840, ran at 4.25 TFLOP/s on it: 24% of that peak.
 
-AdrenoBLAS now runs fp16 GEMM at **14.7 TFLOP/s at 2048³ and 16.4 at 4096³ (93% of the matrix peak)** with operands in its packed tile format, and at 11.6 and 13.7 for operands as given. LLM prefill shapes run at 12.0 to 14.6 TFLOP/s with the weights packed once (13.9 to 16.2 with both operands packed), and all four operand layouts (NN, NT, TN, TT) are covered. Every call is checked against an fp32 reference on the phone. The library is a kernel generator, an on-device tuner, a catalogue builder and a 300-line C runtime.
+AdrenoBLAS now runs fp16 GEMM at **17.0 TFLOP/s at 4096 x 4096 x 8192 (97% of the matrix peak)**, 16.4 at 4096³ (93%) and 14.7 at 2048³ with operands in its packed tile format, and at 11.6 and 13.7 for operands as given. LLM prefill shapes run at 12.0 to 14.6 TFLOP/s with the weights packed once (13.9 to 16.2 with both operands packed), and all four operand layouts (NN, NT, TN, TT) are covered. Every call is checked against an fp32 reference on the phone. The library is a kernel generator, an on-device tuner, a catalogue builder and a 300-line C runtime.
 
 On assembly: on the 850 it can be **read but not written**. The driver's compiled code sits in its pipeline cache and Mesa's disassembler decodes it, except four instruction words that drive the matrix unit. But a checksum rejects any edited code. On an Adreno 840 through Mesa's Turnip driver, hand-written assembly runs and beats both compilers' fp16 GEMM by about 10%; teaching its main trick to Turnip's register allocator recovers 5.0%.
 
@@ -129,6 +129,8 @@ The 840 has no matrix unit: its cooperative-matrix path peaks at 7.35 TFLOP/s, b
 | Turnip's compiler | 3.33 |
 
 The win came from a register-file rule that Turnip's compiler doesn't respect (the stock compiler's code wasn't inspected). A multiply-add whose three register sources sit in the same bank issues at about one third of the rate. There are two banks, split by the parity of the register's scalar index: `.x` and `.z` in one, `.y` and `.w` in the other (for fp16, the low and high halves). Half the multiply-adds in Turnip's fp16 GEMM loops have that form. With the loads stripped out, the hand-written loop runs at 90% of peak against Turnip's 56%. End to end the gain shrinks to 10%, because the kernel then waits on operands. An 8 x 8 register tile at peak needs about 256 bytes per clock per SP, while the texture path delivers about 120 and shared memory about 107. Taught to Turnip's register allocator ([`asm/mesa/turnip-ra-bank.patch`](asm/mesa/turnip-ra-bank.patch)), the rule gives +5.0% geometric mean over 22 GEMM kernels, up to +21%, with every result still correct, once the allocator also accounts for the scheduler.
+
+A small tuner for the 840 (`asm/mesa/tune_alu.py`) then picks, per kernel, between the stock compiler and Turnip with the allocator on or off. Turnip with the allocator wins three of four catalogue slots (fp16 at 2048³: 3.32 TFLOP/s against 3.14 for the best stock kernel); the stock compiler keeps fp32 at 512 x 2048 x 2048 (2.00). Per kernel the allocator ranges from -3.9% to +22.6%, which is why the choice is tuned rather than fixed.
 
 ### The verdict that shaped the library
 
@@ -332,13 +334,27 @@ Four vector loads instead of sixteen scalar ones, and a 16-instruction loop inst
 
 The format also suits PyTorch. In a `Linear` layer, activations [M, K] and weights [N, K] already have K contiguous, so packing them is a plain re-tiling copy with no transpose ([`tile_copy.comp`](ablas/tile_copy.comp)). That copy has to write in runs. Walking K along whole rows scattered 32-byte writes over K/16 tiles and ran at 28 GB/s. Copying 32-row x 64-K blocks writes 256-byte runs, and took the 512 x 2048 x 8192 LLM shape (weights pre-packed) from 10.5 to 13.5 TFLOP/s. Software prefetch, tried once more on the new tiles, was still slower (15.6 vs 16.55).
 
+## Step 10: What's left is the store
+
+Efficiency now rises with K: the same kernel runs at 16.35 TFLOP/s at 4096³, **16.99 at 4096 x 4096 x 8192 (97%)** and 16.82 at 4096 x 4096 x 16384, through the library. So the inner loop runs at about 97% of peak, and what is left at 4096³ is a fixed cost per output tile. Most of it is the store of C: 32 MB, about 0.4 ms of an 8.3 ms run, issued by every workgroup at the same moment, so it overlaps no matrix work.
+
+| idea at 4096³ (tuning, cooled, TFLOP/s) | result |
+| --- | --- |
+| baseline, one 64 x 64 tile per subgroup | **16.67** |
+| K unrolled by 2 / 4 (one 64 x 64 accumulator: no hang, unlike 64 x 32 tiles) | 15.53 / 14.29 |
+| 16-subgroup workgroups, grouped workgroup order | 14.1 at best |
+| persistent workgroups, 2 to 16 output tiles each | 5.4 to 7.5 |
+
+Persistent workgroups are the usual way to hide that store: each workgroup loops over several output tiles, so one tile's store overlaps the next tile's K loop. On this driver they ran 3x slower, although the disassembly ([`ps2_code.dis`](asm/isa/dump/ps2_code.dis)) shows the same 17-instruction inner loop as the fast kernel. That one stays open.
+
 ## Results
 
 Measured through the library with [`ablas_test`](ablas/ablas_test.c), one shape at a time with [`cool_run.sh`](ablas/cool_run.sh), which waits for the GPU to cool to 45 °C with no thermal cap first. Timing uses GPU timestamps, warm-up, then the best of five runs of back-to-back calls. Every call was checked against an fp32 CPU reference on 1,024 sampled elements. The percentage is the share of the measured 17.5 TFLOP/s peak. "Pre-packed" operands went through `ablas_pack_a`/`ablas_pack_b` once, before the timed calls.
 
 | call (layout, M x N x K) | TFLOP/s | of peak |
 | --- | --- | --- |
-| pre-packed, 4096³ | **16.36** | **93%** |
+| pre-packed, 4096 x 4096 x 8192 / 4096 x 4096 x 16384 | **16.99** / 16.82 | **97%** / 96% |
+| pre-packed, 4096³ | 16.36 | 93% |
 | TN / NT / NN input, 4096³ (packed in the call) | 13.71 / 13.56 / 13.76 | 77-79% |
 | pre-packed, 2048³ | 14.71 | 84% |
 | TN / NN / TT / NT input, 2048³ | 11.63 / 9.71 / 9.72 / 10.72 | 55-66% |
@@ -361,6 +377,8 @@ Shapes must be multiples of 64 (M) and 32 (N and K); the packed path needs M, N 
 | software prefetch, grouped order, 1,024-thread workgroups | all slower |
 | a register-only transpose | 15-20 GB/s: scattered 16-byte stores |
 | two 64 x 64 accumulators per subgroup (64 x 128 of C) | GPU hang |
+| persistent workgroups (several output tiles each) | 3x slower on this driver, same inner loop |
+| K unrolled with one 64 x 64 accumulator | correct, but 15.5 / 14.3 vs 16.7 TFLOP/s |
 
 ## Measuring on a phone you rent by the hour
 
@@ -399,7 +417,7 @@ adb shell 'cd /data/local/tmp/ablas && ./cool_run.sh "P P 4096 4096 4096" "T N 2
 
 ## What's next
 
-- **The last 7%.** Pre-packed 4096³ reaches 16.4 of 17.5 TFLOP/s in the library (16.55 in tuning). The loop is now 16 instructions around one multiply; more reuse per load needs two tiles per subgroup or an unrolled K loop, and the driver hangs on both.
+- **The last 3 to 5%.** At 4096³ it is the store of C, issued by every workgroup at once; at K = 8192 the library is at 97%. Persistent workgroups would hide the store but run 3x slower on this driver, so the next step is finding out why: same inner loop, very different speed.
 - **Packing per call.** Operands as given lose 15-20% at 4096³ (13.7 vs 16.4) and more at 2048³ to packing. Having the previous layer's kernel write its output straight into the tile format would remove that for LLM activations.
 - **fp32 accumulation**, through an element-wise conversion that sidesteps the compiler crash.
 - **Edges, batches and epilogues:** shapes that aren't tile multiples, strided-batched GEMM, and bias or activation fused into the store.
