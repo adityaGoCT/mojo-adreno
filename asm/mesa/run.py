@@ -18,6 +18,9 @@ PEAK = HERE.parent / "peak"
 TURNIP = pathlib.Path.home() / "runix/adreno-port/build"
 SERIAL = os.environ.get("RTL_SERIAL", "localhost:59796")
 DEV = "/data/local/tmp/asm_mesa"
+# turnip-bank: Mesa with the register-bank-aware RA patch (turnip-ra-bank.patch), built in build/turnip-android-bankra
+TURNIP_DIRS = {"turnip": "turnip", "turnip-bank": "turnip_bank"}
+BANK_SO = pathlib.Path.home() / "runix/adreno-port/build/turnip-android-bankra/src/freedreno/vulkan/libvulkan_freedreno.so"
 FREQS = [1300, 1200, 1100, 1050, 1000, 902, 826, 726, 646, 578, 500, 461, 422, 382, 342, 282, 222, 191, 160]
 
 
@@ -42,6 +45,11 @@ def push():
         TURNIP / "turnip-shim/libvulkan.so", f"{DEV}/turnip/")
     push_spv()
     push_shapes()
+
+
+def push_bank():
+    sh(f"mkdir -p {DEV}/turnip_bank")
+    adb("push", BANK_SO, TURNIP / "turnip-shim/libvulkan.so", f"{DEV}/turnip_bank/")
 
 
 def push_spv():
@@ -107,8 +115,8 @@ def run(manifest, driver, env=(), tag=None, target_ms=200, reps=5, variants=None
         files.append(p)
     adb("push", *files, f"{DEV}/m/")
     envs = " ".join(env)
-    if driver == "turnip":
-        envs = f"LD_LIBRARY_PATH={DEV}/turnip " + envs
+    if driver in TURNIP_DIRS:
+        envs = f"LD_LIBRARY_PATH={DEV}/{TURNIP_DIRS[driver]} " + envs
     out = []
     for name, line, flops in rows:
         cool()
@@ -151,7 +159,7 @@ def run(manifest, driver, env=(), tag=None, target_ms=200, reps=5, variants=None
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["push", "pushspv", "pushshapes", "run"])
+    ap.add_argument("cmd", choices=["push", "pushspv", "pushshapes", "pushbank", "run"])
     ap.add_argument("manifest", nargs="?")
     ap.add_argument("driver", nargs="?", default="stock")
     ap.add_argument("--env", action="append", default=[])
@@ -168,6 +176,8 @@ def main():
         push_spv()
     elif a.cmd == "pushshapes":
         push_shapes()
+    elif a.cmd == "pushbank":
+        push_bank()
     else:
         run(a.manifest, a.driver, a.env, a.tag, a.target_ms, a.reps, a.variants, a.groups, names=a.only)
 
