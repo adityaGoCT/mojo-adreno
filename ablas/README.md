@@ -69,14 +69,14 @@ Start of phase 1: 4.25 TFLOP/s at 2048^3 (Mojo `matmul_coopmat_smem_f16`, tuned 
   needs a barrier per 16-wide K step and tops out at 7.8 TFLOP/s.
 - No gain from software prefetch (8.7 vs 10.8) or grouped workgroup order (worse at 4096^3).
 
-Driver E17.52.10.04 bugs found and avoided (the generator never emits these):
+Driver E17.52.10.04 bugs found and avoided (the generator never emits these; repros and estimated gains if
+fixed: [../urgent_matter.md](../urgent_matter.md)):
 
 | pattern | result |
 |---|---|
 | two dependent `coopMatMulAdd` into one accumulator in a loop body (K unroll) | GPU hang (device lost) |
-| `c0 + c1` on cooperative matrices | compiler segfault |
+| `c0 + c1` on cooperative matrices (also `ma + ma` on int8 A tiles) | compiler segfault |
 | fp32 accumulator converted to fp16 (`coopmat<float16_t>(c)`) | compiler segfault |
-| int8 cooperative matrices | compiler segfault |
 | 64-wide tiles (N = 64) fed fresh data each step | GPU hang |
 | `coopMatLoad` from a `uint`/`uvec4` shared array | wrong data (`float16_t`/`f16vec4` arrays work) |
 | dual accumulators with 4+ accumulator tiles | `vkCreateComputePipelines` fails (-13) |

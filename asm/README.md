@@ -30,8 +30,9 @@ Microbenchmark pitfalls found on the way (all in the generators' comments):
 - fp16 `x == 1234.5` is provably false (not representable): the compiler deleted the whole loop.
 - coopMatMulAdd with the same A and B every iteration is hoisted (time ~ M*N, not M*N*K); scaling A
   by a scalar each iteration is factored out too. Only a fresh A loaded each iteration is honest.
-- Stock-driver bugs: adding two cooperative matrices (`c0 + c1`) segfaults the compiler; int8
-  cooperative matrices segfault; 64x64 tiles with a fresh A per iteration hang the GPU (device lost).
+- Stock-driver bugs: adding two cooperative matrices (`c0 + c1`, or `ma + ma` on int8 tiles) segfaults the
+  compiler (a plain int8 multiply loop compiles); 64x64 tiles with a fresh A per iteration hang the GPU
+  (device lost). The full list, with estimated gains if fixed: [../urgent_matter.md](../urgent_matter.md).
 
 ## Where today's GEMM stands (2048^3, stock driver)
 

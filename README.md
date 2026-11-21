@@ -25,6 +25,11 @@ Vulkan SPIR-V target, KHR cooperative matrices from Mojo, and Llama 3.2 1B on a 
 (Adreno 840): a 431-token prompt in 0.63 s on the matrix units instead of 17.7 s, decode at 42 ms/token, and
 with 4-bit weights 13-15 ms/token.
 
+Part 5: **[AdrenoBLAS: fp16 GEMM at 73% of a Phone GPU's Matrix Peak](BLOG-ABLAS.md)**: a cuBLAS-style GEMM
+library for the Adreno 850's matrix units ([`ablas/`](ablas/)): 11.0 TFLOP/s at 2048³ and 12.8 at 4096³ against a
+measured 17.5 peak, what assembly can and can't do on the 850 and the 840 ([`asm/`](asm/)), and seven driver bugs
+with estimated gains if fixed ([`urgent_matter.md`](urgent_matter.md)).
+
 **[Bonsai 2 2B (ternary weights) on the Adreno 840](bonsai/README.md)**: the Mojo kernels of
 [mav3ri3k/modular](https://github.com/mav3ri3k/modular)'s Android OpenCL port, unchanged, compiled by
 the native target to Vulkan SPIR-V: 80 tokens/s decode, all 16 checked steps matching the FP32
@@ -655,6 +660,8 @@ ref/               hand-written Vulkan IR, reference OpenCL kernel
 scripts/setup.sh   host tools and the Mojo venv
 BLOG.md            the write-up (Part 3: the retargeters, Llama on the Adreno 710)
 BLOG-COOPMAT.md    Part 4: the native target, cooperative matrices, Llama prefill on the Adreno 840
+BLOG-ABLAS.md      Part 5: AdrenoBLAS, fp16 GEMM on the Adreno 850's matrix units; asm/ peak and assembly probes
+urgent_matter.md   the Adreno driver bugs behind the remaining GEMM gap, with estimated gains if fixed
 ```
 
 Versions used: Mojo 1.2.0, MAX 26.7.0, Homebrew LLVM 22.1.2, SPIRV-Tools v2026.1, Android NDK r30
