@@ -1,7 +1,7 @@
 #version 450
 // AdrenoBLAS pack kernel: dst[C, R] = transpose(src[R, C]), fp16, R and C multiples of 64. Workgroups (C/64, R/64).
 // W = 0: dst is plain row-major [C, R]. W = 64 or 32: dst is in panel layout (see panel_copy.comp) with dst row
-// = k (C = K) and dst column = x (R = M or N): A panels (W = 64) or B panels (W = 32).
+// = k (C = K) and dst column = x (R = M or N): A or B panels (W = 64).
 // 64x64 tile: 128-bit loads into shared memory (packed uints), 128-bit stores of 8 halves gathered per tile
 // column. 79 GB/s on the Adreno 850 at 2048x2048 (a plain 128-bit copy: 83 GB/s; transpose.comp: 59 GB/s).
 #extension GL_EXT_shader_explicit_arithmetic_types : require

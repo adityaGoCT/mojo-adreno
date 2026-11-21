@@ -1,6 +1,6 @@
 """AdrenoBLAS kernel generator: fp16 GEMM C[M,N] = A[M,K] @ B[K,N] on VK_KHR_cooperative_matrix (Adreno 8xx).
 
-Layout 'P' (panel): A packed as 64 x 16 tiles and B as 16 x 32 tiles, each tile contiguous and K-adjacent
+Layout 'P' (panel): A packed as 64 x 16 tiles and B as 16 x 32 tiles ('Q': 16 x 64), each tile contiguous and K-adjacent
 (see sweep.make_shape for the exact element order); the runtime's pack kernel produces it.
 A kernel config is a dict:
   wm, wn   subgroups per workgroup along M and N (64 lanes each)
@@ -56,6 +56,9 @@ def glsl(c, M, N, K, spec=False):
         assert nt == 32
         b_off = lambda k, n: f"((({n}) / 32u) * ({U(K)} / 16u) + ({k}) / 16u) * 512u"
         b_lay, b_str = RM, 32
+    elif c["lb"] == "Q":  # B panels 64 wide: 16 x 64 tiles (2 KB contiguous); 32-wide tiles read half a panel row
+        b_off = lambda k, n: f"((({n}) / 64u) * ({U(K)} / 16u) + ({k}) / 16u) * 1024u + ({n}) % 64u"
+        b_lay, b_str = RM, 64
     else:
         b_off = (lambda k, n: f"({k}) * {U(N)} + ({n})") if c["lb"] == "N" else (lambda k, n: f"({n}) * {U(K)} + ({k})")
         b_lay, b_str = (RM, N) if c["lb"] == "N" else (CM, K)
@@ -245,7 +248,7 @@ if __name__ == "__main__":
 
 def parse(n):
     """Inverse of name(): config dict from a kernel name."""
-    m = re.match(r"g([NTP])([NTP])_w(\d+)x(\d+)_t(\d+)x(\d+)_n(\d+)_(f16|f32)_k(\d+)(.*)$", n)
+    m = re.match(r"g([NTP])([NTPQ])_w(\d+)x(\d+)_t(\d+)x(\d+)_n(\d+)_(f16|f32)_k(\d+)(.*)$", n)
     la, lb, wm, wn, tm, tn, nt, acc, ku, rest = m.groups()
     c = dict(la=la, lb=lb, wm=int(wm), wn=int(wn), tm=int(tm), tn=int(tn), nt=int(nt), acc=acc, ku=int(ku),
              pf=int("_p1" in rest), sw=0, sa=0, sb=0, kc=0, dual=int("_d2" in rest))

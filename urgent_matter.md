@@ -4,9 +4,11 @@
 
 ## Summary
 
-Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the core of LLM prefill. AdrenoBLAS works around all of them and reaches **11.0 TFLOP/s at 2048³ and 12.8 at 4096³**. The matrix hardware sustains **17.5**, so that is 63-73% of peak.
+Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the core of LLM prefill. AdrenoBLAS works around all of them and reaches **13.8 TFLOP/s at 2048³ and 14.1 at 4096³**. The matrix hardware sustains **17.5**, so that is 79-81% of peak.
 
-- **Biggest win, two bugs.** #4 (64-wide tiles hang the GPU) and #1 (unrolled K loops hang the GPU) are what stand between today's kernels and the 17.5 TFLOP/s peak. Fixing both would take fp16 GEMM to an **estimated 13.5-16 TFLOP/s (77-90% of peak)**, about **+20-35%**. This is an estimate, not a measurement; the basis is under *How the estimates were made*.
+**Update (same day): #4 is narrower than first reported, and its workaround is measured.** One 64 x 64 tile per subgroup does not hang; two or more do. With one 64-wide tile per subgroup and 64-wide B panels, fp16 GEMM went from 10.8 to **13.8 TFLOP/s at 2048³ (+28%)** and from 12.5 to **14.1 at 4096³ (+13%)**. That is the low end of the +20-35% estimated below, now measured.
+
+- **Biggest remaining win: #1** (unrolled K loops hang the GPU), plus the rest of #4 (two 64-wide tiles per subgroup hang it). They are what stands between 13.8-14.1 TFLOP/s and the 17.5 peak. The gain from fixing them is not estimated with any confidence: the one comparable experiment for #1 (software prefetch) was negative.
 - **Urgent for every Vulkan app on this driver, not just ours.**
   - #7: specialization constants make kernels up to **2x slower** and can **hang the GPU**.
   - #5: cooperative loads from `uint`/`uvec4` shared memory return **wrong data with no error**.
@@ -22,7 +24,7 @@ Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the 
 
 | # | bug | kind | what it costs today | estimated gain if fixed | confidence |
 | --- | --- | --- | --- | --- | --- |
-| 4 | fp16 cooperative matrices with N = 64 tiles, fed new data each step | **GPU hang** | forces 64x32 tiles: 1.5 tile loads per multiply, 64-byte B rows | **+20-35%** fp16 GEMM | medium |
+| 4 | fp16 cooperative matrices with N = 64 tiles: hang with two or more 64-wide accumulators per subgroup (or B held in registers across steps) | **GPU hang** | worked around: one 64 x 64 tile per subgroup (+28% at 2048³, +13% at 4096³, measured) | larger tiles per subgroup: unknown | measured |
 | 1 | two dependent `coopMatMulAdd` into one accumulator in one loop body | **GPU hang** | no K unrolling; shared-memory staging limited to K steps of 16 | +0-10% direct kernels; staged kernels unblocked | low |
 | 7 | M, N, K as specialization constants | 2x slowdown, **GPU hang** | none for AdrenoBLAS (rewritten in the runtime); **up to 2x for other apps** | 0% for us; up to 2x elsewhere | measured |
 | 5 | `coopMatLoad` from a `uint`/`uvec4` shared array | **silent wrong results** | none (we use `f16vec4` arrays) | correctness for other apps | measured |
@@ -32,7 +34,7 @@ Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the 
 
 ## Details
 
-### 4. 64-wide fp16 tiles hang the GPU (largest performance cost)
+### 4. 64-wide fp16 tiles hang the GPU (narrower than first reported; worked around)
 
 ```glsl
 coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
@@ -44,9 +46,17 @@ for (uint i = 0; i < 64; ++i) {
 }
 ```
 
-- **Observed:** `VK_ERROR_DEVICE_LOST` for fp16 into fp16 and fp16 into fp32 at N = 64. The same loop at N = 32 runs at 17.5 TFLOP/s, and fp32 at N = 64 runs fine. Repro: `asm/peak/gen_coopmat_load.py`, kernels `cml_f16f16_n64k16_*` and `cml_f16f32_n64k16_*`.
-- **Workaround:** 64 x 32 tiles, two B loads per A load.
-- **Why it matters:** the honest peak probe sustains 17.5 TFLOP/s with **one** tile load per multiply. The best GEMM issues **1.5** loads per 64 x 32 multiply, and its B tiles have 64-byte rows. A 16 x 64 B tile would do one load per 64 x 64 multiply, and its rows would be 128 bytes. Switching A from 32-byte to 128-byte rows was worth **1.3x** (8.2 to 10.8 TFLOP/s at 2048³).
+- **Observed:** `VK_ERROR_DEVICE_LOST` for fp16 into fp16 and fp16 into fp32 at N = 64 in this probe, where B stays in registers across iterations. The same loop at N = 32 runs at 17.5 TFLOP/s, and fp32 at N = 64 runs fine. Repro: `asm/peak/gen_coopmat_load.py`, kernels `cml_f16f16_n64k16_*` and `cml_f16f32_n64k16_*`.
+- **In GEMM (2048³ TN, `ablas/sweep.py --nt 64`):** all 8 configs with **one** 64 x 64 accumulator per subgroup (`t1x1`, A and B loaded every step) pass. All 16 with **two** (`t1x2`, `t2x1`) lose the device.
+- **Workaround:** one 64 x 64 tile per subgroup, with B stored as 64-wide panels (16 x 64 tiles, 2 KB each). That gives one A and one B load per 64 x 64 multiply and 128-byte B rows. Measured:
+
+| kernel | 2048³ | 4096³ |
+| --- | --- | --- |
+| before: 64 x 32 tiles, best layout | 11.38 | 12.49 |
+| 64 x 64 tile per subgroup, TN layout | 11.40 | |
+| **64 x 64 tile per subgroup, panels (B 64 wide)** | **13.82** | **14.12** |
+
+- **Still blocked:** two or more 64-wide accumulators per subgroup (64 x 128 of C or more per subgroup), the usual next step for more reuse per load.
 
 ### 1. Two dependent multiply-adds into one accumulator per iteration hang the GPU
 
@@ -120,7 +130,7 @@ Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` thi
 
 ## What to ask for, in order
 
-1. **#4 and #1** (GPU hangs that cap GEMM): together an estimated +20-35% fp16 GEMM on the 850.
+1. **#1 and the rest of #4** (GPU hangs that cap GEMM): #4's workaround already gave +13-28%; these are what's left between 14 and 17.5 TFLOP/s.
 2. **#7 and #5** (2x slowdown and hang; silent wrong data): ecosystem-wide correctness and performance.
 3. **#3 and #2** (compiler crashes): fp32 accumulation for accuracy, int8 matrix work.
 4. **#6** after #1.
@@ -129,6 +139,6 @@ Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` thi
 ## How the estimates were made
 
 - **Peak.** 17.5 TFLOP/s is the measured fp16 cooperative-matrix throughput with a fresh A tile loaded every iteration. Probes with loop-invariant operands report up to 66 TFLOP/s because the driver hoists the product, so they are not used. The GPU ran at its 1.45 GHz top clock for 34 of 40 samples during these runs.
-- **#4.** The +20-35% is an inference from load ratios, not a run of the fixed driver. Today's best kernels reach 11.0 to 12.8. Halving B loads and doubling B row length, two changes that each moved earlier kernels, would plausibly lift 2048³ to 13-15 and 4096³ to 15-17 (capped at 17.5).
+- **#4.** The original +20-35% was an inference from load ratios. The workaround then measured +28% at 2048³ (10.8 to 13.8) and +13% at 4096³ (12.5 to 14.1), so the estimate held at its low end.
 - **#1.** A wide range: the one comparable experiment (software prefetch) was negative, and staging gains depend on barrier cost.
-- **Measured vs estimated.** Every number in the tables is measured, except the "estimated gain" column for #4, #1, #2 and the int8 note. Raw results: `ablas/results/*.json`, `ablas/README.md`, `asm/README.md`, `asm/mesa/README.md`.
+- **Measured vs estimated.** Every number in the tables is measured, except the "estimated gain" column for #1 and #2 and the int8 note. Raw results: `ablas/results/*.json`, `ablas/README.md`, `asm/README.md`, `asm/mesa/README.md`.

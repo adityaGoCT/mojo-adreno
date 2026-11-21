@@ -1,0 +1,562 @@
+[
+ {
+  "name": "gPQ_w2x4_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1292.926,
+  "us_min": 1243.004,
+  "iters": 83,
+  "reps": 5,
+  "tflops": 13.821250119870896
+ },
+ {
+  "name": "gPQ_w4x2_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1318.959,
+  "us_min": 1259.938,
+  "iters": 80,
+  "reps": 5,
+  "tflops": 13.635487765270991
+ },
+ {
+  "name": "gPQ_w2x2_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1311.495,
+  "us_min": 1263.358,
+  "iters": 79,
+  "reps": 5,
+  "tflops": 13.598575529659845
+ },
+ {
+  "name": "gPQ_w1x4_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1364.779,
+  "us_min": 1312.871,
+  "iters": 77,
+  "reps": 5,
+  "tflops": 13.085725241855446
+ },
+ {
+  "name": "gPQ_w1x2_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1537.311,
+  "us_min": 1451.099,
+  "iters": 73,
+  "reps": 5,
+  "tflops": 11.83921233768337
+ },
+ {
+  "name": "gPQ_w1x1_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1486.713,
+  "us_min": 1483.092,
+  "iters": 66,
+  "reps": 5,
+  "tflops": 11.583818929641586
+ },
+ {
+  "name": "gPQ_w4x1_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1569.362,
+  "us_min": 1503.113,
+  "iters": 70,
+  "reps": 5,
+  "tflops": 11.429526046278623
+ },
+ {
+  "name": "gPQ_w2x1_t1x1_n64_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1530.334,
+  "us_min": 1517.722,
+  "iters": 64,
+  "reps": 5,
+  "tflops": 11.319509886527308
+ },
+ {
+  "name": "gPQ_w2x4_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1621.372,
+  "us_min": 1532.707,
+  "iters": 68,
+  "reps": 5,
+  "tflops": 11.208841079214748
+ },
+ {
+  "name": "gPQ_w1x4_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1623.023,
+  "us_min": 1542.996,
+  "iters": 66,
+  "reps": 5,
+  "tflops": 11.1340983281875
+ },
+ {
+  "name": "gPQ_w2x4_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1668.709,
+  "us_min": 1564.073,
+  "iters": 67,
+  "reps": 5,
+  "tflops": 10.984058406481028
+ },
+ {
+  "name": "gPQ_w1x2_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1650.65,
+  "us_min": 1569.991,
+  "iters": 63,
+  "reps": 5,
+  "tflops": 10.942654565535726
+ },
+ {
+  "name": "gPQ_w1x4_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1631.275,
+  "us_min": 1575.401,
+  "iters": 65,
+  "reps": 5,
+  "tflops": 10.905076982939581
+ },
+ {
+  "name": "gPQ_w1x4_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1631.687,
+  "us_min": 1580.772,
+  "iters": 65,
+  "reps": 5,
+  "tflops": 10.86802472715863
+ },
+ {
+  "name": "gPQ_w2x4_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1681.391,
+  "us_min": 1586.478,
+  "iters": 66,
+  "reps": 5,
+  "tflops": 10.82893628780229
+ },
+ {
+  "name": "gPQ_w1x1_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1644.492,
+  "us_min": 1625.818,
+  "iters": 60,
+  "reps": 5,
+  "tflops": 10.566907971248934
+ },
+ {
+  "name": "gPQ_w2x2_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1708.663,
+  "us_min": 1638.312,
+  "iters": 62,
+  "reps": 5,
+  "tflops": 10.486323230251624
+ },
+ {
+  "name": "gPQ_w4x1_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1731.74,
+  "us_min": 1670.538,
+  "iters": 63,
+  "reps": 5,
+  "tflops": 10.28403375678973
+ },
+ {
+  "name": "gPQ_w2x1_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1721.816,
+  "us_min": 1671.85,
+  "iters": 60,
+  "reps": 5,
+  "tflops": 10.275963264646949
+ },
+ {
+  "name": "gPQ_w4x2_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1769.526,
+  "us_min": 1683.113,
+  "iters": 61,
+  "reps": 5,
+  "tflops": 10.207198912966629
+ },
+ {
+  "name": "gPQ_w1x2_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1771.851,
+  "us_min": 1728.35,
+  "iters": 57,
+  "reps": 5,
+  "tflops": 9.94004060751584
+ },
+ {
+  "name": "gPQ_w4x2_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1798.931,
+  "us_min": 1729.193,
+  "iters": 58,
+  "reps": 5,
+  "tflops": 9.935194731877818
+ },
+ {
+  "name": "gPQ_w2x2_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1802.426,
+  "us_min": 1740.428,
+  "iters": 58,
+  "reps": 5,
+  "tflops": 9.871059982946722
+ },
+ {
+  "name": "gPQ_w4x2_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1830.292,
+  "us_min": 1763.631,
+  "iters": 58,
+  "reps": 5,
+  "tflops": 9.7411925646578
+ },
+ {
+  "name": "gPQ_w1x2_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1824.341,
+  "us_min": 1766.401,
+  "iters": 56,
+  "reps": 5,
+  "tflops": 9.725916812773544
+ },
+ {
+  "name": "gPQ_w2x2_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1825.564,
+  "us_min": 1771.64,
+  "iters": 57,
+  "reps": 5,
+  "tflops": 9.697155846560248
+ },
+ {
+  "name": "gPQ_w1x4_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1958.562,
+  "us_min": 1947.722,
+  "iters": 49,
+  "reps": 5,
+  "tflops": 8.820493470834135
+ },
+ {
+  "name": "gPQ_w4x1_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1956.374,
+  "us_min": 1954.389,
+  "iters": 49,
+  "reps": 5,
+  "tflops": 8.790404153932508
+ },
+ {
+  "name": "gPQ_w1x4_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1980.027,
+  "us_min": 1977.756,
+  "iters": 50,
+  "reps": 5,
+  "tflops": 8.686546360622849
+ },
+ {
+  "name": "gPQ_w1x2_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 1990.619,
+  "us_min": 1983.153,
+  "iters": 50,
+  "reps": 5,
+  "tflops": 8.662906585624004
+ },
+ {
+  "name": "gPQ_w2x1_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2000.69,
+  "us_min": 1994.828,
+  "iters": 49,
+  "reps": 5,
+  "tflops": 8.612205756085237
+ },
+ {
+  "name": "gPQ_w2x2_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2013.68,
+  "us_min": 2001.525,
+  "iters": 49,
+  "reps": 5,
+  "tflops": 8.583389757310051
+ },
+ {
+  "name": "gPQ_w1x1_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2005.163,
+  "us_min": 2003.71,
+  "iters": 49,
+  "reps": 5,
+  "tflops": 8.574029766782617
+ },
+ {
+  "name": "gPQ_w2x2_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2012.081,
+  "us_min": 2009.312,
+  "iters": 47,
+  "reps": 5,
+  "tflops": 8.550125209026772
+ },
+ {
+  "name": "gPQ_w1x2_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2018.924,
+  "us_min": 2013.801,
+  "iters": 47,
+  "reps": 5,
+  "tflops": 8.531065971265285
+ },
+ {
+  "name": "gPQ_w1x1_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2089.087,
+  "us_min": 2084.426,
+  "iters": 48,
+  "reps": 5,
+  "tflops": 8.242014436588299
+ },
+ {
+  "name": "gPQ_w1x1_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2115.051,
+  "us_min": 2105.804,
+  "iters": 50,
+  "reps": 5,
+  "tflops": 8.158341984344222
+ },
+ {
+  "name": "gPQ_w2x1_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2129.017,
+  "us_min": 2119.767,
+  "iters": 45,
+  "reps": 5,
+  "tflops": 8.104602620948436
+ },
+ {
+  "name": "gPQ_w2x4_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2128.521,
+  "us_min": 2125.689,
+  "iters": 46,
+  "reps": 5,
+  "tflops": 8.082023844504066
+ },
+ {
+  "name": "gPQ_w4x1_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2131.662,
+  "us_min": 2128.868,
+  "iters": 46,
+  "reps": 5,
+  "tflops": 8.06995510477869
+ },
+ {
+  "name": "gPQ_w2x4_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2142.225,
+  "us_min": 2136.747,
+  "iters": 44,
+  "reps": 5,
+  "tflops": 8.04019810674825
+ },
+ {
+  "name": "gPQ_w4x2_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2158.839,
+  "us_min": 2149.721,
+  "iters": 46,
+  "reps": 5,
+  "tflops": 7.991673888844181
+ },
+ {
+  "name": "gPQ_w4x2_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2197.889,
+  "us_min": 2190.369,
+  "iters": 46,
+  "reps": 5,
+  "tflops": 7.843367571400069
+ },
+ {
+  "name": "gPQ_w4x1_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2367.638,
+  "us_min": 2356.739,
+  "iters": 41,
+  "reps": 5,
+  "tflops": 7.289678315672631
+ },
+ {
+  "name": "gPQ_w2x1_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2424.123,
+  "us_min": 2414.485,
+  "iters": 41,
+  "reps": 5,
+  "tflops": 7.115334816327291
+ },
+ {
+  "name": "gPQ_w2x1_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2507.427,
+  "us_min": 2501.09,
+  "iters": 38,
+  "reps": 5,
+  "tflops": 6.868952810174764
+ },
+ {
+  "name": "gPQ_w1x1_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2538.765,
+  "us_min": 2510.159,
+  "iters": 38,
+  "reps": 5,
+  "tflops": 6.8441358431876225
+ },
+ {
+  "name": "gPQ_w4x1_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.005734,
+  "us": 2580.982,
+  "us_min": 2574.036,
+  "iters": 41,
+  "reps": 5,
+  "tflops": 6.674292505621522
+ },
+ {
+  "name": "gPQ_w1x1_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w1x1_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w1x2_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w1x2_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w1x4_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w1x4_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w2x1_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w2x1_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w2x2_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w2x2_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w2x4_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w2x4_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w4x1_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w4x1_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w4x2_t1x2_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ },
+ {
+  "name": "gPQ_w4x2_t2x1_n64_f16_k1",
+  "ok": false,
+  "error": "rc=3"
+ }
+]

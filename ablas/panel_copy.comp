@@ -2,7 +2,7 @@
 // AdrenoBLAS pack kernel: K-major source S[KR, X] (row-major) -> panel layout:
 //   element (k, x) at ((x / W) * (KR / 16) + k / 16) * 16 * W + (k % 16) * W + x % W
 // i.e. 16 x W tiles, row-major inside, K-tiles adjacent within each W-wide panel. W = 64 makes A panels
-// (from A stored [K, M]; the GEMM reads them as column-major 64 x 16 tiles), W = 32 B panels (from B [K, N]).
+// (from A stored [K, M]; the GEMM reads them as column-major 64 x 16 tiles); B panels are W = 64 too (from B [K, N]).
 // One thread per 8 halves (128 bits); workgroups ceil(KR * X / 8 / 256).
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 layout(local_size_x = 256) in;

@@ -32,6 +32,8 @@ def make_shape(M, N, K, la, lb, tol):
         (A if la == "N" else A.T.copy()).tofile(d / "A.bin")
     if lb == "P":  # 16(K) x 32(N) tiles, row-major inside, K-tiles adjacent: [N/32][K/16][16][32]
         B.reshape(K // 16, 16, N // 32, 32).transpose(2, 0, 1, 3).copy().tofile(d / "B.bin")
+    elif lb == "Q":  # 16(K) x 64(N) tiles: [N/64][K/16][16][64]
+        B.reshape(K // 16, 16, N // 64, 64).transpose(2, 0, 1, 3).copy().tofile(d / "B.bin")
     else:
         (B if lb == "N" else B.T.copy()).tofile(d / "B.bin")
     (A.astype(np.float32) @ B.astype(np.float32)).astype(np.float32).tofile(d / "Cref.bin")
@@ -48,6 +50,7 @@ def main():
     ap.add_argument("--big", action="store_true", help="also workgroups of up to 16 subgroups (1024 threads)")
     ap.add_argument("--stage", action="store_true", help="also shared-memory staging of A and/or B (kc 16/32)")
     ap.add_argument("--dual", action="store_true", help="two K steps per iteration into alternating accumulator sets")
+    ap.add_argument("--nt", type=int, nargs="+", default=None, help="tile widths N (default 32)")
     a = ap.parse_args()
     M, N, K = a.M, a.N, a.K
     shape = make_shape(M, N, K, a.la, a.lb, a.tol)
@@ -57,6 +60,8 @@ def main():
     kw = dict(wms=(1, 2, 4, 8), wns=(1, 2, 4, 8), max_sg=16) if a.big else {}
     if a.stage:
         kw["stages"] = ((0, 0, 0), (0, 1, 16), (0, 1, 32), (1, 0, 16), (1, 0, 32), (1, 1, 16), (1, 1, 32))
+    if a.nt:
+        kw["nts"] = tuple(a.nt)
     if a.dual:  # chaining two multiplies into one accumulator per iteration loses the device on the 850
         kw.update(duals=(1,), kus=(2,))
         kw.setdefault("stages", ((0, 0, 0), (0, 1, 32), (1, 0, 32), (1, 1, 32)))

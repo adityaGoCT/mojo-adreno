@@ -19,8 +19,9 @@
 extern "C" {
 #endif
 
-// ABLAS_OP_P: the operand is already in AdrenoBLAS panel format (ablas_pack_a / ablas_pack_b): the fastest
-// layout for big GEMMs (4096^3: 12.5 TFLOP/s vs 9.4 for [K,M]/[K,N]). Pack weights once and pass them as P.
+// ABLAS_OP_P: the operand is already in AdrenoBLAS panel format (ablas_pack_a / ablas_pack_b; A: 64 x 16 tiles,
+// B: 16 x 64 tiles, each contiguous, K tiles adjacent): the fastest
+// layout (4096^3: 14.1 TFLOP/s vs 9.4 for [K,M]/[K,N]; 2048^3: 13.8 vs 10.8). Pack weights once and pass them as P.
 typedef enum { ABLAS_OP_N = 0, ABLAS_OP_T = 1, ABLAS_OP_P = 2 } ablas_op;
 typedef enum { ABLAS_OK = 0, ABLAS_UNSUPPORTED = 1, ABLAS_VK_ERROR = 2, ABLAS_BAD_SHAPE = 3 } ablas_status;
 

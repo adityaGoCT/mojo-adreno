@@ -8,7 +8,7 @@ import json, pathlib, subprocess
 from gen import glsl, parse, tile
 
 HERE = pathlib.Path(__file__).resolve().parent
-LAYOUTS = ("NN", "TN", "TT", "PP")  # NT is packed (direct NT kernels: 2.4 TFLOP/s on the 850); PP = panels
+LAYOUTS = ("NN", "TN", "TT", "PQ")  # NT is packed (direct NT kernels: 2.4 TFLOP/s on the 850); PQ = panels (B 64 wide)
 
 def spv_words(src, out):
     out.parent.mkdir(parents=True, exist_ok=True)

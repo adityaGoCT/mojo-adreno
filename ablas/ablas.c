@@ -241,7 +241,7 @@ ablas_status ablas_pack_a(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uin
 
 ablas_status ablas_pack_b(ablas_handle h, VkCommandBuffer cmd, ablas_op opB, uint32_t K, uint32_t N, ablas_buf B,
                           ablas_buf dst) {
-  return opB == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_panel(h, cmd, opB == ABLAS_OP_N, N, K, 32, B, dst);
+  return opB == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_panel(h, cmd, opB == ABLAS_OP_N, N, K, 64, B, dst);  // 16 x 64 B tiles
 }
 
 static void compute_barrier(ablas_handle h, VkCommandBuffer cmd) {
@@ -253,9 +253,10 @@ static void compute_barrier(ablas_handle h, VkCommandBuffer cmd) {
 ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                          uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf ws) {
   if (M % 64 || N % 32 || K % 32 || !M || !N || !K) return ABLAS_BAD_SHAPE;
-  // Panels: operands given as P, or big GEMMs (4096^3: 12.5 TFLOP/s in panels vs 9.4 TN; at 2048^3 TN plus
-  // no packing is the better deal). Non-K-major sources are transposed into panels: multiples of 64 needed.
-  int panel_ok = (opA != ABLAS_OP_N || (M % 64 == 0 && K % 64 == 0)) && (opB != ABLAS_OP_T || (N % 64 == 0 && K % 64 == 0));
+  // Panels: operands given as P, or big GEMMs. Panel kernels with one 64 x 64 tile per subgroup reach 13.8 TFLOP/s
+  // at 2048^3 and 14.1 at 4096^3 (TN: 10.8 / 9.4); packing both operands costs ~0.4 ms at 2048^3, about what
+  // panels save there, so on-the-fly packing starts at 2^35 multiply-adds. B panels are 64 wide: N % 64.
+  int panel_ok = N % 64 == 0 && (opA != ABLAS_OP_N || K % 64 == 0) && (opB != ABLAS_OP_T || K % 64 == 0);
   if (opA == ABLAS_OP_P || opB == ABLAS_OP_P ||
       (h->pack_to_tn && panel_ok && (double)M * N * K >= 34359738368.0)) {
     ablas_status st;
@@ -293,8 +294,7 @@ ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, abla
     }
     compute_barrier(h, cmd);
   }
-  const char L[3] = {'N', 'T', 'P'};
-  char la = L[opA], lb = L[opB];
+  char la = "NTP"[opA], lb = "NTQ"[opB];  // panels: A 'P' (64 x 16 tiles), B 'Q' (16 x 64 tiles)
   int kernel = select_kernel(la, lb, M, N, K);
   if (kernel < 0) return ABLAS_BAD_SHAPE;
   const ablas_kernel_t* kk = &ablas_kernels[kernel];

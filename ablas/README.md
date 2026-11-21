@@ -12,6 +12,20 @@ matrices (fresh operands every step); 8.36 TFLOP/s fp16 ALU.
 
 ## Results
 
+**Update (2026-11-21, later): 64-wide tiles.** The 64-wide-tile hang only hits with two or more 64 x 64
+accumulators per subgroup. With **one 64 x 64 tile per subgroup** and B packed as **64-wide panels**
+(16 x 64 tiles, layout `Q`; `ablas_pack_b` now writes this format), the tuning harness measures:
+
+| shape (operands in panels) | before (64 x 32 tiles) | one 64 x 64 tile per subgroup | % of 17.5 |
+|---|---|---|---|
+| 2048^3 | 11.38 | **13.82** | 79% |
+| 4096^3 | 12.49 | **14.12** | 81% |
+| 1024^3 | | 13.45 | 77% |
+| 512 x 2048 x 2048 | | 13.72 | 78% |
+
+The library table below predates this change. The runtime now selects these kernels for panel operands
+(`ABLAS_OP_P`, and big GEMMs packed on the fly); every packing path passed the reference check on the phone.
+
 Through the library (`ablas_test`, GPU timestamps, best of 5 runs after warm-up, every call checked
 against an fp32 CPU reference on 1,024 sampled elements). % = share of the 17.5 TFLOP/s measured peak.
 
@@ -77,7 +91,7 @@ fixed: [../urgent_matter.md](../urgent_matter.md)):
 | two dependent `coopMatMulAdd` into one accumulator in a loop body (K unroll) | GPU hang (device lost) |
 | `c0 + c1` on cooperative matrices (also `ma + ma` on int8 A tiles) | compiler segfault |
 | fp32 accumulator converted to fp16 (`coopmat<float16_t>(c)`) | compiler segfault |
-| 64-wide tiles (N = 64) fed fresh data each step | GPU hang |
+| two or more 64-wide (N = 64) accumulators per subgroup; or B kept in registers across steps | GPU hang (one 64 x 64 tile per subgroup works) |
 | `coopMatLoad` from a `uint`/`uvec4` shared array | wrong data (`float16_t`/`f16vec4` arrays work) |
 | dual accumulators with 4+ accumulator tiles | `vkCreateComputePipelines` fails (-13) |
 | M, N, K as real specialization constants | NN kernel 2x slower; one TN kernel hangs the GPU |
