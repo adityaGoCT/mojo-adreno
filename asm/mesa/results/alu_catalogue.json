@@ -1,0 +1,45 @@
+{
+ "2048x2048x2048": {
+  "date": "2026-11-21",
+  "f16": {
+   "kernel": "lg_64x128x16",
+   "compiler": "stock",
+   "tflops": 3.375,
+   "bank_ra": null,
+   "best_per_compiler": {
+    "stock": {
+     "kernel": "lg_64x128x16",
+     "tflops": 3.375
+    },
+    "turnip-bank": {
+     "kernel": "lg_64x128x16",
+     "tflops": 3.315
+    },
+    "turnip-nobank": {
+     "kernel": "gg_64x128",
+     "tflops": 3.311
+    }
+   }
+  },
+  "f32": {
+   "kernel": "gl_64x64x16",
+   "compiler": "turnip-nobank",
+   "tflops": 2.004,
+   "bank_ra": "off",
+   "best_per_compiler": {
+    "stock": {
+     "kernel": "lg_64x64x16",
+     "tflops": 1.997
+    },
+    "turnip-bank": {
+     "kernel": "gl_64x64x16",
+     "tflops": 1.995
+    },
+    "turnip-nobank": {
+     "kernel": "gl_64x64x16",
+     "tflops": 2.004
+    }
+   }
+  }
+ }
+}
