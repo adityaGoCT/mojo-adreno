@@ -11,12 +11,15 @@
 #include <string.h>
 
 #include "ablas_kernels.h"
+#include "ablas_kernels_840.h"
 
 #define NKERNELS (sizeof(ablas_kernels) / sizeof(ablas_kernels[0]))
 #define NTUNED (sizeof(ablas_tuning) / sizeof(ablas_tuning[0]))
 #define TRANSPOSE_KERNEL 0xffff    // 32x32 tile, any multiple of 32
 #define TRANSPOSE64_KERNEL 0xfffe  // 64x64 tile, 128-bit loads/stores, multiples of 64; optional panel output
 #define TILE_COPY_KERNEL 0xfffd    // K-minor source -> K-minor tiles (no transpose)
+#define COPY840_KERNEL 0xfffc      // Adreno 840: plain 16-byte copy (pack of an operand already in TN layout)
+#define K840_BASE 0x8000           // Adreno 840: ablas840_kernels[kernel - K840_BASE]
 
 typedef struct {
   uint32_t kernel, m, n, k;
@@ -32,6 +35,7 @@ struct ablas_ctx {
   size_t npipes, cap;
   const char* last;
   int pack_to_tn;
+  int a840, turnip;  // Adreno 840 ALU backend (ablas_kernels_840.h); its driver is Mesa Turnip, not Qualcomm's
   PFN_vkCreateShaderModule CreateShaderModule;
   PFN_vkDestroyShaderModule DestroyShaderModule;
   PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout;
@@ -52,7 +56,8 @@ ablas_status ablas_create(ablas_handle* out, VkPhysicalDevice pd, VkDevice dev, 
                           VkInstance inst) {
   PFN_vkGetPhysicalDeviceProperties2 props2 =
       (PFN_vkGetPhysicalDeviceProperties2)gipa(inst, "vkGetPhysicalDeviceProperties2");
-  VkPhysicalDeviceSubgroupProperties sg = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+  VkPhysicalDeviceDriverProperties drv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+  VkPhysicalDeviceSubgroupProperties sg = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES, &drv};
   VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sg};
   props2(pd, &p2);
   if (sg.subgroupSize != 64) return ABLAS_UNSUPPORTED;  // the kernels map one 64-lane subgroup per tile
@@ -60,6 +65,11 @@ ablas_status ablas_create(ablas_handle* out, VkPhysicalDevice pd, VkDevice dev, 
   struct ablas_ctx* h = calloc(1, sizeof *h);
   h->dev = dev;
   h->pack_to_tn = 1;
+  // Backend by device, not by cooperative-matrix support (the 840's stock driver offers it too, on the ALUs):
+  // Adreno 840 (chip 0x44050a31) -> ALU kernels; everything else keeps the 850 cooperative-matrix path.
+  h->a840 = strstr(p2.properties.deviceName, "840") != NULL ||
+            (p2.properties.vendorID == 0x5143 && p2.properties.deviceID == 0x44050a31);
+  h->turnip = drv.driverID == VK_DRIVER_ID_MESA_TURNIP;
 #define LOAD(f) h->f = (PFN_vk##f)gdpa(dev, "vk" #f)
   LOAD(CreateShaderModule); LOAD(DestroyShaderModule); LOAD(CreateDescriptorSetLayout);
   LOAD(DestroyDescriptorSetLayout); LOAD(CreatePipelineLayout); LOAD(DestroyPipelineLayout);
@@ -143,10 +153,14 @@ static VkPipeline get_pipeline(ablas_handle h, uint32_t kernel, uint32_t m, uint
   const uint32_t* spv = kernel == TRANSPOSE_KERNEL     ? ablas_transpose_spv
                         : kernel == TRANSPOSE64_KERNEL ? ablas_transpose64_spv
                         : kernel == TILE_COPY_KERNEL   ? ablas_tile_copy_spv
+                        : kernel == COPY840_KERNEL     ? ablas840_copy_spv
+                        : kernel >= K840_BASE          ? ablas840_kernels[kernel - K840_BASE].spv
                                                        : ablas_kernels[kernel].spv;
   size_t words = kernel == TRANSPOSE_KERNEL     ? sizeof(ablas_transpose_spv) / 4
                  : kernel == TRANSPOSE64_KERNEL ? sizeof(ablas_transpose64_spv) / 4
                  : kernel == TILE_COPY_KERNEL   ? sizeof(ablas_tile_copy_spv) / 4
+                 : kernel == COPY840_KERNEL     ? sizeof(ablas840_copy_spv) / 4
+                 : kernel >= K840_BASE          ? ablas840_kernels[kernel - K840_BASE].words
                                                 : ablas_kernels[kernel].words;
   uint32_t* code = malloc(words * 4);
   VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -236,14 +250,33 @@ static ablas_status pack_tiles(ablas_handle h, VkCommandBuffer cmd, int kminor, 
   return ABLAS_OK;
 }
 
+// Adreno 840: the packed format is plain TN (A [K,M], B [K,N]); src stored [X,K] is transposed, src already
+// [K,X] is copied. Shapes: multiples of 32 for a transpose, any size for a copy.
+static ablas_status pack_840(ablas_handle h, VkCommandBuffer cmd, int kminor, uint32_t X, uint32_t K, ablas_buf src,
+                             ablas_buf dst) {
+  if (kminor) return X % 32 || K % 32 ? ABLAS_BAD_SHAPE : transpose(h, cmd, src, dst, X, K, 0);
+  uint32_t n16 = (uint32_t)((uint64_t)X * K * 2 / 16), groups = (n16 + 63) / 64;
+  if (((uint64_t)X * K * 2) % 16) return ABLAS_BAD_SHAPE;
+  VkPipeline p = get_pipeline(h, COPY840_KERNEL, n16, 0, 0);
+  if (!p) return ABLAS_VK_ERROR;
+  h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+  push(h, cmd, src, src, dst);
+  h->CmdDispatch(cmd, groups < 65535 ? groups : 65535, 1, 1);
+  return ABLAS_OK;
+}
+
 ablas_status ablas_pack_a(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t K, ablas_buf A,
                           ablas_buf dst) {
-  return opA == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_tiles(h, cmd, opA == ABLAS_OP_N, M, K, A, dst);
+  if (opA == ABLAS_OP_P) return ABLAS_BAD_SHAPE;
+  if (h->a840) return pack_840(h, cmd, opA == ABLAS_OP_N, M, K, A, dst);
+  return pack_tiles(h, cmd, opA == ABLAS_OP_N, M, K, A, dst);
 }
 
 ablas_status ablas_pack_b(ablas_handle h, VkCommandBuffer cmd, ablas_op opB, uint32_t K, uint32_t N, ablas_buf B,
                           ablas_buf dst) {
-  return opB == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_tiles(h, cmd, opB == ABLAS_OP_T, N, K, B, dst);
+  if (opB == ABLAS_OP_P) return ABLAS_BAD_SHAPE;
+  if (h->a840) return pack_840(h, cmd, opB == ABLAS_OP_T, N, K, B, dst);
+  return pack_tiles(h, cmd, opB == ABLAS_OP_T, N, K, B, dst);
 }
 
 static void compute_barrier(ablas_handle h, VkCommandBuffer cmd) {
@@ -252,8 +285,60 @@ static void compute_barrier(ablas_handle h, VkCommandBuffer cmd) {
                         NULL, 0, NULL);
 }
 
+// Adreno 840 kernel for a shape and driver: the tuned entry nearest in log-space whose tile divides the shape;
+// otherwise the smallest-tile kernel that divides it.
+static int select_840(int driver, uint32_t M, uint32_t N, uint32_t K) {
+  int best = -1;
+  double bestd = 1e30;
+  for (const ablas840_tune_t* t = ablas840_tuning; t->driver != 255; ++t) {
+    const ablas840_kernel_t* kk = &ablas840_kernels[t->kernel];
+    if (t->driver != driver || M % kk->bm || N % kk->bn || K % kk->kstep) continue;
+    double d = fabs(log((double)M / t->m)) + fabs(log((double)N / t->n)) + fabs(log((double)K / t->k));
+    if (d < bestd) bestd = d, best = t->kernel;
+  }
+  if (best >= 0) return best;
+  for (size_t i = 0; i < sizeof(ablas840_kernels) / sizeof(ablas840_kernels[0]); ++i) {
+    const ablas840_kernel_t* kk = &ablas840_kernels[i];
+    if (M % kk->bm == 0 && N % kk->bn == 0 && K % kk->kstep == 0 && !strstr(kk->name, "nobankra") &&
+        (best < 0 || kk->bm * kk->bn < ablas840_kernels[best].bm * ablas840_kernels[best].bn))
+      best = (int)i;
+  }
+  return best;
+}
+
+// Adreno 840 (no matrix unit): fp16 ALU kernels in the TN layout. A stored [M,K] and B stored [N,K] are
+// transposed into the workspace first; P operands are already TN (ablas_pack_a/_b on the 840).
+static ablas_status hgemm_840(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
+                              uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf ws) {
+  if (!M || !N || !K || M % 64 || N % 64 || K % 4) return ABLAS_BAD_SHAPE;
+  if (opA == ABLAS_OP_P) opA = ABLAS_OP_T;
+  if (opB == ABLAS_OP_P) opB = ABLAS_OP_N;
+  int packA = opA == ABLAS_OP_N, packB = opB == ABLAS_OP_T;
+  if (packA || packB) {
+    if (!ws.buffer || K % 32) return ABLAS_BAD_SHAPE;
+    ablas_buf wsA = ws, wsB = {ws.buffer, ws.offset + (packA ? (VkDeviceSize)M * K * 2 : 0)};
+    ablas_status st;
+    if (packA && (st = transpose(h, cmd, A, wsA, M, K, 0))) return st;  // A [M,K] -> [K,M]
+    if (packB && (st = transpose(h, cmd, B, wsB, N, K, 0))) return st;  // B [N,K] -> [K,N]
+    if (packA) A = wsA;
+    if (packB) B = wsB;
+    compute_barrier(h, cmd);
+  }
+  int kernel = select_840(h->turnip, M, N, K);
+  if (kernel < 0) return ABLAS_BAD_SHAPE;
+  const ablas840_kernel_t* kk = &ablas840_kernels[kernel];
+  VkPipeline p = get_pipeline(h, K840_BASE + (uint32_t)kernel, M, N, K);
+  if (!p) return ABLAS_VK_ERROR;
+  h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+  push(h, cmd, A, B, C);
+  h->CmdDispatch(cmd, N / kk->bn, M / kk->bm, 1);
+  h->last = kk->name;
+  return ABLAS_OK;
+}
+
 ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                          uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf ws) {
+  if (h->a840) return hgemm_840(h, cmd, opA, opB, M, N, K, A, B, C, ws);
   if (M % 64 || N % 32 || K % 32 || !M || !N || !K) return ABLAS_BAD_SHAPE;
   // Packed tiles (K-minor 64 x 16 / 16 x 64, one 64 x 64 tile per subgroup): 16.5 TFLOP/s at 4096^3 and 14.8 at
   // 2048^3 (TN: 9.4 / 10.8). Used for operands given as P, for NT at any size (PyTorch's X @ W^T: both operands

@@ -1,0 +1,39 @@
+alu_ll_128x128x16      stock          2.138 ok=True
+alu_ll_128x128x16      turnip-bank    2.158 ok=True
+alu_ll_128x128x16      turnip-nobank  2.16 ok=True
+alu_ll_64x128x8        stock          2.145 ok=True
+alu_ll_64x128x8        turnip-bank    2.193 ok=True
+alu_ll_64x128x8        turnip-nobank  2.193 ok=True
+alu_ll_64x64x16        stock          2.047 ok=True
+alu_ll_64x64x16        turnip-bank    2.023 ok=True
+alu_ll_64x64x16        turnip-nobank  2.023 ok=True
+alu_lg_128x128x16      stock          3.067 ok=True
+alu_lg_128x128x16      turnip-bank    3.135 ok=True
+alu_lg_128x128x16      turnip-nobank  2.96 ok=True
+alu_lg_64x128x16       stock          3.154 ok=True
+alu_lg_64x128x16       turnip-bank    3.311 ok=True
+alu_lg_64x128x16       turnip-nobank  3.098 ok=True
+alu_lg_64x64x16        stock          2.78 ok=True
+alu_lg_64x64x16        turnip-bank    2.706 ok=True
+alu_lg_64x64x16        turnip-nobank  2.427 ok=True
+alu_gl_128x128x16      stock          3.116 ok=True
+alu_gl_128x128x16      turnip-bank    3.218 ok=True
+alu_gl_128x128x16      turnip-nobank  3.083 ok=True
+alu_gl_64x64x16        stock          2.699 ok=True
+  [thermal] level 1 (1200 MHz cap), 51.7 C: waiting
+alu_gl_64x64x16        turnip-bank    2.974 ok=True
+alu_gl_64x64x16        turnip-nobank  2.497 ok=True
+alu_gg_128x128         stock          2.945 ok=True
+alu_gg_128x128         turnip-bank    3.208 ok=True
+alu_gg_128x128         turnip-nobank  3.294 ok=True
+alu_gg_64x128          stock          2.904 ok=True
+alu_gg_64x128          turnip-bank    3.202 ok=True
+alu_gg_64x128          turnip-nobank  3.264 ok=True
+alu_gg_64x64           stock          2.501 ok=True
+alu_gg_64x64           turnip-bank    3.075 ok=True
+alu_gg_64x64           turnip-nobank  2.538 ok=True
+confirming 4 candidates within 3.0% of the best
+  [thermal] level 1 (1200 MHz cap), 51.7 C: waiting
+best stock          alu_lg_64x128x16       3.154 TFLOP/s
+best turnip-bank    alu_lg_64x128x16       3.317 TFLOP/s
+best turnip-nobank  alu_gg_128x128         3.292 TFLOP/s

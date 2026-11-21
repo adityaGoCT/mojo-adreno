@@ -1,0 +1,4 @@
+alu_ll_128x128x16      stock          1.963 ok=True
+alu_ll_128x128x16      turnip-bank    1.987 ok=True
+alu_ll_128x128x16      turnip-nobank  1.964 ok=True
+alu_ll_64x128x8        stock          2.082 ok=True

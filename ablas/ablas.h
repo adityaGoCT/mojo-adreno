@@ -8,6 +8,13 @@
 // The application owns the VkDevice. It must enable VK_KHR_push_descriptor and VK_KHR_cooperative_matrix,
 // and the features shaderFloat16, storageBuffer16BitAccess, vulkanMemoryModel and cooperativeMatrix.
 // Kernels are compiled on first use for each shape and kept for the life of the handle.
+//
+// Adreno 840 backend (chosen by device in ablas_create, not by cooperative-matrix support): the 840 has no
+// matrix unit, so it runs fp16 ALU kernels (ablas_kernels_840.h, tuned by sweep_alu.py) in the TN layout, with
+// fp16 multiply-add and accumulate. On the 840 only VK_KHR_push_descriptor, shaderFloat16 and
+// storageBuffer16BitAccess are required (cooperative matrices are not used; Mesa Turnip does not offer them).
+// It works with Qualcomm's driver and with Mesa Turnip; each has its own tuned kernels (with Turnip built with
+// asm/mesa/turnip-ra-bank.patch, each kernel also carries the bank-aware register allocation choice).
 #ifndef ABLAS_H
 #define ABLAS_H
 
@@ -23,6 +30,8 @@ extern "C" {
 // 64-column (B) panels of 16-deep tiles, K contiguous inside each tile, K tiles adjacent. The fastest layout
 // (4096^3: 16.5 TFLOP/s vs 9.4 for [K,M]/[K,N]; 2048^3: 14.8 vs 10.8). Pack weights once and pass them as P;
 // a PyTorch Linear weight [N,K] packs with a plain copy.
+// The packed format is device-specific: on the Adreno 840 it is plain TN (A [K,M], B [K,N]). Pre-packed
+// weights are not portable between the 840 and 850 builds; pack them on the device that uses them.
 typedef enum { ABLAS_OP_N = 0, ABLAS_OP_T = 1, ABLAS_OP_P = 2 } ablas_op;
 typedef enum { ABLAS_OK = 0, ABLAS_UNSUPPORTED = 1, ABLAS_VK_ERROR = 2, ABLAS_BAD_SHAPE = 3 } ablas_status;
 
@@ -41,13 +50,14 @@ void ablas_destroy(ablas_handle h);
 size_t ablas_hgemm_workspace_size(ablas_op opA, ablas_op opB, uint32_t M, uint32_t N, uint32_t K);
 
 // Records C = op(A) op(B) into cmd (no submit). Shapes must be multiples of 64 (M), 32 (N) and 32 (K);
-// ABLAS_BAD_SHAPE otherwise. The caller synchronizes C with whatever reads it next.
+// ABLAS_BAD_SHAPE otherwise. On the Adreno 840: M and N multiples of 64, K of 4 (32 when an operand has to be
+// transposed, i.e. opA = N or opB = T). The caller synchronizes C with whatever reads it next.
 ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                          uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf workspace);
 
 // Packs an operand into panel format (dst: M*K*2 or K*N*2 bytes). opA/opB: how the source is stored (N or T).
 // Records into cmd; the caller puts a barrier between this and the GEMM that reads dst.
-// M, N and K must be multiples of 64.
+// M, N and K must be multiples of 64. On the Adreno 840 the result is TN (a transpose or a copy; multiples of 32).
 ablas_status ablas_pack_a(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t K, ablas_buf A,
                           ablas_buf dst);
 ablas_status ablas_pack_b(ablas_handle h, VkCommandBuffer cmd, ablas_op opB, uint32_t K, uint32_t N, ablas_buf B,

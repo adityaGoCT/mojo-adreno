@@ -27,7 +27,7 @@ static VkDevice dev;
   X(vkBindBufferMemory) X(vkMapMemory) X(vkCreateCommandPool) X(vkAllocateCommandBuffers)                  \
   X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) X(vkQueueSubmit) X(vkQueueWaitIdle) \
   X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)              \
-  X(vkCmdPipelineBarrier)
+  X(vkCmdPipelineBarrier) X(vkEnumerateDeviceExtensionProperties) X(vkGetPhysicalDeviceProperties2)
 VK_FUNCS(FN)
 
 static double now_ms(void) {
@@ -88,12 +88,31 @@ int main(int argc, char** argv) {
   v12.shaderFloat16 = v12.vulkanMemoryModel = v12.vulkanMemoryModelDeviceScope = VK_TRUE;
   VkPhysicalDeviceVulkan11Features v11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12};
   v11.storageBuffer16BitAccess = VK_TRUE;
-  const char* exts[] = {"VK_KHR_push_descriptor", "VK_KHR_cooperative_matrix"};
-  VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &v11, 0, 1, &q, 0, NULL, 2, exts};
+  // Enable the extensions the device has: the 850 has both; Mesa Turnip on the 840 has no cooperative matrices
+  // (AdrenoBLAS's 840 backend does not use them).
+  uint32_t next = 0;
+  vkEnumerateDeviceExtensionProperties(pd, NULL, &next, NULL);
+  VkExtensionProperties* ep = calloc(next ? next : 1, sizeof *ep);
+  vkEnumerateDeviceExtensionProperties(pd, NULL, &next, ep);
+  int has_pd = 0, has_cm = 0;
+  for (uint32_t i = 0; i < next; ++i) {
+    has_pd |= !strcmp(ep[i].extensionName, "VK_KHR_push_descriptor");
+    has_cm |= !strcmp(ep[i].extensionName, "VK_KHR_cooperative_matrix");
+  }
+  free(ep);
+  const char* exts[2];
+  uint32_t nexts = 0;
+  if (has_pd) exts[nexts++] = "VK_KHR_push_descriptor";
+  if (has_cm) exts[nexts++] = "VK_KHR_cooperative_matrix";
+  if (!has_cm) v12.pNext = NULL;  // no cooperative-matrix feature struct without the extension
+  VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &v11, 0, 1, &q, 0, NULL, nexts, exts};
   CK(vkCreateDevice(pd, &dci, NULL, &dev));
   VkQueue queue;
   vkGetDeviceQueue(dev, 0, 0, &queue);
-  printf("device: %s\n", props.deviceName);
+  VkPhysicalDeviceDriverProperties drvp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+  VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &drvp};
+  vkGetPhysicalDeviceProperties2(pd, &p2);
+  printf("device: %s (driver: %s %s)\n", props.deviceName, drvp.driverName, drvp.driverInfo);
 
   ablas_handle h;
   ablas_status st = ablas_create(&h, pd, dev, gipa, inst);
