@@ -301,6 +301,28 @@ How it got there (the intermediate builds are all reproducible with `IR3_BANKRA_
 Verdict: the bank rule is worth teaching the allocator: +5.0% overall, up to +21% on ALU-heavy kernels. The
 remaining losses come from load-bound kernels where any layout change costs load overlap.
 
+## ALU GEMM tuner with the compiler choice (`tune_alu.py`)
+
+Because the bank-aware RA helps some kernels and hurts others depending on runtime behaviour, the choice is
+made by measurement. For one GEMM shape, `tune_alu.py` builds every `gen_gemm.py` configuration that divides
+it (operand paths ll/lg/gl/gg × workgroup tile, fp16 and fp32). It times each one under three compilers:
+Qualcomm's stock driver, Turnip with the bank-aware RA (`turnip-bank`), and the same Turnip with
+`IR3_SHADER_DEBUG=nobankra` (`turnip-nobank`). Runs are interleaved, one process per candidate, with the
+thermal gate before each and every result checked against the fp32 reference. It writes the best
+(kernel, compiler) per math type, plus the best kernel per compiler, to `results/alu_catalogue.json`. That
+mirrors AdrenoBLAS's catalogue of cooperative-matrix kernels on the 850; this is the 840 ALU counterpart and
+lives here, not in `ablas/`.
+
+```
+python3 run.py push; python3 run.py pushbank          # once per (wiped) phone
+python3 tune_alu.py 2048 2048 2048                    # 22 kernels x 3 compilers, ~12 min
+python3 tune_alu.py 512 2048 2048 --dtype f16         # e.g. an LLM-prefill shape
+python3 tune_alu.py 1024 1024 1024 --dry-run          # data, shaders and manifest only
+```
+
+The catalogue entry records `compiler` (`stock` / `turnip-bank` / `turnip-nobank`) and `bank_ra` (`on` /
+`off` / null for stock). Results: (pending a device session).
+
 ## Reproduce
 
 ```
@@ -345,6 +367,7 @@ turnip-ra-bank.patch Mesa patch: bank-aware ir3 RA (apply in ~/runix/adreno-port
 bank_ab.py           run kernels on a driver with disassembly logged: TFLOP/s, check, conflicts per loop
 bank_rename.py       post-schedule renaming prototype (bank conflicts) on a final .asm; --grow N extra registers
 ab_table.py          A/B table from results/<prefix>_<cfg>.jsonl
+tune_alu.py          per-shape ALU GEMM tuner: kernel config x {stock, turnip-bank, turnip-nobank} -> results/alu_catalogue.json
 asm_dump/            Turnip's disassembly of the kernels used as templates (and their blake3 names)
 dumps/               raw Mesa logs (NIR + disassembly)
 edits/               every injected .asm (half_loop = the loop-count proof; *_no* = diagnostics)
@@ -357,7 +380,7 @@ manifest_cml.txt     stock cooperative-matrix peak (shaders from ../peak/gen_coo
 * Read the stock driver's machine code on the 840 (the pipeline-cache route from `../isa`) to see whether
   Qualcomm's compiler avoids same-component mads. Its fp16 peak loop at 89% suggests something else is going
   on there.
-* Bank-aware RA (above): let the tuner choose per kernel (`nobankra` on/off). A post-schedule renaming pass
+* Bank-aware RA (above): `tune_alu.py` now chooses per kernel and shape (`nobankra` on/off, or stock). A post-schedule renaming pass
   was tried and finds no room in the packed kernels (section above). The ll kernels' 50% conflicts would need
   the post-RA scheduler itself to weigh bank cost against load hoisting.
 * A faster ALU GEMM needs less operand traffic per FMA: larger register tiles (fp16 operands and accumulators

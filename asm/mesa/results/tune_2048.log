@@ -1,0 +1,2 @@
+adb ('shell', 'mkdir -p /data/local/tmp/asm_mesa/shape/g2048_h'): rc=1 adb: device 'localhost:59796' not found
+
