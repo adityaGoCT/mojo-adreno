@@ -47,7 +47,7 @@ ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, abla
 
 // Packs an operand into panel format (dst: M*K*2 or K*N*2 bytes). opA/opB: how the source is stored (N or T).
 // Records into cmd; the caller puts a barrier between this and the GEMM that reads dst.
-// M % 64, N % 32, K % 16; sources that are not K-major (A stored [M,K], B stored [N,K]) need multiples of 64.
+// M, N and K must be multiples of 64.
 ablas_status ablas_pack_a(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t K, ablas_buf A,
                           ablas_buf dst);
 ablas_status ablas_pack_b(ablas_handle h, VkCommandBuffer cmd, ablas_op opB, uint32_t K, uint32_t N, ablas_buf B,

@@ -26,8 +26,20 @@ per step (loop 30 -> 16 instructions). Tuning harness, cooled before every confi
 
 The runtime now packs into this format (`tile_copy.comp`; `transpose64.comp` mode W = 1 for K-major sources).
 PyTorch's NT case (activations [M,K], weights [N,K]) packs with plain copies and no transposes, so NT always
-takes this path. Every packing path passed the reference check on the phone; a cooled library re-timing is pending.
-The tables below are from earlier kernels.
+takes this path (M, N, K multiples of 64). Through the library, cooled (`cool_run.sh`), every call checked:
+
+| call | TFLOP/s | % of 17.5 |
+|---|---|---|
+| **pre-packed 4096^3** | **16.36** | **93%** |
+| TN / NT / NN input 4096^3 (packed in the call) | 13.71 / 13.56 / 13.76 | 77-78% |
+| pre-packed 2048^3 / 1024^3 | 14.71 / 13.41 | 77-84% |
+| TN / NT / NN / TT input 2048^3 | 11.63 / 10.72 / 9.71 / 9.72 | 55-66% |
+| LLM prefill, both pre-packed: 512 x 2048 x 2048 / 512 x 8192 x 2048 / 512 x 2048 x 8192 | 13.91 / 15.17 / 16.20 | 79-93% |
+| LLM prefill, weights pre-packed (activations [M,K] as given): same shapes | 11.98 / 14.59 / 13.49 | 68-83% |
+
+`tile_copy.comp` copies 32-row x 64-K blocks so each subgroup writes 256-byte runs; walking whole rows
+scattered 32-byte writes over K/16 tiles and cost 3 TFLOP/s on 512 x 2048 x 8192. The tables below are
+from earlier kernels.
 
 
 **Update (2026-11-21, later): 64-wide tiles.** The 64-wide-tile hang only hits with two or more 64 x 64

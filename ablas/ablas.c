@@ -226,13 +226,13 @@ static ablas_status transpose(ablas_handle h, VkCommandBuffer cmd, ablas_buf src
 // (A [K,M], B [K,N]) are transposed straight into tiles.
 static ablas_status pack_tiles(ablas_handle h, VkCommandBuffer cmd, int kminor, uint32_t X, uint32_t K, ablas_buf src,
                                ablas_buf dst) {
-  if (X % 64 || K % 16) return ABLAS_BAD_SHAPE;
+  if (X % 64 || K % 64) return ABLAS_BAD_SHAPE;
   if (!kminor) return transpose(h, cmd, src, dst, K, X, 1);  // src [K, X]
   VkPipeline p = get_pipeline(h, TILE_COPY_KERNEL, X, K, 0);  // src [X, K]
   if (!p) return ABLAS_VK_ERROR;
   h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
   push(h, cmd, src, src, dst);
-  h->CmdDispatch(cmd, (uint32_t)(((size_t)K * X / 8 + 255) / 256), 1, 1);
+  h->CmdDispatch(cmd, K / 64, X / 32, 1);
   return ABLAS_OK;
 }
 
@@ -258,8 +258,8 @@ ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, abla
   // Packed tiles (K-minor 64 x 16 / 16 x 64, one 64 x 64 tile per subgroup): 16.5 TFLOP/s at 4096^3 and 14.8 at
   // 2048^3 (TN: 9.4 / 10.8). Used for operands given as P, for NT at any size (PyTorch's X @ W^T: both operands
   // are K-minor, so packing is a plain re-tiling copy), and for everything else from 2^35 multiply-adds, where
-  // the transposes K-major sources need are paid back. Tiles are 64 wide: M % 64 and N % 64.
-  int panel_ok = N % 64 == 0 && (opA != ABLAS_OP_T || K % 64 == 0) && (opB != ABLAS_OP_N || K % 64 == 0);
+  // the transposes K-major sources need are paid back. Needs M, N, K multiples of 64.
+  int panel_ok = N % 64 == 0 && K % 64 == 0;  // tiles are 64 wide; the pack kernels work in 64 x 64 blocks
   int nt = opA == ABLAS_OP_N && opB == ABLAS_OP_T;
   if (opA == ABLAS_OP_P || opB == ABLAS_OP_P ||
       (h->pack_to_tn && panel_ok && (nt || (double)M * N * K >= 34359738368.0))) {
