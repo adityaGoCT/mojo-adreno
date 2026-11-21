@@ -27,9 +27,9 @@ Turnip's own ir3 compiler) for GEMM-style ALU math? Measured 2026-11-21.
   matrix on the 840. For AdrenoBLAS on the 840, ALU GEMM is the only path. Its speed is set by data movement
   (tile shape, splitting operands across the shared-memory and texture paths) more than by instruction
   selection. Assembly adds the last ~10% once a kernel is ALU-bound. Teaching Turnip's register allocator
-  the bank rule (`turnip-ra-bank.patch`, section below) removes the slow mads. It gains up to +18% on some
-  GEMM kernels but only +1.5% across all 22, because moving registers costs scheduling freedom and fp16 has
-  a second placement effect not yet characterized.
+  the bank rule (`turnip-ra-bank.patch`, section below) removes most of the slow mads: +4.3% geomean
+  across 22 GEMM kernels, up to +18%. Four kernels lose ~4%, because moved registers cost the post-RA
+  scheduler some freedom.
 
 ## Device and setup
 
@@ -100,8 +100,8 @@ Practical notes (all hit during this work):
 
 `gen_asm_peak.py` rewrites the loop of the fp32 peak kernel (32 or 64 accumulators) with chosen operand
 registers. The layout is GEMM order, `mad acc, m, d, acc`, and the components are relative to the accumulator's.
-(The fp16 column of this first table was measured with uninitialised fp16 accumulators; the clean fp16 sweep
-below supersedes it.)
+(The fp16 column of this first table reinterprets the fp32 template's accumulators as fp16, and its 7.2 rows
+are unexplained; the clean fp16 sweep below supersedes it.)
 
 | sources | fp32 | fp16 |
 |---|---|---|
@@ -196,73 +196,90 @@ the operands across the two memory paths (lg/gl) beats putting both on one path,
 ## Bank-aware register allocation in Turnip (`turnip-ra-bank.patch`)
 
 The bank rule, applied in Turnip's own compiler instead of in assembly. The patch changes ir3's register
-allocator (`src/freedreno/ir3/ir3_ra.c`; ~165 lines, a8xx only):
+allocator (`src/freedreno/ir3/ir3_ra.c`, ~200 lines; a8xx only):
 
 * Before allocation it records every `mad` whose three sources are GPRs.
-* When `find_best_gap` places a value that such mads read, it scores each free spot. A mad whose three sources
-  would all share a component costs 4. One with two known sources sharing a component and the third not yet
-  placed costs 1, which steers the first-placed operand away from the accumulator's bank. The allocator takes
-  the lowest-cost spot, scanning onward from its usual round-robin position.
-* Values produced by shared-memory loads (`ldl`) are left where the allocator would put them anyway (see below).
-* `IR3_SHADER_DEBUG=nobankra` turns it off. With it off, the compiled shaders are byte-identical to the
-  unpatched Turnip (checked by blake3). `IR3_BANKRA_MODE` (default 5) selects the variants tested below.
+* When `find_best_gap` places a value that such mads read, it scores each free spot by register-index
+  parity, the measured bank. A mad whose three sources would all land in one bank costs 4. One with two known
+  sources in the same bank and the third not yet placed costs 1, which steers the first-placed operand away
+  from the accumulator's bank. The allocator takes the lowest-cost spot, scanning onward from its usual
+  round-robin position.
+* Values produced by shared-memory loads (`ldl`) are steered only when their mads also read a texture- or
+  global-load operand (gl/lg kernels). With both operands from shared memory (ll), moving them costs more
+  than it saves (below).
+* `IR3_SHADER_DEBUG=nobankra` turns it off; with it off the compiled shaders are byte-identical to unpatched
+  Turnip (checked by blake3). `IR3_BANKRA_MODE` selects variants; the default 9 is bit 1 (count the
+  one-unknown case) + bit 8 (paired-only `ldl` steering). The others: bit 2 limits the search to 3 shifts;
+  bit 4 never steers `ldl` results.
 * It is built in `~/runix/adreno-port/build/turnip-android-bankra`; the original `build/turnip-android`
   binary is unchanged. On the phone it lives in `turnip_bank/` (`python3 run.py pushbank`, driver
   `turnip-bank`).
 
-Results, 2048³, unpatched vs patched in the same session, interleaved per kernel (5 reps × 150 ms;
-run-to-run noise ±2–3%). Every result passes the check against the reference.
+Final A/B, 2048³, unpatched vs patched (default), same session, interleaved per kernel (5 reps × 150 ms;
+run-to-run noise ±2–3%; `results/fin_*`). Conflicts are mads in the main loop with all three sources in one
+bank (`bankcheck.py`). Every result passes the check against the reference.
 
-| kernel | same-component mads in loop (unpatched) | unpatched TFLOP/s | patched | change |
-|---|---|---|---|---|
-| f32 ll 128×128×16 | 64/1024 | 1.40 | 1.40 | +0.0% |
-| f32 ll 64×128×8 | 26/512 | 1.38 | 1.39 | +0.3% |
-| f32 ll 64×64×16 | 28/1024 | 1.30 | 1.29 | −0.4% |
-| f32 lg 128×128×16 | 110/1024 | 1.51 | 1.48 | −1.8% |
-| f32 lg 64×128×16 | 170/1024 | 1.54 | 1.60 | +3.7% |
-| f32 lg 64×64×16 | 54/1024 | 1.79 | 1.74 | −2.3% |
-| f32 gl 128×128×16 | 77/1024 | 1.55 | 1.54 | −0.9% |
-| f32 gl 64×64×16 | 52/1024 | 2.00 | 1.90 | −4.8% |
-| f32 gg 128×128 | 37/256 | 1.28 | 1.36 | **+6.1%** |
-| f32 gg 64×128 | 37/256 | 1.36 | 1.35 | −0.4% |
-| f32 gg 64×64 | 37/256 | 1.57 | 1.52 | −2.9% |
-| f16 ll 128×128×16 | 154/1024 | 2.16 | 2.16 | +0.1% |
-| f16 ll 64×128×8 | 101/512 | 2.19 | 2.20 | +0.3% |
-| f16 ll 64×64×16 | 67/1024 | 2.02 | 2.02 | −0.1% |
-| f16 lg 128×128×16 | 115/1024 | 2.95 | 3.04 | +2.9% |
-| f16 lg 64×128×16 | 116/1024 | 3.10 | 3.10 | −0.1% |
-| f16 lg 64×64×16 | 213/1024 | 2.42 | 2.76 | **+14.3%** |
-| f16 gl 128×128×16 | 105/1024 | 3.08 | 3.09 | +0.2% |
-| f16 gl 64×64×16 | 67/1024 | 2.49 | 2.49 | −0.0% |
-| f16 gg 128×128 | 55/256 | 3.28 | 3.32 | +1.3% |
-| f16 gg 64×128 | 55/256 | 3.21 | 3.26 | +1.6% |
-| f16 gg 64×64 | 55/256 | 2.53 | 2.99 | **+18.0%** |
+| kernel | conflicts unpatched | patched | unpatched TFLOP/s | patched | change |
+|---|---|---|---|---|---|
+| f32 ll 128×128×16 | 156/1024 | 156 | 1.40 | 1.40 | +0.0% |
+| f32 ll 64×128×8 | 70/512 | 70 | 1.38 | 1.38 | +0.1% |
+| f32 ll 64×64×16 | 202/1024 | 202 | 1.31 | 1.31 | −0.0% |
+| f32 lg 128×128×16 | 222/1024 | 88 | 1.52 | 1.59 | +4.9% |
+| f32 lg 64×128×16 | 354/1024 | 60 | 1.56 | 1.83 | **+17.2%** |
+| f32 lg 64×64×16 | 110/1024 | 60 | 1.84 | 1.77 | −3.8% |
+| f32 gl 128×128×16 | 232/1024 | 110 | 1.56 | 1.68 | +7.9% |
+| f32 gl 64×64×16 | 160/1024 | 70 | 2.01 | 1.92 | −4.3% |
+| f32 gg 128×128 | 128/256 | 12 | 1.28 | 1.45 | **+13.1%** |
+| f32 gg 64×128 | 128/256 | 12 | 1.36 | 1.52 | **+12.3%** |
+| f32 gg 64×64 | 128/256 | 12 | 1.57 | 1.62 | +3.0% |
+| f16 ll 128×128×16 | 512/1024 | 512 | 2.16 | 2.16 | −0.1% |
+| f16 ll 64×128×8 | 256/512 | 256 | 2.19 | 2.19 | +0.0% |
+| f16 ll 64×64×16 | 512/1024 | 512 | 2.02 | 2.02 | −0.1% |
+| f16 lg 128×128×16 | 512/1024 | 60 | 2.95 | 3.03 | +2.7% |
+| f16 lg 64×128×16 | 512/1024 | 60 | 3.10 | 3.21 | +3.5% |
+| f16 lg 64×64×16 | 512/1024 | 60 | 2.43 | 2.70 | **+11.1%** |
+| f16 gl 128×128×16 | 512/1024 | 74 | 3.09 | 3.20 | +3.5% |
+| f16 gl 64×64×16 | 512/1024 | 74 | 2.49 | 2.95 | **+18.5%** |
+| f16 gg 128×128 | 128/256 | 12 | 3.31 | 3.17 | −4.2% |
+| f16 gg 64×128 | 128/256 | 12 | 3.31 | 3.18 | −4.0% |
+| f16 gg 64×64 | 128/256 | 12 | 2.54 | 2.99 | **+18.0%** |
 
-Geometric mean +1.5%. The patch removes the same-component mads (to 0 in most loops; a few lg/gl loops keep
-1–39). Register footprint and wave count are unchanged. The peak-loop kernels compile to identical code.
+Geometric mean **+4.3%**, best +18.5%. The GEMM kernels' register footprints and wave counts are unchanged,
+and the const-operand peak loops compile to identical code.
 
-What limits it:
+**Register-footprint effect (separate from banks).** The fp16 peak loops with register operands
+(`peak_f16_*_rr`) run at 7.17 patched vs 7.8 unpatched, although their placement is conflict-free. The patch
+moved them from 10 to 11 registers. Re-assembling the patched code with one extra register write that only
+changes the footprint (`edits/fp_*`, run with `DRIVER=turnip-bank ./run_override.sh`) gives:
 
-* **False dependencies.** Moving a load's destination away from the allocator's round-robin spot can land
-  on registers that are still being read. Turnip's post-RA scheduler then can't hoist the load. In
-  fp32 lg 64×64, texture loads move from ~40 instructions before their use to 2–20, and the loop gains three
-  `(sy)` waits. Leaving shared-memory-load results in place (variant 5) removed the 3–5% losses on the ll
-  kernels (variant 1 steered everything). The price: fp16 gl 64×64, whose conflicts sit in shared-memory-loaded
-  operands, loses the +13.9% it had with variant 1 (±0 with variant 5). I tried and dropped three alternatives: limiting the search to 3
-  shifts (variants 2/3), shifting half registers only by whole 32-bit registers (9/13), and picking the
-  conflict-free spot freed longest ago (17/21). None did better than variant 5 (results/ab_mode*, st_mode*).
-* **A second fp16 effect, not yet characterized.** In `peak_f16_w4_c16_rr` (three-register fp16 mads), the
-  patch moves `d` from `hr9.y` to `hr9.w` (no component conflict either way), and the loop drops from 7.81 to
-  7.17 TFLOP/s. Moving that operand by hand through the override (`edits/f16rule_*`) shows strong placement
-  sensitivity. `d` in a high 16-bit half (`.y`/`.w`) runs at 7.78; in a low half (`.x`/`.z`) 6.04; `m` in
-  a high half next to a high `d` 5.53. A "same 16-bit half for all three sources" rule fits those placements,
-  but not the patched kernel: its loop scores the same as the unpatched one on every pairwise metric. A
-  systematic placement sweep is needed before the allocator can model fp16 correctly.
+| full registers | 10 (unpatched) | 11 | 12 | 13 | 14 | 15 | 16 |
+|---|---|---|---|---|---|---|---|
+| TFLOP/s | 7.80 | 7.15 | 7.78 | 7.04 | 7.04 | 7.84 | 7.84 |
 
-Verdict: the bank rule is real and the allocator can avoid it cheaply. It gives up to +18% on kernels where
-conflicts dominate. As a general default it is a small net win (+1.5%) with losses of up to 5% from
-scheduling side effects and the unknown fp16 rule. Fixing those needs scheduler awareness (or a post-RA
-renaming pass that keeps the round-robin order) plus the full fp16 placement rule.
+All of these report 16 max waves or more except 13–16. So it isn't plain occupancy, and the cause is
+unknown. It costs 8–10% at the wrong sizes and is worth a padding step in AdrenoBLAS's code generator.
+
+How it got there (the intermediate builds are all reproducible with `IR3_BANKRA_MODE`):
+
+* The first version used a narrower rule (all three sources in the same component letter). It removed
+  those mads but only 1-in-16 placements are affected by it, so it gained +1.5% geomean (`results/full_*`).
+  The fp16 placement sweep and the fp32 parity check showed the bank is parity. Switching the cost to parity
+  raised the gain to +3.1% (variant 5) / +3.9% (variant 1) (`results/par_*`). Paired-only `ldl` steering
+  (variant 9) then took it to +4.3% (`results/p9_*`, `fin_*`).
+* **Why ll kernels are left alone.** Steering shared-memory-load destinations there removes the conflicts
+  but costs 7–8%. The moved registers overlap ones a pending `ldl` still writes, so the scheduler
+  adds `(ss)` waits in the middle of the load stream.
+* **Why four kernels still lose ~4%.** Moving a load's destination away from the round-robin spot can land
+  on registers that are still being read. Turnip's post-RA scheduler then can't hoist the load. In fp32
+  lg 64×64, texture loads move from ~40 instructions before their use to 2–20, and the loop gains three
+  `(sy)` waits. fp16 gg 128×128 and 64×128 are load-bound, so the removed conflicts buy nothing and the
+  lost load overlap costs 4%. The hand-written version of the same kernel gets 3.65 with a schedule built
+  around the new layout. Limiting the search to nearby spots, or preferring the spot freed longest ago, did
+  not fix this (`results/ab_mode*`, `st_mode*`).
+
+Verdict: the bank rule is worth teaching the allocator, at +4.3% overall and up to +18% on ALU-heavy
+kernels. To make it a pure win, the placement change has to be scheduler-aware. Either run it as a
+post-RA renaming pass that keeps the round-robin order, or let the post-RA scheduler see the bank cost.
 
 ## Reproduce
 
@@ -302,6 +319,7 @@ gen_gemm.py          GEMM shaders (ll/lg/gl/gg, fp32/fp16) + 2048^3 data -> mani
 extract_asm.py       Mesa log -> asm_dump/<blake3>.asm
 gen_asm_peak.py      hand-written peak loops (bank-conflict study) -> edits/asmpeak_*/
 gen_asm_gemm.py      hand-written GEMM loops -> edits/asmgemm_f16_*/
+gen_f16_sweep.py     fp16 operand-placement sweep (the parity rule) -> edits/f16sweep_*/; analyze_f16_sweep.py
 bankcheck.py         count same-component 3-register mads in an .asm
 turnip-ra-bank.patch Mesa patch: bank-aware ir3 RA (apply in ~/runix/adreno-port/third_party/mesa at 745709a)
 bank_ab.py           run kernels on a driver with disassembly logged: TFLOP/s, check, conflicts per loop
@@ -317,8 +335,9 @@ manifest_cml.txt     stock cooperative-matrix peak (shaders from ../peak/gen_coo
 * Read the stock driver's machine code on the 840 (the pipeline-cache route from `../isa`) to see whether
   Qualcomm's compiler avoids same-component mads. Its fp16 peak loop at 89% suggests something else is going
   on there.
-* Bank-aware RA (above): characterize the fp16 half-register placement rule with an operand-placement sweep,
-  and make the placement change scheduler-aware, so it stops costing up to 5% on some kernels.
+* Bank-aware RA (above): make the placement change scheduler-aware (post-RA renaming that keeps the
+  round-robin order, or bank cost in the post-RA scheduler), so it stops costing ~4% on load-bound kernels
+  and can also fix the ll kernels' 50% conflicts.
 * A faster ALU GEMM needs less operand traffic per FMA: larger register tiles (fp16 operands and accumulators
   must fit in hr0–hr47), and interleaved shared-memory and texture loads.
 * Shipping route if assembly is ever used: apps would have to bring Turnip (e.g. libadrenotools, as Android

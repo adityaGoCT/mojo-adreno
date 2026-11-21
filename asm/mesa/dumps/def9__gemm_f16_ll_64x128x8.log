@@ -1,0 +1,1270 @@
+MESA: warning: Gralloc doesn't support lock_ycbcr (video buffers won't be supported)
+MESA: info: Using fallback gralloc implementation
+MESA: info: NIR (final form) for CL shader (null):
+MESA: info: shader: MESA_SHADER_COMPUTE
+MESA: info: source_blake3: {0xe2cca1ba, 0xe8087d43, 0xd9d1f419, 0x643c6742, 0xce24b416, 0x0374f013, 0x95d17d44, 0xc109c954}
+MESA: info: workgroup_size: 128, 1, 1
+MESA: info: num_ubos: 2
+MESA: info: system_values_read: 0x00000000'00000000'00018400'00000000
+MESA: info: shared_size: 3072
+MESA: info: api_subgroup_size: 64
+MESA: info: max_subgroup_size: 64
+MESA: info: min_subgroup_size: 64
+MESA: info: bit_sizes_float: 0x10
+MESA: info: bit_sizes_int: 0x31
+MESA: info: flrp_lowered: true
+MESA: info: io_lowered: true
+MESA: info: writes_memory: true
+MESA: info: decl_var ubo INTERP_MODE_NONE none uint[7] $driver_params (0, 1, 0)
+MESA: info: decl_var shared INTERP_MODE_NONE none f16vec4x0a2B[8][16] #0
+MESA: info: decl_var shared INTERP_MODE_NONE none f16vec4x0a2B[8][32] #1
+MESA: info: decl_function main () (entrypoint)
+MESA: info: 
+MESA: info: impl main {
+MESA: info:     con block b0:         // preds:
+MESA: info:     con 1        %0 = @preamble_start_ir3
+MESA: info:                       // succs: b1 b5
+MESA: info:     if %0 {
+MESA: info:         con block b1:         // preds: b0
+MESA: info:         div 1        %1 = @elect_any_ir3
+MESA: info:                           // succs: b2 b3
+MESA: info:         if %1 {
+MESA: info:             div block b2:         // preds: b1
+MESA: info:             con 32       %2 = load_const (0x00000001 = 0.000000)
+MESA: info:                               @copy_ubo_to_uniform_ir3 (%2 (0x1), %2 (0x1)) (access=speculatable, base=0, range=1)
+MESA: info:             con 32       %4 = load_const (0x00000000 = 0.000000)
+MESA: info:             con 32       %5 = @bindless_resource_ir3 (%4 (0x0)) (desc_set=0, access=speculatable)
+MESA: info:                               @prefetch_tex_ir3 (%5) (access=speculatable)
+MESA: info:             con 32       %6 = load_const (0x00000002 = 0.000000)
+MESA: info:             con 32       %7 = @bindless_resource_ir3 (%6 (0x2)) (desc_set=0, access=speculatable)
+MESA: info:                               @prefetch_tex_ir3 (%7) (access=speculatable)
+MESA: info:             con 32      %10 = load_const (0x00000004 = 0.000000)
+MESA: info:             con 32      %11 = @bindless_resource_ir3 (%10 (0x4)) (desc_set=0, access=speculatable)
+MESA: info:                               @prefetch_tex_ir3 (%11) (access=speculatable)
+MESA: info:                               @preamble_end_ir3
+MESA: info:                               // succs: b4
+MESA: info:         } else {
+MESA: info:             div block b3:  // preds: b1, succs: b4
+MESA: info:         }
+MESA: info:         con block b4:  // preds: b2 b3, succs: b6
+MESA: info:     } else {
+MESA: info:         con block b5:  // preds: b0, succs: b6
+MESA: info:     }
+MESA: info:     con block b6:         // preds: b4 b5
+MESA: info:     div 32x3    %42 = @load_local_invocation_id
+MESA: info:     con 32x2  %2060 = load_const (0x0000000f, 0x0000001f) = (15, 31)
+MESA: info:     div 32x2  %2061 = iand %42.xx, %2060 (0xf, 0x1f)
+MESA: info:     con 32      %45 = load_const (0x00000004 = 0.000000)
+MESA: info:     con 32x2  %2058 = load_const (0x00000004, 0x00000005)
+MESA: info:     div 32x2  %2059 = ushr %42.xx, %2058 (0x4, 0x5)
+MESA: info:     con 32x3    %47 = @load_workgroup_id
+MESA: info:     con 32      %50 = load_const (0x00000002)
+MESA: info:     con 32    %1412 = load_const (0x00000000)
+MESA: info:     con 32x2    %54 = @load_const_ir3 (%1412 (0x0)) (base=0)
+MESA: info:     con 32x2  %1955 = iadd %47.xy, %54
+MESA: info:     con 32x2  %1956 = load_const (0x00000006, 0x00000007)
+MESA: info:     con 32x2  %1957 = ishl %1955.yx, %1956 (0x6, 0x7)
+MESA: info:     con 32      %59 = load_const (0x00000080 = 128)
+MESA: info:     con 32      %63 = load_const (0x00000008)
+MESA: info:     con 32      %64 = load_const (0x00000800 = 2048)
+MESA: info:     con 16x2  %1960 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1963 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1966 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1969 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1972 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1975 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1978 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1981 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1984 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1987 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1990 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1993 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1996 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %1999 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2002 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2005 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2008 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2011 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2014 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2017 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2020 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2023 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2026 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2029 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2032 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2035 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2038 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2041 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2044 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2047 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2050 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:     con 16x2  %2053 = load_const (0x0000, 0x0000) = (0.000000, 0.000000)
+MESA: info:                       // succs: b7
+MESA: info:     con loop {
+MESA: info:         con block b7:         // preds: b6 b10
+MESA: info:         div 16x2  %1958 = phi b6: %1960 (0.000000, 0.000000), b10: %2340
+MESA: info:         div 16x2  %1961 = phi b6: %1963 (0.000000, 0.000000), b10: %2341
+MESA: info:         div 16x2  %1964 = phi b6: %1966 (0.000000, 0.000000), b10: %2338
+MESA: info:         div 16x2  %1967 = phi b6: %1969 (0.000000, 0.000000), b10: %2339
+MESA: info:         div 16x2  %1970 = phi b6: %1972 (0.000000, 0.000000), b10: %2336
+MESA: info:         div 16x2  %1973 = phi b6: %1975 (0.000000, 0.000000), b10: %2337
+MESA: info:         div 16x2  %1976 = phi b6: %1978 (0.000000, 0.000000), b10: %2334
+MESA: info:         div 16x2  %1979 = phi b6: %1981 (0.000000, 0.000000), b10: %2335
+MESA: info:         div 16x2  %1982 = phi b6: %1984 (0.000000, 0.000000), b10: %2332
+MESA: info:         div 16x2  %1985 = phi b6: %1987 (0.000000, 0.000000), b10: %2333
+MESA: info:         div 16x2  %1988 = phi b6: %1990 (0.000000, 0.000000), b10: %2330
+MESA: info:         div 16x2  %1991 = phi b6: %1993 (0.000000, 0.000000), b10: %2331
+MESA: info:         div 16x2  %1994 = phi b6: %1996 (0.000000, 0.000000), b10: %2328
+MESA: info:         div 16x2  %1997 = phi b6: %1999 (0.000000, 0.000000), b10: %2329
+MESA: info:         div 16x2  %2000 = phi b6: %2002 (0.000000, 0.000000), b10: %2326
+MESA: info:         div 16x2  %2003 = phi b6: %2005 (0.000000, 0.000000), b10: %2327
+MESA: info:         div 16x2  %2006 = phi b6: %2008 (0.000000, 0.000000), b10: %2324
+MESA: info:         div 16x2  %2009 = phi b6: %2011 (0.000000, 0.000000), b10: %2325
+MESA: info:         div 16x2  %2012 = phi b6: %2014 (0.000000, 0.000000), b10: %2322
+MESA: info:         div 16x2  %2015 = phi b6: %2017 (0.000000, 0.000000), b10: %2323
+MESA: info:         div 16x2  %2018 = phi b6: %2020 (0.000000, 0.000000), b10: %2320
+MESA: info:         div 16x2  %2021 = phi b6: %2023 (0.000000, 0.000000), b10: %2321
+MESA: info:         div 16x2  %2024 = phi b6: %2026 (0.000000, 0.000000), b10: %2318
+MESA: info:         div 16x2  %2027 = phi b6: %2029 (0.000000, 0.000000), b10: %2319
+MESA: info:         div 16x2  %2030 = phi b6: %2032 (0.000000, 0.000000), b10: %2316
+MESA: info:         div 16x2  %2033 = phi b6: %2035 (0.000000, 0.000000), b10: %2317
+MESA: info:         div 16x2  %2036 = phi b6: %2038 (0.000000, 0.000000), b10: %2314
+MESA: info:         div 16x2  %2039 = phi b6: %2041 (0.000000, 0.000000), b10: %2315
+MESA: info:         div 16x2  %2042 = phi b6: %2044 (0.000000, 0.000000), b10: %2312
+MESA: info:         div 16x2  %2045 = phi b6: %2047 (0.000000, 0.000000), b10: %2313
+MESA: info:         div 16x2  %2048 = phi b6: %2050 (0.000000, 0.000000), b10: %2310
+MESA: info:         div 16x2  %2051 = phi b6: %2053 (0.000000, 0.000000), b10: %2311
+MESA: info:         con 32     %130 = phi b6: %1412 (0x0), b10: %1227
+MESA: info:         div 32x2  %2062 = iadd %130.xx, %2059
+MESA: info:         con 32     %132 = load_const (0x00000009)
+MESA: info:         div 32x2  %2063 = ishl %2062, %132 (0x9).xx
+MESA: info:         con 32x2  %2064 = ushr %1957, %50 (0x2).xx
+MESA: info:         div 32x2  %2065 = iadd3 %2063, %2064, %2061
+MESA: info:         con 32x4  %2069 = load_const (0x00000001, 0x00000002, 0x00000001, 0x00000002)
+MESA: info:         div 32x4  %2070 = ishl %2065.xxyy, %2069 (0x1, 0x2, 0x1, 0x2)
+MESA: info:         div 32    %2071 = mov %2070.w
+MESA: info:         div 32    %2068 = mov %2070.z
+MESA: info:         div 32    %2056 = mov %2070.x
+MESA: info:         div 32    %2057 = mov %2070.y
+MESA: info:         con 32     %139 = @bindless_resource_ir3 (%1412 (0x0)) (desc_set=0, access=speculatable)
+MESA: info:         div 16x4  %1283 = @load_ssbo_ir3 (%139, %2056, %2057) (base=0, access=readonly|reorderable|speculatable, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:         con 32x4  %2342 = load_const (0x00000007, 0x00000008, 0x00000003, 0x00000002)
+MESA: info:         div 32x4  %2343 = ishl %2059.xyxx, %2342 (0x7, 0x8, 0x3, 0x2)
+MESA: info:         div 32    %2085 = mov %2343.z
+MESA: info:         con 32     %142 = load_const (0x00000003)
+MESA: info:         div 32x2  %2074 = ishl %2061, %142 (0x3).xx
+MESA: info:         div 32    %2075 = mov %2074.x
+MESA: info:         div 32x2  %2076 = iadd %2343.xy, %2074
+MESA: info:         div 32    %2077 = mov %2076.x
+MESA: info:         div 32    %2078 = mov %2076.y
+MESA: info:                           @store_shared (%1283, %2077) (base=0, access=none, wrmask=xyzw, align_mul=8, align_offset=0)
+MESA: info:         con 32     %145 = load_const (0x00000005)
+MESA: info:         con 32     %155 = @bindless_resource_ir3 (%50 (0x2)) (desc_set=0, access=speculatable)
+MESA: info:         div 16x4  %1286 = @load_ssbo_ir3 (%155, %2068, %2071) (base=0, access=readonly|reorderable|speculatable, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:                           @store_shared (%1286, %2078) (base=1024, access=none, wrmask=xyzw, align_mul=8, align_offset=0)
+MESA: info:         div 32     %160 = iadd %42.x, %59 (0x80)
+MESA: info:         div 32     %161 = ushr %160, %145 (0x5)
+MESA: info:         div 32     %162 = iadd %130, %161
+MESA: info:         div 32     %163 = ishl %162, %132 (0x9)
+MESA: info:         div 32    %1952 = iadd3 %163, %2064.y, %2061.y
+MESA: info:         con 32x2  %2079 = load_const (0x00000001, 0x00000002)
+MESA: info:         div 32x2  %2080 = ishl %1952.xx, %2079 (0x1, 0x2)
+MESA: info:         div 32    %2081 = mov %2080.x
+MESA: info:         div 32    %2082 = mov %2080.y
+MESA: info:         div 16x4  %1289 = @load_ssbo_ir3 (%155, %2081, %2082) (base=0, access=readonly|reorderable|speculatable, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:         div 32     %168 = ishl %161, %63 (0x8)
+MESA: info:         div 32     %169 = iadd %168, %2074.y
+MESA: info:                           @store_shared (%1289, %169) (base=1024, access=none, wrmask=xyzw, align_mul=8, align_offset=0)
+MESA: info:                           @barrier (execution_scope=WORKGROUP, memory_scope=WORKGROUP, mem_semantics=ACQ|REL, mem_modes=shared)
+MESA: info:         div 16x4   %171 = @load_shared (%2085) (base=0, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %172 = @load_shared (%2085) (base=64, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %173 = @load_shared (%2075) (base=1024, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %174 = @load_shared (%2075) (base=1152, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2086 = fmad %173.xy, %171.xx, %2048
+MESA: info:         div 16x2  %2087 = fmad %173.zw, %171.xx, %2051
+MESA: info:         div 16x2  %2088 = fmad %174.xy, %171.xx, %2042
+MESA: info:         div 16x2  %2089 = fmad %174.zw, %171.xx, %2045
+MESA: info:         div 16x2  %2090 = fmad %173.xy, %171.yy, %2036
+MESA: info:         div 16x2  %2091 = fmad %173.zw, %171.yy, %2039
+MESA: info:         div 16x2  %2092 = fmad %174.xy, %171.yy, %2030
+MESA: info:         div 16x2  %2093 = fmad %174.zw, %171.yy, %2033
+MESA: info:         div 16x2  %2094 = fmad %173.xy, %171.zz, %2024
+MESA: info:         div 16x2  %2095 = fmad %173.zw, %171.zz, %2027
+MESA: info:         div 16x2  %2096 = fmad %174.xy, %171.zz, %2018
+MESA: info:         div 16x2  %2097 = fmad %174.zw, %171.zz, %2021
+MESA: info:         div 16x2  %2098 = fmad %173.xy, %171.ww, %2012
+MESA: info:         div 16x2  %2099 = fmad %173.zw, %171.ww, %2015
+MESA: info:         div 16x2  %2100 = fmad %174.xy, %171.ww, %2006
+MESA: info:         div 16x2  %2101 = fmad %174.zw, %171.ww, %2009
+MESA: info:         div 16x2  %2102 = fmad %173.xy, %172.xx, %2000
+MESA: info:         div 16x2  %2103 = fmad %173.zw, %172.xx, %2003
+MESA: info:         div 16x2  %2104 = fmad %174.xy, %172.xx, %1994
+MESA: info:         div 16x2  %2105 = fmad %174.zw, %172.xx, %1997
+MESA: info:         div 16x2  %2106 = fmad %173.xy, %172.yy, %1988
+MESA: info:         div 16x2  %2107 = fmad %173.zw, %172.yy, %1991
+MESA: info:         div 16x2  %2108 = fmad %174.xy, %172.yy, %1982
+MESA: info:         div 16x2  %2109 = fmad %174.zw, %172.yy, %1985
+MESA: info:         div 16x2  %2110 = fmad %173.xy, %172.zz, %1976
+MESA: info:         div 16x2  %2111 = fmad %173.zw, %172.zz, %1979
+MESA: info:         div 16x2  %2112 = fmad %174.xy, %172.zz, %1970
+MESA: info:         div 16x2  %2113 = fmad %174.zw, %172.zz, %1973
+MESA: info:         div 16x2  %2114 = fmad %173.xy, %172.ww, %1964
+MESA: info:         div 16x2  %2115 = fmad %173.zw, %172.ww, %1967
+MESA: info:         div 16x2  %2116 = fmad %174.xy, %172.ww, %1958
+MESA: info:         div 16x2  %2117 = fmad %174.zw, %172.ww, %1961
+MESA: info:         div 16x4   %303 = @load_shared (%2085) (base=128, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %304 = @load_shared (%2085) (base=192, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %305 = @load_shared (%2075) (base=1280, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %306 = @load_shared (%2075) (base=1408, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2118 = fmad %305.xy, %303.xx, %2086
+MESA: info:         div 16x2  %2119 = fmad %305.zw, %303.xx, %2087
+MESA: info:         div 16x2  %2120 = fmad %306.xy, %303.xx, %2088
+MESA: info:         div 16x2  %2121 = fmad %306.zw, %303.xx, %2089
+MESA: info:         div 16x2  %2122 = fmad %305.xy, %303.yy, %2090
+MESA: info:         div 16x2  %2123 = fmad %305.zw, %303.yy, %2091
+MESA: info:         div 16x2  %2124 = fmad %306.xy, %303.yy, %2092
+MESA: info:         div 16x2  %2125 = fmad %306.zw, %303.yy, %2093
+MESA: info:         div 16x2  %2126 = fmad %305.xy, %303.zz, %2094
+MESA: info:         div 16x2  %2127 = fmad %305.zw, %303.zz, %2095
+MESA: info:         div 16x2  %2128 = fmad %306.xy, %303.zz, %2096
+MESA: info:         div 16x2  %2129 = fmad %306.zw, %303.zz, %2097
+MESA: info:         div 16x2  %2130 = fmad %305.xy, %303.ww, %2098
+MESA: info:         div 16x2  %2131 = fmad %305.zw, %303.ww, %2099
+MESA: info:         div 16x2  %2132 = fmad %306.xy, %303.ww, %2100
+MESA: info:         div 16x2  %2133 = fmad %306.zw, %303.ww, %2101
+MESA: info:         div 16x2  %2134 = fmad %305.xy, %304.xx, %2102
+MESA: info:         div 16x2  %2135 = fmad %305.zw, %304.xx, %2103
+MESA: info:         div 16x2  %2136 = fmad %306.xy, %304.xx, %2104
+MESA: info:         div 16x2  %2137 = fmad %306.zw, %304.xx, %2105
+MESA: info:         div 16x2  %2138 = fmad %305.xy, %304.yy, %2106
+MESA: info:         div 16x2  %2139 = fmad %305.zw, %304.yy, %2107
+MESA: info:         div 16x2  %2140 = fmad %306.xy, %304.yy, %2108
+MESA: info:         div 16x2  %2141 = fmad %306.zw, %304.yy, %2109
+MESA: info:         div 16x2  %2142 = fmad %305.xy, %304.zz, %2110
+MESA: info:         div 16x2  %2143 = fmad %305.zw, %304.zz, %2111
+MESA: info:         div 16x2  %2144 = fmad %306.xy, %304.zz, %2112
+MESA: info:         div 16x2  %2145 = fmad %306.zw, %304.zz, %2113
+MESA: info:         div 16x2  %2146 = fmad %305.xy, %304.ww, %2114
+MESA: info:         div 16x2  %2147 = fmad %305.zw, %304.ww, %2115
+MESA: info:         div 16x2  %2148 = fmad %306.xy, %304.ww, %2116
+MESA: info:         div 16x2  %2149 = fmad %306.zw, %304.ww, %2117
+MESA: info:         div 16x4   %435 = @load_shared (%2085) (base=256, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %436 = @load_shared (%2085) (base=320, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %437 = @load_shared (%2075) (base=1536, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %438 = @load_shared (%2075) (base=1664, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2150 = fmad %437.xy, %435.xx, %2118
+MESA: info:         div 16x2  %2151 = fmad %437.zw, %435.xx, %2119
+MESA: info:         div 16x2  %2152 = fmad %438.xy, %435.xx, %2120
+MESA: info:         div 16x2  %2153 = fmad %438.zw, %435.xx, %2121
+MESA: info:         div 16x2  %2154 = fmad %437.xy, %435.yy, %2122
+MESA: info:         div 16x2  %2155 = fmad %437.zw, %435.yy, %2123
+MESA: info:         div 16x2  %2156 = fmad %438.xy, %435.yy, %2124
+MESA: info:         div 16x2  %2157 = fmad %438.zw, %435.yy, %2125
+MESA: info:         div 16x2  %2158 = fmad %437.xy, %435.zz, %2126
+MESA: info:         div 16x2  %2159 = fmad %437.zw, %435.zz, %2127
+MESA: info:         div 16x2  %2160 = fmad %438.xy, %435.zz, %2128
+MESA: info:         div 16x2  %2161 = fmad %438.zw, %435.zz, %2129
+MESA: info:         div 16x2  %2162 = fmad %437.xy, %435.ww, %2130
+MESA: info:         div 16x2  %2163 = fmad %437.zw, %435.ww, %2131
+MESA: info:         div 16x2  %2164 = fmad %438.xy, %435.ww, %2132
+MESA: info:         div 16x2  %2165 = fmad %438.zw, %435.ww, %2133
+MESA: info:         div 16x2  %2166 = fmad %437.xy, %436.xx, %2134
+MESA: info:         div 16x2  %2167 = fmad %437.zw, %436.xx, %2135
+MESA: info:         div 16x2  %2168 = fmad %438.xy, %436.xx, %2136
+MESA: info:         div 16x2  %2169 = fmad %438.zw, %436.xx, %2137
+MESA: info:         div 16x2  %2170 = fmad %437.xy, %436.yy, %2138
+MESA: info:         div 16x2  %2171 = fmad %437.zw, %436.yy, %2139
+MESA: info:         div 16x2  %2172 = fmad %438.xy, %436.yy, %2140
+MESA: info:         div 16x2  %2173 = fmad %438.zw, %436.yy, %2141
+MESA: info:         div 16x2  %2174 = fmad %437.xy, %436.zz, %2142
+MESA: info:         div 16x2  %2175 = fmad %437.zw, %436.zz, %2143
+MESA: info:         div 16x2  %2176 = fmad %438.xy, %436.zz, %2144
+MESA: info:         div 16x2  %2177 = fmad %438.zw, %436.zz, %2145
+MESA: info:         div 16x2  %2178 = fmad %437.xy, %436.ww, %2146
+MESA: info:         div 16x2  %2179 = fmad %437.zw, %436.ww, %2147
+MESA: info:         div 16x2  %2180 = fmad %438.xy, %436.ww, %2148
+MESA: info:         div 16x2  %2181 = fmad %438.zw, %436.ww, %2149
+MESA: info:         div 16x4   %567 = @load_shared (%2085) (base=384, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %568 = @load_shared (%2085) (base=448, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %569 = @load_shared (%2075) (base=1792, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %570 = @load_shared (%2075) (base=1920, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2182 = fmad %569.xy, %567.xx, %2150
+MESA: info:         div 16x2  %2183 = fmad %569.zw, %567.xx, %2151
+MESA: info:         div 16x2  %2184 = fmad %570.xy, %567.xx, %2152
+MESA: info:         div 16x2  %2185 = fmad %570.zw, %567.xx, %2153
+MESA: info:         div 16x2  %2186 = fmad %569.xy, %567.yy, %2154
+MESA: info:         div 16x2  %2187 = fmad %569.zw, %567.yy, %2155
+MESA: info:         div 16x2  %2188 = fmad %570.xy, %567.yy, %2156
+MESA: info:         div 16x2  %2189 = fmad %570.zw, %567.yy, %2157
+MESA: info:         div 16x2  %2190 = fmad %569.xy, %567.zz, %2158
+MESA: info:         div 16x2  %2191 = fmad %569.zw, %567.zz, %2159
+MESA: info:         div 16x2  %2192 = fmad %570.xy, %567.zz, %2160
+MESA: info:         div 16x2  %2193 = fmad %570.zw, %567.zz, %2161
+MESA: info:         div 16x2  %2194 = fmad %569.xy, %567.ww, %2162
+MESA: info:         div 16x2  %2195 = fmad %569.zw, %567.ww, %2163
+MESA: info:         div 16x2  %2196 = fmad %570.xy, %567.ww, %2164
+MESA: info:         div 16x2  %2197 = fmad %570.zw, %567.ww, %2165
+MESA: info:         div 16x2  %2198 = fmad %569.xy, %568.xx, %2166
+MESA: info:         div 16x2  %2199 = fmad %569.zw, %568.xx, %2167
+MESA: info:         div 16x2  %2200 = fmad %570.xy, %568.xx, %2168
+MESA: info:         div 16x2  %2201 = fmad %570.zw, %568.xx, %2169
+MESA: info:         div 16x2  %2202 = fmad %569.xy, %568.yy, %2170
+MESA: info:         div 16x2  %2203 = fmad %569.zw, %568.yy, %2171
+MESA: info:         div 16x2  %2204 = fmad %570.xy, %568.yy, %2172
+MESA: info:         div 16x2  %2205 = fmad %570.zw, %568.yy, %2173
+MESA: info:         div 16x2  %2206 = fmad %569.xy, %568.zz, %2174
+MESA: info:         div 16x2  %2207 = fmad %569.zw, %568.zz, %2175
+MESA: info:         div 16x2  %2208 = fmad %570.xy, %568.zz, %2176
+MESA: info:         div 16x2  %2209 = fmad %570.zw, %568.zz, %2177
+MESA: info:         div 16x2  %2210 = fmad %569.xy, %568.ww, %2178
+MESA: info:         div 16x2  %2211 = fmad %569.zw, %568.ww, %2179
+MESA: info:         div 16x2  %2212 = fmad %570.xy, %568.ww, %2180
+MESA: info:         div 16x2  %2213 = fmad %570.zw, %568.ww, %2181
+MESA: info:         div 16x4   %699 = @load_shared (%2085) (base=512, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %700 = @load_shared (%2085) (base=576, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %701 = @load_shared (%2075) (base=2048, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %702 = @load_shared (%2075) (base=2176, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2214 = fmad %701.xy, %699.xx, %2182
+MESA: info:         div 16x2  %2215 = fmad %701.zw, %699.xx, %2183
+MESA: info:         div 16x2  %2216 = fmad %702.xy, %699.xx, %2184
+MESA: info:         div 16x2  %2217 = fmad %702.zw, %699.xx, %2185
+MESA: info:         div 16x2  %2218 = fmad %701.xy, %699.yy, %2186
+MESA: info:         div 16x2  %2219 = fmad %701.zw, %699.yy, %2187
+MESA: info:         div 16x2  %2220 = fmad %702.xy, %699.yy, %2188
+MESA: info:         div 16x2  %2221 = fmad %702.zw, %699.yy, %2189
+MESA: info:         div 16x2  %2222 = fmad %701.xy, %699.zz, %2190
+MESA: info:         div 16x2  %2223 = fmad %701.zw, %699.zz, %2191
+MESA: info:         div 16x2  %2224 = fmad %702.xy, %699.zz, %2192
+MESA: info:         div 16x2  %2225 = fmad %702.zw, %699.zz, %2193
+MESA: info:         div 16x2  %2226 = fmad %701.xy, %699.ww, %2194
+MESA: info:         div 16x2  %2227 = fmad %701.zw, %699.ww, %2195
+MESA: info:         div 16x2  %2228 = fmad %702.xy, %699.ww, %2196
+MESA: info:         div 16x2  %2229 = fmad %702.zw, %699.ww, %2197
+MESA: info:         div 16x2  %2230 = fmad %701.xy, %700.xx, %2198
+MESA: info:         div 16x2  %2231 = fmad %701.zw, %700.xx, %2199
+MESA: info:         div 16x2  %2232 = fmad %702.xy, %700.xx, %2200
+MESA: info:         div 16x2  %2233 = fmad %702.zw, %700.xx, %2201
+MESA: info:         div 16x2  %2234 = fmad %701.xy, %700.yy, %2202
+MESA: info:         div 16x2  %2235 = fmad %701.zw, %700.yy, %2203
+MESA: info:         div 16x2  %2236 = fmad %702.xy, %700.yy, %2204
+MESA: info:         div 16x2  %2237 = fmad %702.zw, %700.yy, %2205
+MESA: info:         div 16x2  %2238 = fmad %701.xy, %700.zz, %2206
+MESA: info:         div 16x2  %2239 = fmad %701.zw, %700.zz, %2207
+MESA: info:         div 16x2  %2240 = fmad %702.xy, %700.zz, %2208
+MESA: info:         div 16x2  %2241 = fmad %702.zw, %700.zz, %2209
+MESA: info:         div 16x2  %2242 = fmad %701.xy, %700.ww, %2210
+MESA: info:         div 16x2  %2243 = fmad %701.zw, %700.ww, %2211
+MESA: info:         div 16x2  %2244 = fmad %702.xy, %700.ww, %2212
+MESA: info:         div 16x2  %2245 = fmad %702.zw, %700.ww, %2213
+MESA: info:         div 16x4   %831 = @load_shared (%2085) (base=640, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %832 = @load_shared (%2085) (base=704, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %833 = @load_shared (%2075) (base=2304, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %834 = @load_shared (%2075) (base=2432, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2246 = fmad %833.xy, %831.xx, %2214
+MESA: info:         div 16x2  %2247 = fmad %833.zw, %831.xx, %2215
+MESA: info:         div 16x2  %2248 = fmad %834.xy, %831.xx, %2216
+MESA: info:         div 16x2  %2249 = fmad %834.zw, %831.xx, %2217
+MESA: info:         div 16x2  %2250 = fmad %833.xy, %831.yy, %2218
+MESA: info:         div 16x2  %2251 = fmad %833.zw, %831.yy, %2219
+MESA: info:         div 16x2  %2252 = fmad %834.xy, %831.yy, %2220
+MESA: info:         div 16x2  %2253 = fmad %834.zw, %831.yy, %2221
+MESA: info:         div 16x2  %2254 = fmad %833.xy, %831.zz, %2222
+MESA: info:         div 16x2  %2255 = fmad %833.zw, %831.zz, %2223
+MESA: info:         div 16x2  %2256 = fmad %834.xy, %831.zz, %2224
+MESA: info:         div 16x2  %2257 = fmad %834.zw, %831.zz, %2225
+MESA: info:         div 16x2  %2258 = fmad %833.xy, %831.ww, %2226
+MESA: info:         div 16x2  %2259 = fmad %833.zw, %831.ww, %2227
+MESA: info:         div 16x2  %2260 = fmad %834.xy, %831.ww, %2228
+MESA: info:         div 16x2  %2261 = fmad %834.zw, %831.ww, %2229
+MESA: info:         div 16x2  %2262 = fmad %833.xy, %832.xx, %2230
+MESA: info:         div 16x2  %2263 = fmad %833.zw, %832.xx, %2231
+MESA: info:         div 16x2  %2264 = fmad %834.xy, %832.xx, %2232
+MESA: info:         div 16x2  %2265 = fmad %834.zw, %832.xx, %2233
+MESA: info:         div 16x2  %2266 = fmad %833.xy, %832.yy, %2234
+MESA: info:         div 16x2  %2267 = fmad %833.zw, %832.yy, %2235
+MESA: info:         div 16x2  %2268 = fmad %834.xy, %832.yy, %2236
+MESA: info:         div 16x2  %2269 = fmad %834.zw, %832.yy, %2237
+MESA: info:         div 16x2  %2270 = fmad %833.xy, %832.zz, %2238
+MESA: info:         div 16x2  %2271 = fmad %833.zw, %832.zz, %2239
+MESA: info:         div 16x2  %2272 = fmad %834.xy, %832.zz, %2240
+MESA: info:         div 16x2  %2273 = fmad %834.zw, %832.zz, %2241
+MESA: info:         div 16x2  %2274 = fmad %833.xy, %832.ww, %2242
+MESA: info:         div 16x2  %2275 = fmad %833.zw, %832.ww, %2243
+MESA: info:         div 16x2  %2276 = fmad %834.xy, %832.ww, %2244
+MESA: info:         div 16x2  %2277 = fmad %834.zw, %832.ww, %2245
+MESA: info:         div 16x4   %963 = @load_shared (%2085) (base=768, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %964 = @load_shared (%2085) (base=832, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %965 = @load_shared (%2075) (base=2560, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4   %966 = @load_shared (%2075) (base=2688, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2278 = fmad %965.xy, %963.xx, %2246
+MESA: info:         div 16x2  %2279 = fmad %965.zw, %963.xx, %2247
+MESA: info:         div 16x2  %2280 = fmad %966.xy, %963.xx, %2248
+MESA: info:         div 16x2  %2281 = fmad %966.zw, %963.xx, %2249
+MESA: info:         div 16x2  %2282 = fmad %965.xy, %963.yy, %2250
+MESA: info:         div 16x2  %2283 = fmad %965.zw, %963.yy, %2251
+MESA: info:         div 16x2  %2284 = fmad %966.xy, %963.yy, %2252
+MESA: info:         div 16x2  %2285 = fmad %966.zw, %963.yy, %2253
+MESA: info:         div 16x2  %2286 = fmad %965.xy, %963.zz, %2254
+MESA: info:         div 16x2  %2287 = fmad %965.zw, %963.zz, %2255
+MESA: info:         div 16x2  %2288 = fmad %966.xy, %963.zz, %2256
+MESA: info:         div 16x2  %2289 = fmad %966.zw, %963.zz, %2257
+MESA: info:         div 16x2  %2290 = fmad %965.xy, %963.ww, %2258
+MESA: info:         div 16x2  %2291 = fmad %965.zw, %963.ww, %2259
+MESA: info:         div 16x2  %2292 = fmad %966.xy, %963.ww, %2260
+MESA: info:         div 16x2  %2293 = fmad %966.zw, %963.ww, %2261
+MESA: info:         div 16x2  %2294 = fmad %965.xy, %964.xx, %2262
+MESA: info:         div 16x2  %2295 = fmad %965.zw, %964.xx, %2263
+MESA: info:         div 16x2  %2296 = fmad %966.xy, %964.xx, %2264
+MESA: info:         div 16x2  %2297 = fmad %966.zw, %964.xx, %2265
+MESA: info:         div 16x2  %2298 = fmad %965.xy, %964.yy, %2266
+MESA: info:         div 16x2  %2299 = fmad %965.zw, %964.yy, %2267
+MESA: info:         div 16x2  %2300 = fmad %966.xy, %964.yy, %2268
+MESA: info:         div 16x2  %2301 = fmad %966.zw, %964.yy, %2269
+MESA: info:         div 16x2  %2302 = fmad %965.xy, %964.zz, %2270
+MESA: info:         div 16x2  %2303 = fmad %965.zw, %964.zz, %2271
+MESA: info:         div 16x2  %2304 = fmad %966.xy, %964.zz, %2272
+MESA: info:         div 16x2  %2305 = fmad %966.zw, %964.zz, %2273
+MESA: info:         div 16x2  %2306 = fmad %965.xy, %964.ww, %2274
+MESA: info:         div 16x2  %2307 = fmad %965.zw, %964.ww, %2275
+MESA: info:         div 16x2  %2308 = fmad %966.xy, %964.ww, %2276
+MESA: info:         div 16x2  %2309 = fmad %966.zw, %964.ww, %2277
+MESA: info:         div 16x4  %1095 = @load_shared (%2085) (base=896, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4  %1096 = @load_shared (%2085) (base=960, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4  %1097 = @load_shared (%2075) (base=2816, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x4  %1098 = @load_shared (%2075) (base=2944, access=none, align_mul=8, align_offset=0)
+MESA: info:         div 16x2  %2310 = fmad %1097.xy, %1095.xx, %2278
+MESA: info:         div 16x2  %2311 = fmad %1097.zw, %1095.xx, %2279
+MESA: info:         div 16x2  %2312 = fmad %1098.xy, %1095.xx, %2280
+MESA: info:         div 16x2  %2313 = fmad %1098.zw, %1095.xx, %2281
+MESA: info:         div 16x2  %2314 = fmad %1097.xy, %1095.yy, %2282
+MESA: info:         div 16x2  %2315 = fmad %1097.zw, %1095.yy, %2283
+MESA: info:         div 16x2  %2316 = fmad %1098.xy, %1095.yy, %2284
+MESA: info:         div 16x2  %2317 = fmad %1098.zw, %1095.yy, %2285
+MESA: info:         div 16x2  %2318 = fmad %1097.xy, %1095.zz, %2286
+MESA: info:         div 16x2  %2319 = fmad %1097.zw, %1095.zz, %2287
+MESA: info:         div 16x2  %2320 = fmad %1098.xy, %1095.zz, %2288
+MESA: info:         div 16x2  %2321 = fmad %1098.zw, %1095.zz, %2289
+MESA: info:         div 16x2  %2322 = fmad %1097.xy, %1095.ww, %2290
+MESA: info:         div 16x2  %2323 = fmad %1097.zw, %1095.ww, %2291
+MESA: info:         div 16x2  %2324 = fmad %1098.xy, %1095.ww, %2292
+MESA: info:         div 16x2  %2325 = fmad %1098.zw, %1095.ww, %2293
+MESA: info:         div 16x2  %2326 = fmad %1097.xy, %1096.xx, %2294
+MESA: info:         div 16x2  %2327 = fmad %1097.zw, %1096.xx, %2295
+MESA: info:         div 16x2  %2328 = fmad %1098.xy, %1096.xx, %2296
+MESA: info:         div 16x2  %2329 = fmad %1098.zw, %1096.xx, %2297
+MESA: info:         div 16x2  %2330 = fmad %1097.xy, %1096.yy, %2298
+MESA: info:         div 16x2  %2331 = fmad %1097.zw, %1096.yy, %2299
+MESA: info:         div 16x2  %2332 = fmad %1098.xy, %1096.yy, %2300
+MESA: info:         div 16x2  %2333 = fmad %1098.zw, %1096.yy, %2301
+MESA: info:         div 16x2  %2334 = fmad %1097.xy, %1096.zz, %2302
+MESA: info:         div 16x2  %2335 = fmad %1097.zw, %1096.zz, %2303
+MESA: info:         div 16x2  %2336 = fmad %1098.xy, %1096.zz, %2304
+MESA: info:         div 16x2  %2337 = fmad %1098.zw, %1096.zz, %2305
+MESA: info:         div 16x2  %2338 = fmad %1097.xy, %1096.ww, %2306
+MESA: info:         div 16x2  %2339 = fmad %1097.zw, %1096.ww, %2307
+MESA: info:         div 16x2  %2340 = fmad %1098.xy, %1096.ww, %2308
+MESA: info:         div 16x2  %2341 = fmad %1098.zw, %1096.ww, %2309
+MESA: info:                           @barrier (execution_scope=WORKGROUP, memory_scope=WORKGROUP, mem_semantics=ACQ|REL, mem_modes=shared)
+MESA: info:         con 32    %1227 = iadd %130, %63 (0x8)
+MESA: info:         con 1     %1228 = uge %1227, %64 (0x800)
+MESA: info:                           // succs: b8 b9
+MESA: info:         if %1228 {
+MESA: info:             con block b8:// preds: b7
+MESA: info:             break
+MESA: info:             // succs: b11
+MESA: info:         } else {
+MESA: info:             con block b9:  // preds: b7, succs: b10
+MESA: info:         }
+MESA: info:         con block b10:  // preds: b9, succs: b7
+MESA: info:     }
+MESA: info:     con block b11:        // preds: b8
+MESA: info:     div 16x2  %2450 = phi b8: %2310
+MESA: info:     div 16x2  %2449 = phi b8: %2311
+MESA: info:     div 16x2  %2448 = phi b8: %2312
+MESA: info:     div 16x2  %2447 = phi b8: %2313
+MESA: info:     div 16x2  %2446 = phi b8: %2314
+MESA: info:     div 16x2  %2445 = phi b8: %2315
+MESA: info:     div 16x2  %2444 = phi b8: %2316
+MESA: info:     div 16x2  %2443 = phi b8: %2317
+MESA: info:     div 16x2  %2442 = phi b8: %2318
+MESA: info:     div 16x2  %2441 = phi b8: %2319
+MESA: info:     div 16x2  %2440 = phi b8: %2320
+MESA: info:     div 16x2  %2439 = phi b8: %2321
+MESA: info:     div 16x2  %2438 = phi b8: %2322
+MESA: info:     div 16x2  %2437 = phi b8: %2323
+MESA: info:     div 16x2  %2436 = phi b8: %2324
+MESA: info:     div 16x2  %2435 = phi b8: %2325
+MESA: info:     div 16x2  %2434 = phi b8: %2326
+MESA: info:     div 16x2  %2433 = phi b8: %2327
+MESA: info:     div 16x2  %2432 = phi b8: %2328
+MESA: info:     div 16x2  %2431 = phi b8: %2329
+MESA: info:     div 16x2  %2430 = phi b8: %2330
+MESA: info:     div 16x2  %2429 = phi b8: %2331
+MESA: info:     div 16x2  %2428 = phi b8: %2332
+MESA: info:     div 16x2  %2427 = phi b8: %2333
+MESA: info:     div 16x2  %2426 = phi b8: %2334
+MESA: info:     div 16x2  %2425 = phi b8: %2335
+MESA: info:     div 16x2  %2424 = phi b8: %2336
+MESA: info:     div 16x2  %2423 = phi b8: %2337
+MESA: info:     div 16x2  %2422 = phi b8: %2338
+MESA: info:     div 16x2  %2421 = phi b8: %2339
+MESA: info:     div 16x2  %2420 = phi b8: %2340
+MESA: info:     div 16x2  %2419 = phi b8: %2341
+MESA: info:     div 32    %1230 = iadd %1957.x, %2343.w
+MESA: info:     div 32    %1231 = ishl %1230, %132 (0x9)
+MESA: info:     div 32    %1439 = iadd3 %1231, %2064.y, %2061.x
+MESA: info:     div 16x4  %1234 = vec4 %2450.x, %2450.y, %2449.x, %2449.y
+MESA: info:     con 32x2  %2344 = load_const (0x00000001, 0x00000002)
+MESA: info:     div 32x2  %2345 = ishl %1439.xx, %2344 (0x1, 0x2)
+MESA: info:     div 32    %2346 = mov %2345.x
+MESA: info:     div 32    %2347 = mov %2345.y
+MESA: info:     con 32    %1236 = @bindless_resource_ir3 (%45 (0x4)) (desc_set=0, access=speculatable)
+MESA: info:                       @store_ssbo_ir3 (%1234, %1236, %2346, %2347) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1237 = vec4 %2448.x, %2448.y, %2447.x, %2447.y
+MESA: info:     con 32x4  %2359 = load_const (0x00000020, 0x00000400, 0x00000420, 0x00000800) = (32, 1024, 1056, 2048)
+MESA: info:     div 32x4  %2360 = iadd3 %1439.xxxx, %1439.xxxx, %2359 (0x20, 0x400, 0x420, 0x800)
+MESA: info:     div 32    %2361 = mov %2360.w
+MESA: info:     div 32    %2354 = mov %2360.z
+MESA: info:     div 32    %2350 = mov %2360.x
+MESA: info:     div 32    %2351 = mov %2360.y
+MESA: info:                       @store_ssbo_ir3 (%1237, %1236, %2350, %2347) (base=64, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1240 = vec4 %2446.x, %2446.y, %2445.x, %2445.y
+MESA: info:     con 32x4  %2365 = load_const (0x00000800, 0x00000840, 0x00001000, 0x00001040) = (2048, 2112, 4096, 4160)
+MESA: info:     div 32x4  %2366 = iadd %2345.yyyy, %2365 (0x800, 0x840, 0x1000, 0x1040)
+MESA: info:     div 32    %2367 = mov %2366.w
+MESA: info:     div 32    %2364 = mov %2366.z
+MESA: info:     div 32    %2357 = mov %2366.x
+MESA: info:     div 32    %2358 = mov %2366.y
+MESA: info:                       @store_ssbo_ir3 (%1240, %1236, %2351, %2357) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1243 = vec4 %2444.x, %2444.y, %2443.x, %2443.y
+MESA: info:                       @store_ssbo_ir3 (%1243, %1236, %2354, %2358) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1246 = vec4 %2442.x, %2442.y, %2441.x, %2441.y
+MESA: info:                       @store_ssbo_ir3 (%1246, %1236, %2361, %2364) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1248 = vec4 %2440.x, %2440.y, %2439.x, %2439.y
+MESA: info:     con 32x4  %2379 = load_const (0x00000820, 0x00000c00, 0x00000c20, 0x00008000) = (2080, 3072, 3104, 32768)
+MESA: info:     div 32x4  %2380 = iadd3 %1439.xxxx, %1439.xxxx, %2379 (0x820, 0xc00, 0xc20, 0x8000)
+MESA: info:     div 32    %2381 = mov %2380.w
+MESA: info:     div 32    %2374 = mov %2380.z
+MESA: info:     div 32    %2370 = mov %2380.x
+MESA: info:     div 32    %2371 = mov %2380.y
+MESA: info:                       @store_ssbo_ir3 (%1248, %1236, %2370, %2367) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1251 = vec4 %2438.x, %2438.y, %2437.x, %2437.y
+MESA: info:     con 32x4  %2385 = load_const (0x00001800, 0x00001840, 0x00010000, 0x00010040) = (6144, 6208, 65536, 65600)
+MESA: info:     div 32x4  %2386 = iadd %2345.yyyy, %2385 (0x1800, 0x1840, 0x10000, 0x10040)
+MESA: info:     div 32    %2387 = mov %2386.w
+MESA: info:     div 32    %2384 = mov %2386.z
+MESA: info:     div 32    %2377 = mov %2386.x
+MESA: info:     div 32    %2378 = mov %2386.y
+MESA: info:                       @store_ssbo_ir3 (%1251, %1236, %2371, %2377) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1254 = vec4 %2436.x, %2436.y, %2435.x, %2435.y
+MESA: info:                       @store_ssbo_ir3 (%1254, %1236, %2374, %2378) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1257 = vec4 %2434.x, %2434.y, %2433.x, %2433.y
+MESA: info:                       @store_ssbo_ir3 (%1257, %1236, %2381, %2384) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1260 = vec4 %2432.x, %2432.y, %2431.x, %2431.y
+MESA: info:     con 32x4  %2399 = load_const (0x00008020, 0x00008400, 0x00008420, 0x00008800) = (32800, 33792, 33824, 34816)
+MESA: info:     div 32x4  %2400 = iadd3 %1439.xxxx, %1439.xxxx, %2399 (0x8020, 0x8400, 0x8420, 0x8800)
+MESA: info:     div 32    %2401 = mov %2400.w
+MESA: info:     div 32    %2394 = mov %2400.z
+MESA: info:     div 32    %2390 = mov %2400.x
+MESA: info:     div 32    %2391 = mov %2400.y
+MESA: info:                       @store_ssbo_ir3 (%1260, %1236, %2390, %2387) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1263 = vec4 %2430.x, %2430.y, %2429.x, %2429.y
+MESA: info:     con 32x4  %2405 = load_const (0x00010800, 0x00010840, 0x00011000, 0x00011040) = (67584, 67648, 69632, 69696)
+MESA: info:     div 32x4  %2406 = iadd %2345.yyyy, %2405 (0x10800, 0x10840, 0x11000, 0x11040)
+MESA: info:     div 32    %2407 = mov %2406.w
+MESA: info:     div 32    %2404 = mov %2406.z
+MESA: info:     div 32    %2397 = mov %2406.x
+MESA: info:     div 32    %2398 = mov %2406.y
+MESA: info:                       @store_ssbo_ir3 (%1263, %1236, %2391, %2397) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1266 = vec4 %2428.x, %2428.y, %2427.x, %2427.y
+MESA: info:                       @store_ssbo_ir3 (%1266, %1236, %2394, %2398) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1269 = vec4 %2426.x, %2426.y, %2425.x, %2425.y
+MESA: info:                       @store_ssbo_ir3 (%1269, %1236, %2401, %2404) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1272 = vec4 %2424.x, %2424.y, %2423.x, %2423.y
+MESA: info:     con 32x3  %2412 = load_const (0x00008820, 0x00008c00, 0x00008c20) = (34848, 35840, 35872)
+MESA: info:     div 32x3  %2413 = iadd3 %1439.xxx, %1439.xxx, %2412 (0x8820, 0x8c00, 0x8c20)
+MESA: info:     div 32    %2414 = mov %2413.z
+MESA: info:     div 32    %2410 = mov %2413.x
+MESA: info:     div 32    %2411 = mov %2413.y
+MESA: info:                       @store_ssbo_ir3 (%1272, %1236, %2410, %2407) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1275 = vec4 %2422.x, %2422.y, %2421.x, %2421.y
+MESA: info:     con 32x2  %2415 = load_const (0x00011800, 0x00011840) = (71680, 71744)
+MESA: info:     div 32x2  %2416 = iadd %2345.yy, %2415 (0x11800, 0x11840)
+MESA: info:     div 32    %2417 = mov %2416.x
+MESA: info:     div 32    %2418 = mov %2416.y
+MESA: info:                       @store_ssbo_ir3 (%1275, %1236, %2411, %2417) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:     div 16x4  %1278 = vec4 %2420.x, %2420.y, %2419.x, %2419.y
+MESA: info:                       @store_ssbo_ir3 (%1278, %1236, %2414, %2418) (base=0, wrmask=xyzw, access=writeonly, align_mul=8, align_offset=0, offset_shift=1)
+MESA: info:                       // succs: b12
+MESA: info:     block b12:
+MESA: info: }
+MESA: info: 
+MESA: info: Native code for unnamed CL shader (null) with blake3 8ea91fcdc6a7d6eac3b7f3b7f086dda13c46f1a29df2bd23b12741c8fe0dd238:
+MESA: info: ; num_ubos:           0
+MESA: info: ; num_driver_params:  0
+MESA: info: ; offsets:
+MESA: info: ;   ubo_ranges                 c0.x (1 vec4)
+MESA: info: ; ubo_state:
+MESA: info: ;   num_enabled:      1
+MESA: info: ;   range[0]:
+MESA: info: ;     block:          1
+MESA: info: ;     offset:         c0.x
+MESA: info: ;     size:           1 vec4 (16b -> 32b)
+MESA: info: @in(r0.x)	in0 (wrmask=0x7)
+MESA: info: @in(r48.x)	in1 (wrmask=0x7)
+MESA: info: @const(c1.x)	0x00000800, 0x00000840, 0x00001000, 0x00001040
+MESA: info: @const(c2.x)	0x00001800, 0x00001840, 0x00010000, 0x00010040
+MESA: info: @const(c3.x)	0x00010800, 0x00010840, 0x00011000, 0x00011040
+MESA: info: @const(c4.x)	0x00011800, 0x00011840, 0xd0d0d0d0, 0xd0d0d0d0
+MESA: info: shps #l27
+MESA: info: getone #l27
+MESA: info: mov.u32u32 r48.w, 2048
+MESA: info: mov.u32u32 r49.x, 2112
+MESA: info: mov.u32u32 r49.y, 4096
+MESA: info: mov.u32u32 r49.z, 0x1040
+MESA: info: mov.u32u32 r49.w, 0x1800
+MESA: info: mov.u32u32 r50.x, 0x1840
+MESA: info: mov.u32u32 r50.y, 0x10000
+MESA: info: mov.u32u32 r50.z, 0x10040
+MESA: info: mov.u32u32 r50.w, 0x10800
+MESA: info: mov.u32u32 r51.x, 0x10840
+MESA: info: mov.u32u32 r51.y, 0x11000
+MESA: info: mov.u32u32 r51.z, 0x11040
+MESA: info: mov.u32u32 r51.w, 0x11800
+MESA: info: mov.u32u32 r52.x, 0x11840
+MESA: info: mova1.u a1.x, 0
+MESA: info: resinfo.b.untyped.1d.u32.1.imm.base0 r63.x, 0
+MESA: info: resinfo.b.untyped.1d.u32.1.imm.base0 r63.x, 2
+MESA: info: resinfo.b.untyped.1d.u32.1.imm.base0 r63.x, 4
+MESA: info: (ss)nop
+MESA: info: stc.u32 c[4], r48.w, 4
+MESA: info: stc.u32 c[8], r49.w, 4
+MESA: info: stc.u32 c[12], r50.w, 4
+MESA: info: stc.u32 c[16], r51.w, 2
+MESA: info: ldc.1.k.imm c[a1.x], 1, 1
+MESA: info: (sy)(ss)shpe
+MESA: info: l27:
+MESA: info: (jp)(rpt1)add.u r52.y, (r)r48.x, (r)c0.x
+MESA: info: mov.u32u32 r53.y, 0
+MESA: info: shl.b r53.x, r52.y, 7
+MESA: info: shl.b r52.w, r52.z, 6
+MESA: info: shr.b r0.w, r0.x, 4
+MESA: info: shr.b r1.x, r0.x, 5
+MESA: info: and.b r1.y, r0.x, 15
+MESA: info: and.b r1.z, r0.x, 31
+MESA: info: mov.u16u16 hr3.z, 0
+MESA: info: mov.u16u16 hr3.w, 0
+MESA: info: mov.u16u16 hr19.y, 0
+MESA: info: mov.u16u16 hr19.x, 0
+MESA: info: mov.u16u16 hr18.w, 0
+MESA: info: mov.u16u16 hr18.z, 0
+MESA: info: mov.u16u16 hr18.y, 0
+MESA: info: mov.u16u16 hr18.x, 0
+MESA: info: mov.u16u16 hr17.w, 0
+MESA: info: mov.u16u16 hr17.z, 0
+MESA: info: mov.u16u16 hr17.y, 0
+MESA: info: mov.u16u16 hr17.x, 0
+MESA: info: mov.u16u16 hr16.w, 0
+MESA: info: mov.u16u16 hr16.z, 0
+MESA: info: mov.u16u16 hr16.y, 0
+MESA: info: mov.u16u16 hr16.x, 0
+MESA: info: mov.u16u16 hr15.w, 0
+MESA: info: mov.u16u16 hr15.z, 0
+MESA: info: mov.u16u16 hr15.y, 0
+MESA: info: mov.u16u16 hr15.x, 0
+MESA: info: mov.u16u16 hr14.w, 0
+MESA: info: mov.u16u16 hr14.z, 0
+MESA: info: mov.u16u16 hr14.y, 0
+MESA: info: mov.u16u16 hr14.x, 0
+MESA: info: mov.u16u16 hr13.w, 0
+MESA: info: mov.u16u16 hr13.z, 0
+MESA: info: mov.u16u16 hr13.y, 0
+MESA: info: mov.u16u16 hr13.x, 0
+MESA: info: mov.u16u16 hr12.w, 0
+MESA: info: mov.u16u16 hr12.z, 0
+MESA: info: mov.u16u16 hr12.y, 0
+MESA: info: mov.u16u16 hr12.x, 0
+MESA: info: mov.u16u16 hr11.w, 0
+MESA: info: mov.u16u16 hr11.z, 0
+MESA: info: mov.u16u16 hr11.y, 0
+MESA: info: mov.u16u16 hr11.x, 0
+MESA: info: mov.u16u16 hr10.w, 0
+MESA: info: mov.u16u16 hr10.z, 0
+MESA: info: mov.u16u16 hr10.y, 0
+MESA: info: mov.u16u16 hr10.x, 0
+MESA: info: mov.u16u16 hr9.w, 0
+MESA: info: mov.u16u16 hr9.z, 0
+MESA: info: mov.u16u16 hr9.y, 0
+MESA: info: mov.u16u16 hr9.x, 0
+MESA: info: mov.u16u16 hr8.w, 0
+MESA: info: mov.u16u16 hr8.z, 0
+MESA: info: mov.u16u16 hr8.y, 0
+MESA: info: mov.u16u16 hr8.x, 0
+MESA: info: mov.u16u16 hr7.w, 0
+MESA: info: mov.u16u16 hr7.z, 0
+MESA: info: mov.u16u16 hr7.y, 0
+MESA: info: mov.u16u16 hr7.x, 0
+MESA: info: mov.u16u16 hr6.w, 0
+MESA: info: mov.u16u16 hr6.z, 0
+MESA: info: mov.u16u16 hr6.y, 0
+MESA: info: mov.u16u16 hr6.x, 0
+MESA: info: mov.u16u16 hr5.w, 0
+MESA: info: mov.u16u16 hr5.z, 0
+MESA: info: mov.u16u16 hr5.y, 0
+MESA: info: mov.u16u16 hr5.x, 0
+MESA: info: mov.u16u16 hr4.w, 0
+MESA: info: mov.u16u16 hr4.z, 0
+MESA: info: mov.u16u16 hr4.y, 0
+MESA: info: mov.u16u16 hr4.x, 0
+MESA: info: l99:
+MESA: info: (rpt1)shr.b r53.z, (r)r52.w, 2
+MESA: info: add.u r54.x, r53.y, 8
+MESA: info: cmps.u.ge up0.x, r54.x, c1.x
+MESA: info: add.u r11.w, r0.x, 128
+MESA: info: shl.b r9.w, r0.w, 7
+MESA: info: shl.b r10.y, r1.y, 3
+MESA: info: shl.b r10.x, r1.x, 8
+MESA: info: shr.b r11.w, (last)r11.w, 5
+MESA: info: shl.b r10.z, r1.z, 3
+MESA: info: (ss)(rpt1)add.u r10.w, r53.y, (r)r0.w
+MESA: info: add.u r12.y, r53.y, r11.w
+MESA: info: shl.b r11.w, (last)r11.w, 8
+MESA: info: (rpt1)shl.b r10.w, (last)(r)r10.w, 9
+MESA: info: shl.b r12.y, (last)r12.y, 9
+MESA: info: shl.b r12.x, r0.w, 3
+MESA: info: (rpt1)sad.s32 r10.w, (r)r53.z, (r)r10.w, (r)r1.y
+MESA: info: sad.s32 r12.y, r53.w, r12.y, r1.z
+MESA: info: add.u r9.w, (last)r9.w, r10.y
+MESA: info: (rpt1)shl.b r10.w, (last)(r)r10.w, 2
+MESA: info: shl.b r12.y, (last)r12.y, 2
+MESA: info: add.u r10.x, (last)r10.x, r10.z
+MESA: info: add.u r11.w, (last)r11.w, (last)r10.z
+MESA: info: (nop1) shl.b r12.z, r0.w, 2
+MESA: info: isam.v.base0 (u16)(xyzw)hr22.z, r10.w, s#0, t#0
+MESA: info: nop
+MESA: info: isam.v.base0 (u16)(xyzw)hr25.z, r11.x, s#0, t#2
+MESA: info: nop
+MESA: info: isam.v.base0 (u16)(xyzw)hr26.z, r12.y, s#0, t#2
+MESA: info: (sy)stl.u16 l[r9.w], r22.z, 4
+MESA: info: nop
+MESA: info: stl.u16 l[r10.x+1024], r25.z, 4
+MESA: info: nop
+MESA: info: stl.u16 l[r11.w+1024], r26.z, 4
+MESA: info: fence.r.w
+MESA: info: (sy)(ss)bar.g
+MESA: info: (sy)(ss)nop
+MESA: info: ldl.u16 r27.z, l[r12.x], 4
+MESA: info: ldl.u16 r28.z, l[r12.x+64], 4
+MESA: info: ldl.u16 r29.z, l[r10.y+1024], 4
+MESA: info: ldl.u16 r30.z, l[r10.y+1152], 4
+MESA: info: ldl.u16 r0.z, l[r12.x+128], 4
+MESA: info: (ss)mad.f16 hr18.z, hr29.z, hr27.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr29.z, hr27.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr29.z, hr28.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr29.z, hr28.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr29.z, hr28.z, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr29.z, hr28.w, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr29.z, hr29.x, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr29.w, hr27.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr29.w, hr27.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr29.w, hr28.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr29.w, hr28.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr29.w, hr28.z, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr29.w, hr28.w, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr29.w, hr29.x, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr30.x, hr27.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr30.x, hr27.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr30.x, hr28.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr30.x, hr28.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr30.x, hr28.z, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr30.x, hr28.w, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr30.x, hr29.x, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr30.y, hr27.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr30.y, hr27.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr30.y, hr28.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr30.y, hr28.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr30.y, hr28.z, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr30.y, hr28.w, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr30.y, hr29.x, (last)hr7.y
+MESA: info: mad.f16 hr17.z, hr30.z, hr27.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr30.z, hr27.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr30.z, hr28.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr30.z, hr28.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr30.z, hr28.z, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr30.z, hr28.w, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr30.z, hr29.x, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr30.w, hr27.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr30.w, hr27.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr30.w, hr28.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr30.w, hr28.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr30.w, hr28.z, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr30.w, hr28.w, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr30.w, hr29.x, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr31.x, hr27.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr31.x, hr27.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr31.x, hr28.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr31.x, hr28.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr31.x, hr28.z, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr31.x, hr28.w, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr31.x, hr29.x, (r)(last)hr6.x
+MESA: info: (rpt1)mad.f16 hr29.z, (r)(last)hr29.z, hr29.y, (r)(last)hr4.z
+MESA: info: (rpt1)mad.f16 hr30.x, (r)(last)hr30.x, hr29.y, (r)(last)hr5.x
+MESA: info: (rpt1)mad.f16 hr30.z, (r)(last)hr30.z, hr29.y, (r)(last)hr3.z
+MESA: info: (rpt1)mad.f16 hr31.x, (r)(last)hr31.x, hr29.y, (r)(last)hr4.x
+MESA: info: ldl.u16 r3.z, l[r12.x+192], 4
+MESA: info: ldl.u16 r4.z, l[r10.y+1280], 4
+MESA: info: ldl.u16 r19.z, l[r10.y+1408], 4
+MESA: info: ldl.u16 r21.x, l[r12.x+256], 4
+MESA: info: ldl.u16 r22.x, l[r12.x+320], 4
+MESA: info: ldl.u16 r23.x, l[r10.y+1536], 4
+MESA: info: ldl.u16 r25.z, l[r10.y+1664], 4
+MESA: info: ldl.u16 r26.z, l[r12.x+384], 4
+MESA: info: ldl.u16 r27.z, l[r12.x+448], 4
+MESA: info: ldl.u16 r28.z, l[r10.y+1792], 4
+MESA: info: (ss)mad.f16 hr18.z, hr4.z, hr0.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr4.z, hr0.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr4.z, hr1.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr4.z, hr1.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr4.z, hr3.z, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr4.z, hr3.w, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr4.z, hr4.x, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr4.w, hr0.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr4.w, hr0.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr4.w, hr1.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr4.w, hr1.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr4.w, hr3.z, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr4.w, hr3.w, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr4.w, hr4.x, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr5.x, hr0.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr5.x, hr0.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr5.x, hr1.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr5.x, hr1.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr5.x, hr3.z, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr5.x, hr3.w, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr5.x, hr4.x, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr5.y, hr0.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr5.y, hr0.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr5.y, hr1.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr5.y, hr1.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr5.y, hr3.z, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr5.y, hr3.w, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr5.y, hr4.x, (last)hr7.y
+MESA: info: mad.f16 hr17.z, hr19.z, hr0.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr19.z, hr0.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr19.z, hr1.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr19.z, hr1.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr19.z, hr3.z, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr19.z, hr3.w, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr19.z, hr4.x, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr19.w, hr0.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr19.w, hr0.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr19.w, hr1.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr19.w, hr1.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr19.w, hr3.z, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr19.w, hr3.w, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr19.w, hr4.x, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr20.x, hr0.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr20.x, hr0.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr20.x, hr1.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr20.x, hr1.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr20.x, hr3.z, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr20.x, hr3.w, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr20.x, hr4.x, (r)(last)hr6.x
+MESA: info: (rpt1)mad.f16 hr4.z, (r)(last)hr4.z, hr4.y, (r)(last)hr29.z
+MESA: info: (rpt1)mad.f16 hr5.x, (r)(last)hr5.x, hr4.y, (r)(last)hr30.x
+MESA: info: ldl.u16 r29.z, l[r10.y+1920], 4
+MESA: info: (rpt1)mad.f16 hr19.z, (r)(last)hr19.z, hr4.y, (r)(last)hr30.z
+MESA: info: (rpt1)mad.f16 hr20.x, (r)(last)hr20.x, hr4.y, (r)(last)hr31.x
+MESA: info: ldl.u16 r30.z, l[r12.x+512], 4
+MESA: info: ldl.u16 r0.z, l[r12.x+576], 4
+MESA: info: ldl.u16 r3.z, l[r10.y+2048], 4
+MESA: info: mad.f16 hr18.z, hr23.x, hr21.x, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr23.x, hr21.y, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr23.x, hr21.z, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr23.x, hr21.w, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr23.x, hr22.x, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr23.x, hr22.y, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr23.x, hr22.z, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr23.y, hr21.x, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr23.y, hr21.y, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr23.y, hr21.z, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr23.y, hr21.w, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr23.y, hr22.x, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr23.y, hr22.y, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr23.y, hr22.z, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr23.z, hr21.x, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr23.z, hr21.y, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr23.z, hr21.z, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr23.z, hr21.w, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr23.z, hr22.x, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr23.z, hr22.y, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr23.z, hr22.z, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr23.w, hr21.x, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr23.w, hr21.y, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr23.w, hr21.z, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr23.w, hr21.w, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr23.w, hr22.x, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr23.w, hr22.y, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr23.w, hr22.z, (last)hr7.y
+MESA: info: mad.f16 hr17.z, hr25.z, hr21.x, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr25.z, hr21.y, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr25.z, hr21.z, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr25.z, hr21.w, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr25.z, hr22.x, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr25.z, hr22.y, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr25.z, hr22.z, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr25.w, hr21.x, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr25.w, hr21.y, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr25.w, hr21.z, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr25.w, hr21.w, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr25.w, hr22.x, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr25.w, hr22.y, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr25.w, hr22.z, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr26.x, hr21.x, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr26.x, hr21.y, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr26.x, hr21.z, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr26.x, hr21.w, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr26.x, hr22.x, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr26.x, hr22.y, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr26.x, hr22.z, (r)(last)hr6.x
+MESA: info: (rpt1)mad.f16 hr23.x, (r)(last)hr23.x, hr22.w, (r)(last)hr4.z
+MESA: info: (rpt1)mad.f16 hr23.z, (r)(last)hr23.z, hr22.w, (r)(last)hr5.x
+MESA: info: ldl.u16 r4.z, l[r10.y+2176], 4
+MESA: info: (rpt1)mad.f16 hr25.z, (r)(last)hr25.z, hr22.w, (r)(last)hr19.z
+MESA: info: (rpt1)mad.f16 hr26.x, (r)(last)hr26.x, hr22.w, (r)(last)hr20.x
+MESA: info: ldl.u16 r19.z, l[r12.x+640], 4
+MESA: info: ldl.u16 r21.x, l[r12.x+704], 4
+MESA: info: ldl.u16 r22.x, l[r10.y+2304], 4
+MESA: info: mad.f16 hr18.z, hr28.z, hr26.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr28.z, hr26.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr28.z, hr27.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr28.z, hr27.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr28.z, hr27.z, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr28.z, hr27.w, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr28.z, hr28.x, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr28.w, hr26.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr28.w, hr26.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr28.w, hr27.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr28.w, hr27.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr28.w, hr27.z, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr28.w, hr27.w, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr28.w, hr28.x, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr29.x, hr26.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr29.x, hr26.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr29.x, hr27.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr29.x, hr27.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr29.x, hr27.z, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr29.x, hr27.w, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr29.x, hr28.x, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr29.y, hr26.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr29.y, hr26.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr29.y, hr27.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr29.y, hr27.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr29.y, hr27.z, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr29.y, hr27.w, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr29.y, hr28.x, (last)hr7.y
+MESA: info: (rpt1)mad.f16 hr28.z, (r)(last)hr28.z, hr28.y, (r)(last)hr23.x
+MESA: info: (rpt1)mad.f16 hr29.x, (r)(last)hr29.x, hr28.y, (r)(last)hr23.z
+MESA: info: ldl.u16 r23.x, l[r10.y+2432], 4
+MESA: info: (ss)mad.f16 hr17.z, hr29.z, hr26.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr29.z, hr26.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr29.z, hr27.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr29.z, hr27.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr29.z, hr27.z, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr29.z, hr27.w, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr29.z, hr28.x, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr29.w, hr26.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr29.w, hr26.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr29.w, hr27.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr29.w, hr27.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr29.w, hr27.z, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr29.w, hr27.w, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr29.w, hr28.x, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr30.x, hr26.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr30.x, hr26.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr30.x, hr27.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr30.x, hr27.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr30.x, hr27.z, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr30.x, hr27.w, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr30.x, hr28.x, (r)(last)hr6.x
+MESA: info: mad.f16 hr18.z, hr3.z, hr30.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr3.z, hr30.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr3.z, hr31.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr3.z, hr31.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr3.z, hr0.z, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr3.z, hr0.w, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr3.z, hr1.x, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr3.w, hr30.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr3.w, hr30.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr3.w, hr31.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr3.w, hr31.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr3.w, hr0.z, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr3.w, hr0.w, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr3.w, hr1.x, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr4.x, hr30.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr4.x, hr30.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr4.x, hr31.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr4.x, hr31.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr4.x, hr0.z, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr4.x, hr0.w, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr4.x, hr1.x, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr4.y, hr30.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr4.y, hr30.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr4.y, hr31.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr4.y, hr31.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr4.y, hr0.z, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr4.y, hr0.w, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr4.y, hr1.x, (last)hr7.y
+MESA: info: (rpt1)mad.f16 hr29.z, (r)(last)hr29.z, hr28.y, (r)(last)hr25.z
+MESA: info: (rpt1)mad.f16 hr30.x, (r)(last)hr30.x, hr28.y, (r)(last)hr26.x
+MESA: info: ldl.u16 r25.z, l[r12.x+768], 4
+MESA: info: ldl.u16 r26.z, l[r12.x+832], 4
+MESA: info: ldl.u16 r27.z, l[r10.y+2560], 4
+MESA: info: (rpt1)mad.f16 hr3.z, (r)(last)hr3.z, hr1.y, (r)(last)hr28.z
+MESA: info: (rpt1)mad.f16 hr4.x, (r)(last)hr4.x, hr1.y, (r)(last)hr29.x
+MESA: info: ldl.u16 r28.z, l[r10.y+2688], 4
+MESA: info: mad.f16 hr17.z, hr4.z, hr30.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr4.z, hr30.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr4.z, hr31.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr4.z, hr31.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr4.z, hr0.z, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr4.z, hr0.w, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr4.z, hr1.x, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr4.w, hr30.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr4.w, hr30.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr4.w, hr31.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr4.w, hr31.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr4.w, hr0.z, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr4.w, hr0.w, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr4.w, hr1.x, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr5.x, hr30.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr5.x, hr30.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr5.x, hr31.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr5.x, hr31.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr5.x, hr0.z, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr5.x, hr0.w, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr5.x, hr1.x, (r)(last)hr6.x
+MESA: info: mad.f16 hr18.z, hr22.x, hr19.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr22.x, hr19.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr22.x, hr20.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr22.x, hr20.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr22.x, hr21.x, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr22.x, hr21.y, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr22.x, hr21.z, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr22.y, hr19.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr22.y, hr19.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr22.y, hr20.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr22.y, hr20.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr22.y, hr21.x, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr22.y, hr21.y, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr22.y, hr21.z, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr22.z, hr19.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr22.z, hr19.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr22.z, hr20.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr22.z, hr20.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr22.z, hr21.x, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr22.z, hr21.y, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr22.z, hr21.z, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr22.w, hr19.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr22.w, hr19.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr22.w, hr20.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr22.w, hr20.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr22.w, hr21.x, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr22.w, hr21.y, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr22.w, hr21.z, (last)hr7.y
+MESA: info: (rpt1)mad.f16 hr4.z, (r)(last)hr4.z, hr1.y, (r)(last)hr29.z
+MESA: info: (rpt1)mad.f16 hr5.x, (r)(last)hr5.x, hr1.y, (r)(last)hr30.x
+MESA: info: ldl.u16 r29.z, l[r12.x+896], 4
+MESA: info: ldl.u16 r30.z, l[r12.x+960], 4
+MESA: info: ldl.u16 r0.z, l[r10.y+2816], 4
+MESA: info: (rpt1)mad.f16 hr22.x, (r)(last)hr22.x, hr21.w, (r)(last)hr3.z
+MESA: info: (rpt1)mad.f16 hr22.z, (r)(last)hr22.z, hr21.w, (r)(last)hr4.x
+MESA: info: ldl.u16 r3.z, l[r10.y+2944], 4
+MESA: info: mad.f16 hr17.z, hr23.x, hr19.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr23.x, hr19.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr23.x, hr20.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr23.x, hr20.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr23.x, hr21.x, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr23.x, hr21.y, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr23.x, hr21.z, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr23.y, hr19.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr23.y, hr19.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr23.y, hr20.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr23.y, hr20.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr23.y, hr21.x, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr23.y, hr21.y, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr23.y, hr21.z, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr23.z, hr19.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr23.z, hr19.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr23.z, hr20.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr23.z, hr20.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr23.z, hr21.x, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr23.z, hr21.y, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr23.z, hr21.z, (r)(last)hr6.x
+MESA: info: (rpt1)mad.f16 hr23.x, (r)(last)hr23.x, hr21.w, (r)(last)hr4.z
+MESA: info: (rpt1)mad.f16 hr23.z, (r)(last)hr23.z, hr21.w, (r)(last)hr5.x
+MESA: info: (ss)mad.f16 hr18.z, hr27.z, hr25.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr27.z, hr25.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr27.z, hr26.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr27.z, hr26.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr27.z, hr26.z, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr27.z, hr26.w, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr27.z, hr27.x, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr27.w, hr25.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr27.w, hr25.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr27.w, hr26.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr27.w, hr26.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr27.w, hr26.z, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr27.w, hr26.w, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr27.w, hr27.x, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr28.x, hr25.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr28.x, hr25.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr28.x, hr26.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr28.x, hr26.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr28.x, hr26.z, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr28.x, hr26.w, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr28.x, hr27.x, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr28.y, hr25.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr28.y, hr25.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr28.y, hr26.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr28.y, hr26.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr28.y, hr26.z, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr28.y, hr26.w, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr28.y, hr27.x, (last)hr7.y
+MESA: info: mad.f16 hr17.z, hr28.z, hr25.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr28.z, hr25.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr28.z, hr26.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr28.z, hr26.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr28.z, hr26.z, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr28.z, hr26.w, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr28.z, hr27.x, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr28.w, hr25.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr28.w, hr25.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr28.w, hr26.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr28.w, hr26.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr28.w, hr26.z, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr28.w, hr26.w, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr28.w, hr27.x, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr29.x, hr25.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr29.x, hr25.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr29.x, hr26.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr29.x, hr26.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr29.x, hr26.z, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr29.x, hr26.w, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr29.x, hr27.x, (r)(last)hr6.x
+MESA: info: (rpt1)mad.f16 hr27.z, (r)(last)hr27.z, hr27.y, (r)(last)hr22.x
+MESA: info: (rpt1)mad.f16 hr28.x, (r)(last)hr28.x, hr27.y, (r)(last)hr22.z
+MESA: info: (rpt1)mad.f16 hr28.z, (r)(last)hr28.z, hr27.y, (r)(last)hr23.x
+MESA: info: (rpt1)mad.f16 hr29.x, (r)(last)hr29.x, hr27.y, (r)(last)hr23.z
+MESA: info: fence.r.w
+MESA: info: (sy)(ss)mad.f16 hr18.z, hr0.z, hr29.z, (last)hr18.z
+MESA: info: mad.f16 hr16.z, hr0.z, hr29.w, (last)hr16.z
+MESA: info: mad.f16 hr14.z, hr0.z, hr30.x, (last)hr14.z
+MESA: info: mad.f16 hr12.z, hr0.z, hr30.y, (last)hr12.z
+MESA: info: mad.f16 hr10.z, hr0.z, hr30.z, (last)hr10.z
+MESA: info: mad.f16 hr8.z, hr0.z, hr30.w, (last)hr8.z
+MESA: info: mad.f16 hr6.z, hr0.z, hr31.x, (last)hr6.z
+MESA: info: mad.f16 hr18.w, hr0.w, hr29.z, (last)hr18.w
+MESA: info: mad.f16 hr16.w, hr0.w, hr29.w, (last)hr16.w
+MESA: info: mad.f16 hr14.w, hr0.w, hr30.x, (last)hr14.w
+MESA: info: mad.f16 hr12.w, hr0.w, hr30.y, (last)hr12.w
+MESA: info: mad.f16 hr10.w, hr0.w, hr30.z, (last)hr10.w
+MESA: info: mad.f16 hr8.w, hr0.w, hr30.w, (last)hr8.w
+MESA: info: mad.f16 hr6.w, hr0.w, hr31.x, (last)hr6.w
+MESA: info: mad.f16 hr19.x, hr1.x, hr29.z, (last)hr19.x
+MESA: info: mad.f16 hr17.x, hr1.x, hr29.w, (last)hr17.x
+MESA: info: mad.f16 hr15.x, hr1.x, hr30.x, (last)hr15.x
+MESA: info: mad.f16 hr13.x, hr1.x, hr30.y, (last)hr13.x
+MESA: info: mad.f16 hr11.x, hr1.x, hr30.z, (last)hr11.x
+MESA: info: mad.f16 hr9.x, hr1.x, hr30.w, (last)hr9.x
+MESA: info: mad.f16 hr7.x, hr1.x, hr31.x, (last)hr7.x
+MESA: info: mad.f16 hr19.y, hr1.y, hr29.z, (last)hr19.y
+MESA: info: mad.f16 hr17.y, hr1.y, hr29.w, (last)hr17.y
+MESA: info: mad.f16 hr15.y, hr1.y, hr30.x, (last)hr15.y
+MESA: info: mad.f16 hr13.y, hr1.y, hr30.y, (last)hr13.y
+MESA: info: mad.f16 hr11.y, hr1.y, hr30.z, (last)hr11.y
+MESA: info: mad.f16 hr9.y, hr1.y, hr30.w, (last)hr9.y
+MESA: info: mad.f16 hr7.y, hr1.y, hr31.x, (last)hr7.y
+MESA: info: mad.f16 hr17.z, hr3.z, hr29.z, (last)hr17.z
+MESA: info: mad.f16 hr15.z, hr3.z, hr29.w, (last)hr15.z
+MESA: info: mad.f16 hr13.z, hr3.z, hr30.x, (last)hr13.z
+MESA: info: mad.f16 hr11.z, hr3.z, hr30.y, (last)hr11.z
+MESA: info: mad.f16 hr9.z, hr3.z, hr30.z, (last)hr9.z
+MESA: info: mad.f16 hr7.z, hr3.z, hr30.w, (last)hr7.z
+MESA: info: mad.f16 hr5.z, hr3.z, hr31.x, (last)hr5.z
+MESA: info: mad.f16 hr17.w, hr3.w, hr29.z, (last)hr17.w
+MESA: info: mad.f16 hr15.w, hr3.w, hr29.w, (last)hr15.w
+MESA: info: mad.f16 hr13.w, hr3.w, hr30.x, (last)hr13.w
+MESA: info: mad.f16 hr11.w, hr3.w, hr30.y, (last)hr11.w
+MESA: info: mad.f16 hr9.w, hr3.w, hr30.z, (last)hr9.w
+MESA: info: mad.f16 hr7.w, hr3.w, hr30.w, (last)hr7.w
+MESA: info: mad.f16 hr5.w, hr3.w, hr31.x, (last)hr5.w
+MESA: info: (rpt1)mad.f16 hr18.x, (r)hr4.x, hr29.z, (r)(last)hr18.x
+MESA: info: (rpt1)mad.f16 hr16.x, (r)hr4.x, hr29.w, (r)(last)hr16.x
+MESA: info: (rpt1)mad.f16 hr14.x, (r)hr4.x, hr30.x, (r)(last)hr14.x
+MESA: info: (rpt1)mad.f16 hr12.x, (r)hr4.x, hr30.y, (r)(last)hr12.x
+MESA: info: (rpt1)mad.f16 hr10.x, (r)hr4.x, hr30.z, (r)(last)hr10.x
+MESA: info: (rpt1)mad.f16 hr8.x, (r)hr4.x, hr30.w, (r)(last)hr8.x
+MESA: info: (rpt1)mad.f16 hr6.x, (r)hr4.x, hr31.x, (r)(last)hr6.x
+MESA: info: (rpt1)mad.f16 hr4.z, (r)(last)hr0.z, hr31.y, (r)(last)hr27.z
+MESA: info: (rpt1)mad.f16 hr5.x, (r)(last)hr1.x, hr31.y, (r)(last)hr28.x
+MESA: info: bar.g
+MESA: info: (sy)(ss)(rpt1)mad.f16 hr3.z, (r)(last)hr3.z, hr31.y, (r)(last)hr28.z
+MESA: info: (rpt1)mad.f16 hr4.x, (r)(last)hr4.x, hr31.y, (r)(last)hr29.x
+MESA: info: br p0.x, #l596
+MESA: info: mov.u32u32 r53.y, r54.x
+MESA: info: jump #l99
+MESA: info: l596:
+MESA: info: (jp)(eolm)nop
+MESA: info: (nop3) add.u r12.z, r52.w, (last)r12.z
+MESA: info: (nop3) shl.b r12.z, (last)r12.z, 9
+MESA: info: (nop3) sad.s32 r12.z, r53.w, r12.z, (last)r1.y
+MESA: info: (nop3) shl.b r12.z, (last)r12.z, 2
+MESA: info: (rpt2)add.u r9.w, r12.z, (r)c2.x
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr18.z, r12.z, 4
+MESA: info: add.u r10.z, r12.z, c2.w
+MESA: info: (rpt3)add.u r10.w, r12.z, (r)c3.x
+MESA: info: (rpt1)add.u r11.w, r12.z, (r)c4.x
+MESA: info: (ss)(rpt1)add.u r9.y, r12.z, (r)c1.z
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr17.z, r12.z+64, 4
+MESA: info: (ss)(rpt1)add.u r8.w, (last)r12.z, (r)c1.x
+MESA: info: (rpt4)nop
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr16.z, r8.w, 4
+MESA: info: nop
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr15.z, r9.x, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr14.z, r9.y, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr13.z, r9.z, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr12.z, r9.w, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr11.z, r10.x, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr10.z, r10.y, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr9.z, r10.z, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr8.z, r10.w, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr7.z, r11.x, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr6.z, r11.y, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr5.z, r11.z, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr4.z, r11.w, 4
+MESA: info: stib.b.untyped.1d.u16.4.imm.base0 hr3.z, r12.x, 4
+MESA: info: end
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: nop
+MESA: info: ; CL: outputs:
+MESA: info: ; CL: inputs: r0.x (SYSTEM_VALUE_LOCAL_INVOCATION_ID slot=42 cm=7,il=0,b=0) r48.x (SYSTEM_VALUE_WORKGROUP_ID slot=47 cm=7,il=0,b=0)
+MESA: info: ; CL prog 23/1: 718 instr, 25 nops, 693 non-nops, 66 mov, 0 cov, 1280 dwords
+MESA: info: ; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen
+MESA: info: ; CL prog 23/1: 28 cat0, 66 cat1, 50 cat2, 516 cat3, 0 cat4, 3 cat5, 51 cat6, 4 cat7
+MESA: info: ; CL prog 23/1: 30 sstall, 11 (ss), 39 systall, 5 (sy), 1 loops
+MESA: info: ; CL prog 23/1: 16 max_waves, 0 double_threadsize
+MESA: info: ; 27 preamble-instr, 1 early-preamble
+MESA: info: 

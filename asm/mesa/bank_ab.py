@@ -59,7 +59,10 @@ def main():
                      "stats": stats if shaders else []}
         print(f"  {n:28s} conflicts {loop[1]:4d}/{loop[0]:4d}  {[x.split(':')[-1].strip() for x in report[n]['stats']]}",
               flush=True)
-    (HERE / "results" / f"{a.tag}_banks.json").write_text(json.dumps(report, indent=1))
+    out = HERE / "results" / f"{a.tag}_banks.json"
+    merged = json.loads(out.read_text()) if out.exists() else {}
+    merged.update(report)
+    out.write_text(json.dumps(merged, indent=1))
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ index d274335..7ad8d4e 100644
  
  extern enum ir3_shader_debug ir3_shader_debug;
 diff --git a/src/freedreno/ir3/ir3_ra.c b/src/freedreno/ir3/ir3_ra.c
-index 34e4bc4..4f8d06a 100644
+index 34e4bc4..fe12397 100644
 --- a/src/freedreno/ir3/ir3_ra.c
 +++ b/src/freedreno/ir3/ir3_ra.c
 @@ -5,7 +5,10 @@
@@ -46,11 +46,11 @@ index 34e4bc4..4f8d06a 100644
  };
  
  #define foreach_interval(interval, file)                                       \
-@@ -1316,13 +1321,134 @@ ra_update_affinity(unsigned file_size, struct ir3_register *reg,
+@@ -1316,13 +1321,166 @@ ra_update_affinity(unsigned file_size, struct ir3_register *reg,
     reg->merge_set->preferred_reg = physreg - reg->merge_set_offset;
  }
  
-+DEBUG_GET_ONCE_NUM_OPTION(ir3_bankra_mode, "IR3_BANKRA_MODE", 5)
++DEBUG_GET_ONCE_NUM_OPTION(ir3_bankra_mode, "IR3_BANKRA_MODE", 9)
 +
 +static bool
 +bank_src(const struct ir3_register *src)
@@ -114,6 +114,38 @@ index 34e4bc4..4f8d06a 100644
 +   return false;
 +}
 +
++static struct ir3_instruction *
++bank_producer(struct ir3_register *def)
++{
++   struct ir3_instruction *instr = def->instr;
++   if (instr->opc == OPC_META_SPLIT && instr->srcs[0]->def)
++      instr = instr->srcs[0]->def->instr;
++   return instr;
++}
++
++static bool
++bank_ldl_paired(struct ra_ctx *ctx, struct ir3_register *reg)
++{
++   for (unsigned m = 0; m < bank_members(reg); m++) {
++      struct hash_entry *entry =
++         _mesa_hash_table_search(ctx->bank_uses, bank_member(reg, m));
++      if (!entry)
++         continue;
++
++      struct util_dynarray *uses = entry->data;
++      util_dynarray_foreach (uses, struct ir3_instruction *, mad) {
++         for (unsigned i = 0; i < 3; i++) {
++            struct ir3_instruction *producer =
++               bank_producer((*mad)->srcs[i]->def);
++            if (is_tex_or_prefetch(producer) ||
++                (is_load(producer) && !is_local_mem_load(producer)))
++               return true;
++         }
++      }
++   }
++   return false;
++}
++
 +static int
 +bank_num(struct ra_ctx *ctx, struct ir3_register *src,
 +         struct ir3_register *reg, physreg_t dst_physreg)
@@ -157,7 +189,7 @@ index 34e4bc4..4f8d06a 100644
 +         for (unsigned i = 0; i < 3; i++) {
 +            int num = bank_num(ctx, (*mad)->srcs[i], reg, dst_physreg);
 +            if (num >= 0)
-+               comp[n++] = num % 4;
++               comp[n++] = num % 2;
 +         }
 +
 +         if (n == 3 && comp[0] == comp[1] && comp[1] == comp[2])
@@ -182,14 +214,16 @@ index 34e4bc4..4f8d06a 100644
  {
     /* This can happen if we create a very large merge set. Just bail out in that
      * case.
-@@ -1333,6 +1459,16 @@ find_best_gap(struct ra_ctx *ctx, struct ra_file *file,
+@@ -1333,6 +1491,18 @@ find_best_gap(struct ra_ctx *ctx, struct ra_file *file,
     BITSET_WORD *available =
        is_early_clobber(dst) ? file->available_to_evict : file->available;
  
 +   unsigned mode = debug_get_option_ir3_bankra_mode();
 +   bool banked = ctx->bank_uses && file != &ctx->shared &&
-+                 bank_has_uses(ctx, dst) &&
-+                 !((mode & 4) && is_local_mem_load(dst->instr));
++                 bank_has_uses(ctx, dst);
++   if (banked && is_local_mem_load(dst->instr) &&
++       ((mode & 4) || ((mode & 8) && !bank_ldl_paired(ctx, dst))))
++      banked = false;
 +
 +   physreg_t best = (physreg_t)~0;
 +   unsigned best_cost = ~0u;
@@ -199,7 +233,7 @@ index 34e4bc4..4f8d06a 100644
     unsigned start = align(file->start, alignment);
     if (start + size > file_size)
        start = 0;
-@@ -1352,8 +1488,21 @@ find_best_gap(struct ra_ctx *ctx, struct ra_file *file,
+@@ -1352,8 +1522,21 @@ find_best_gap(struct ra_ctx *ctx, struct ra_file *file,
        }
  
        if (is_available) {
@@ -223,7 +257,7 @@ index 34e4bc4..4f8d06a 100644
        }
  
        candidate += alignment;
-@@ -1361,7 +1510,10 @@ find_best_gap(struct ra_ctx *ctx, struct ra_file *file,
+@@ -1361,7 +1544,10 @@ find_best_gap(struct ra_ctx *ctx, struct ra_file *file,
           candidate = 0;
     } while (candidate != start);
  
@@ -235,7 +269,7 @@ index 34e4bc4..4f8d06a 100644
  }
  
  static physreg_t
-@@ -1523,7 +1675,8 @@ get_reg(struct ra_ctx *ctx, struct ra_file *file, struct ir3_register *reg)
+@@ -1523,7 +1709,8 @@ get_reg(struct ra_ctx *ctx, struct ra_file *file, struct ir3_register *reg)
         size < reg->merge_set->size) {
        physreg_t best_reg = find_best_gap(ctx, file, reg, file_size,
                                           reg->merge_set->size,
@@ -245,7 +279,7 @@ index 34e4bc4..4f8d06a 100644
        if (best_reg != (physreg_t)~0u) {
           best_reg += reg->merge_set_offset;
           return best_reg;
-@@ -1542,7 +1695,7 @@ get_reg(struct ra_ctx *ctx, struct ra_file *file, struct ir3_register *reg)
+@@ -1542,7 +1729,7 @@ get_reg(struct ra_ctx *ctx, struct ra_file *file, struct ir3_register *reg)
     }
  
     physreg_t best_reg =
@@ -254,7 +288,7 @@ index 34e4bc4..4f8d06a 100644
     if (best_reg != (physreg_t)~0u) {
        return best_reg;
     }
-@@ -2918,6 +3071,10 @@ ir3_ra(struct ir3_shader_variant *v)
+@@ -2918,6 +3105,10 @@ ir3_ra(struct ir3_shader_variant *v)
  
     ctx->full.start = ctx->half.start = ctx->shared.start = 0;
  
