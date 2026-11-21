@@ -20,3 +20,6 @@ NP   512x 8192x 2048  gPQ_w1x1_t1x1_n64_f16_k1            12.69 TFLOP/s    1353.
 NP  2048x  512x 2048  gPQ_w1x2_t1x1_n64_f16_k1             8.55 TFLOP/s     502.5 us  err 3.1e-03 PASS  (first call 69 ms incl. pipeline)   [waited 4s, start 44600mC, 8/9 clock samples at 1.45 GHz]
 NP   512x 2048x 8192  gPQ_w1x2_t1x1_n64_f16_k1            13.31 TFLOP/s    1290.6 us  err 9.3e-03 PASS  (first call 94 ms incl. pipeline)   [waited 4s, start 44300mC, 7/10 clock samples at 1.45 GHz]
 NT  1024x 1024x 1024  gNN_w2x4_t1x2_n32_f16_k1             7.15 TFLOP/s     300.3 us  err 3.5e-03 PASS  (first call 129 ms incl. pipeline)   [waited 4s, start 45000mC, 7/9 clock samples at 1.45 GHz]
+NN  2048x 2048x 2048  gTN_w4x2_t1x1_n64_f16_k1             9.72 TFLOP/s    1766.6 us  err 4.3e-03 PASS  (first call 101 ms incl. pipeline)   [waited 0s, start 30300mC, 8/9 clock samples at 1.45 GHz]
+TT  2048x 2048x 2048  gTN_w4x2_t1x1_n64_f16_k1             9.74 TFLOP/s    1764.6 us  err 4.4e-03 PASS  (first call 102 ms incl. pipeline)   [waited 2s, start 32500mC, 8/9 clock samples at 1.45 GHz]
+TN  2048x 2048x 2048  gTN_w4x2_t1x1_n64_f16_k1            11.61 TFLOP/s    1479.7 us  err 3.4e-03 PASS  (first call 88 ms incl. pipeline)   [waited 2s, start 33400mC, 8/9 clock samples at 1.45 GHz]

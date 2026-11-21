@@ -37,17 +37,18 @@ def progress():
     rows = [("Start: Mojo cooperative-matrix kernel (tuned on the 840)", 4.25),
             ("Generated kernels, A stored [M,K] (NN)", 8.17),
             ("A stored [K,M] (TN): 128-byte tile rows", 10.81),
-            ("AdrenoBLAS library call, TN", 11.02),
+            ("Panels, one 64×64 tile per subgroup", 13.94),
             ("4096³, TN", 8.77),
-            ("4096³, operands in panels", 12.78)]
-    fig, ax = plt.subplots(figsize=(8.4, 4.2), dpi=150)
+            ("4096³, panels, 64×32 tiles", 12.78),
+            ("4096³, panels, one 64×64 tile per subgroup", 15.34)]
+    fig, ax = plt.subplots(figsize=(8.4, 4.6), dpi=150)
     y = list(range(len(rows)))[::-1]
     bars(ax, y, [v for _, v in rows], BLUE, 0.5)
     for yi, (_, v) in zip(y, rows):
         ax.text(v + 0.2, yi, f"{v:.2f}", va="center", color=INK, fontsize=9)
     ax.set_yticks(y, [r for r, _ in rows])
-    ax.axhline(1.5, color=GRID, lw=0.8)
-    frame(ax, 19, "fp16 GEMM on the Adreno 850, step by step", "2048³ unless marked; every kernel checked against an fp32 reference")
+    ax.axhline(2.5, color=GRID, lw=0.8)
+    frame(ax, 19, "fp16 GEMM on the Adreno 850, step by step", "2048³ unless marked; library calls with operands pre-packed where noted; every call checked against fp32")
     ax.set_ylim(-0.6, len(rows) - 0.1)
     ref(ax, 8.36, "fp16 ALU peak 8.36", len(rows) - 0.4, "right")
     ref(ax, 17.5, "matrix peak 17.5", len(rows) - 0.4, "right")
@@ -57,8 +58,8 @@ def progress():
 def layouts():
     lays = ["TN  A [K,M], B [K,N]", "NN  A [M,K], B [K,N]", "TT  A [K,M], B [N,K]", "NT  A [M,K], B [N,K]"]
     direct = [10.81, 8.17, 7.60, 2.38]
-    packed = [11.02, 9.60, 9.59, 8.52]
-    fig, ax = plt.subplots(figsize=(8.4, 3.7), dpi=150)
+    packed = [11.61, 9.72, 9.74, 10.13]
+    fig, ax = plt.subplots(figsize=(8.4, 4.0), dpi=150)
     y = [3, 2, 1, 0]
     bars(ax, [v + 0.16 for v in y], direct, ORANGE, 0.28)
     bars(ax, [v - 0.16 for v in y], packed, BLUE, 0.28)
@@ -66,10 +67,13 @@ def layouts():
         ax.text(d + 0.15, yi + 0.16, f"{d:.1f}", va="center", color=INK2, fontsize=8.5)
         ax.text(p + 0.15, yi - 0.16, f"{p:.1f}", va="center", color=INK, fontsize=8.5)
     ax.set_yticks(y, lays)
-    frame(ax, 13, "Layout matters: 2048³ by operand layout", "C = A·B, fp16; direct kernel for the layout vs the library, which packs operands to TN first")
-    ax.set_ylim(-0.55, 3.55)
+    frame(ax, 15, "Layout matters: 2048³ by operand layout", "C = A·B, fp16; direct 64×32-tile kernel for the layout vs the library, which packs operands first")
+    ax.set_ylim(-0.55, 3.7)
     h1 = plt.Rectangle((0, 0), 1, 1, fc=ORANGE); h2 = plt.Rectangle((0, 0), 1, 1, fc=BLUE)
-    ax.legend([h1, h2], ["direct kernel", "library (packs to TN)"], loc="lower right", frameon=False, fontsize=9)
+    ax.axvline(13.94, color=REF, lw=1)
+    ax.text(13.79, 3.42, "operands pre-packed 13.9", color=INK2, fontsize=8.5, va="center", ha="right")
+    ax.legend([h1, h2], ["direct kernel", "library (packs operands)"], loc="upper center", bbox_to_anchor=(0.5, -0.2),
+              ncol=2, frameon=False, fontsize=9)
     fig.tight_layout(rect=(0, 0, 1, 0.84))
     fig.savefig(OUT / "ablas-layouts.png")
 
