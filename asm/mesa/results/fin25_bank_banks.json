@@ -1,0 +1,266 @@
+{
+ "gemm_f32_ll_128x128x16": {
+  "tflops": 1.401443218847548,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 156,
+  "loop_mads": 1024,
+  "hash": "30498b3895dd41f8769b448ae12ac4ce7f39b520d4d2ef595ac1a7c8a11b279c",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_ll_64x128x8": {
+  "tflops": 1.38204784882373,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 70,
+  "loop_mads": 512,
+  "hash": "f571e15950c62fc94490895e3667f8b12fd99f994b5ccf73b195ce46159a0011",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 8 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_ll_64x64x16": {
+  "tflops": 1.325501231845973,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 202,
+  "loop_mads": 1024,
+  "hash": "8b3f249378f240f39edab0c3a3eda207b10e386bca6c96b5da927fb09a291f57",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_lg_128x128x16": {
+  "tflops": 1.6338389825156978,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 108,
+  "loop_mads": 1024,
+  "hash": "5365b38db51b634c2fac2b7ef972a89dade1069b2926e0c4ae1fad610858875f",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_lg_64x128x16": {
+  "tflops": 1.8387357775433855,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 70,
+  "loop_mads": 1024,
+  "hash": "73c38460637616ec42511f708199711b8a8761c6919ba59b370afa490cc7e474",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_lg_64x64x16": {
+  "tflops": 1.7767091088267437,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 80,
+  "loop_mads": 1024,
+  "hash": "9c26a504ecb88f869b8968c87f9ebca2252a264426344eccd17634c2e1b5cdd4",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_gl_128x128x16": {
+  "tflops": 1.6128371912949313,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 130,
+  "loop_mads": 1024,
+  "hash": "9ca0ddb686e2ea75c1126d1347a8ffb981b50124fe49bc8d9bfc15997ce660c2",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_gl_64x64x16": {
+  "tflops": 1.9836539188028157,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 80,
+  "loop_mads": 1024,
+  "hash": "3000a061e24eb6fefd391edb88a57538b9ccef254d01b0fefe66ec0945a1520c",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 12 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_gg_128x128": {
+  "tflops": 1.4808853299865186,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 62,
+  "loop_mads": 256,
+  "hash": "0cfc550c41ea24d91a714cef8cbf4c119d38ebf316f369be9a4e445900b0949c",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 25 full, 8 constlen",
+   "; CL prog 23/1: 10 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_gg_64x128": {
+  "tflops": 1.4865888146232995,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 62,
+  "loop_mads": 256,
+  "hash": "9c1085ba2123be8fee459b2b51bd16f7079b34c706a3d8bf00d2ee0705e5bb6d",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 25 full, 8 constlen",
+   "; CL prog 23/1: 10 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f32_gg_64x64": {
+  "tflops": 1.6195323101984178,
+  "ok": true,
+  "err": 0.0007427,
+  "loop_conflicts": 62,
+  "loop_mads": 256,
+  "hash": "2ba44d1f6c807302798cfe597f34c8883f4e1aac64d136c9e8ec2a8acd77274f",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 25 full, 8 constlen",
+   "; CL prog 23/1: 10 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_ll_128x128x16": {
+  "tflops": 2.1607704958754503,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 512,
+  "loop_mads": 1024,
+  "hash": "7cbb57982c1510dee46ab4b9df7c2e4e540bd81c6d0c53f75d5bf7a184a3837a",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 18 full, 12 constlen",
+   "; CL prog 23/1: 14 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_ll_64x128x8": {
+  "tflops": 2.2014353242080285,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 256,
+  "loop_mads": 512,
+  "hash": "8ea91fcdc6a7d6eac3b7f3b7f086dda13c46f1a29df2bd23b12741c8fe0dd238",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_ll_64x64x16": {
+  "tflops": 2.019375714765123,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 512,
+  "loop_mads": 1024,
+  "hash": "3a0d019cbb0560aa35ce6accc5708f6873e73d39aca2fc4601ffe1f3f6c71769",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_lg_128x128x16": {
+  "tflops": 3.1289591166870228,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 84,
+  "loop_mads": 1024,
+  "hash": "2224438621c6bfe2e7679b544dc1c7e6af83d14b84ebcbaaeb1bcab25ceac812",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 21 full, 12 constlen",
+   "; CL prog 23/1: 12 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_lg_64x128x16": {
+  "tflops": 3.3262565976743907,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 70,
+  "loop_mads": 1024,
+  "hash": "16a7888dc53cbd1c6ea248dacfdf0c53295c2dd0acaf639e59435f2dcf1f2bed",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 21 full, 12 constlen",
+   "; CL prog 23/1: 12 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_lg_64x64x16": {
+  "tflops": 2.7085589196456836,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 102,
+  "loop_mads": 1024,
+  "hash": "86b2efd85bdf41b95f3f6a4923d1f6333bb61a92000319cba23c063530c95263",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 21 full, 12 constlen",
+   "; CL prog 23/1: 12 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_gl_128x128x16": {
+  "tflops": 3.228751287657619,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 88,
+  "loop_mads": 1024,
+  "hash": "5883c8116dceecb63acb1577c80fe4f1895895696b34d499268cd834943cdc37",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 21 full, 12 constlen",
+   "; CL prog 23/1: 12 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_gl_64x64x16": {
+  "tflops": 2.95468821851238,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 136,
+  "loop_mads": 1024,
+  "hash": "32199eb3d1e211b122f6064606eaef3cb6c7c31697c15d8133d6a7a81062e0a7",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 21 full, 12 constlen",
+   "; CL prog 23/1: 12 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_gg_128x128": {
+  "tflops": 3.1867035144895954,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 22,
+  "loop_mads": 256,
+  "hash": "aaf9437b596847fa2fae63adf11c3e6691e670d51574bf8632e3b9a95cbb5f97",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_gg_64x128": {
+  "tflops": 3.21556427012967,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 22,
+  "loop_mads": 256,
+  "hash": "90a284baec58a24b6e88642321f3c8bdf671919725aa0fd049f4138510ba0495",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ },
+ "gemm_f16_gg_64x64": {
+  "tflops": 3.0699586327965576,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 22,
+  "loop_mads": 256,
+  "hash": "a5de5c9d4695c3e0f020b44645b74d0aff268ce9e2c3dceba4fe07bb3071d379",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ }
+}
