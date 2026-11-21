@@ -1,0 +1,73 @@
+t512x2048x2048_f16_ll_128x128x16         stock          1.963 ok=True
+t512x2048x2048_f16_ll_128x128x16         turnip-bank    1.991 ok=True
+t512x2048x2048_f16_ll_128x128x16         turnip-nobank  1.962 ok=True
+t512x2048x2048_f16_ll_64x128x8           stock          2.077 ok=True
+t512x2048x2048_f16_ll_64x128x8           turnip-bank    2.06 ok=True
+t512x2048x2048_f16_ll_64x128x8           turnip-nobank  2.061 ok=True
+t512x2048x2048_f16_ll_64x64x16           stock          1.937 ok=True
+t512x2048x2048_f16_ll_64x64x16           turnip-bank    1.897 ok=True
+t512x2048x2048_f16_ll_64x64x16           turnip-nobank  1.903 ok=True
+t512x2048x2048_f16_lg_128x128x16         stock          2.844 ok=True
+t512x2048x2048_f16_lg_128x128x16         turnip-bank    2.869 ok=True
+t512x2048x2048_f16_lg_128x128x16         turnip-nobank  2.701 ok=True
+t512x2048x2048_f16_lg_64x128x16          stock          2.998 ok=True
+t512x2048x2048_f16_lg_64x128x16          turnip-bank    3.136 ok=True
+t512x2048x2048_f16_lg_64x128x16          turnip-nobank  2.883 ok=True
+t512x2048x2048_f16_lg_64x64x16           stock          2.61 ok=True
+t512x2048x2048_f16_lg_64x64x16           turnip-bank    2.582 ok=True
+t512x2048x2048_f16_lg_64x64x16           turnip-nobank  2.229 ok=True
+t512x2048x2048_f16_gl_128x128x16         stock          2.885 ok=True
+t512x2048x2048_f16_gl_128x128x16         turnip-bank    2.959 ok=True
+t512x2048x2048_f16_gl_128x128x16         turnip-nobank  2.825 ok=True
+t512x2048x2048_f16_gl_64x64x16           stock          2.661 ok=True
+t512x2048x2048_f16_gl_64x64x16           turnip-bank    2.781 ok=True
+t512x2048x2048_f16_gl_64x64x16           turnip-nobank  2.269 ok=True
+t512x2048x2048_f16_gg_128x128            stock          2.672 ok=True
+t512x2048x2048_f16_gg_128x128            turnip-bank    2.725 ok=True
+t512x2048x2048_f16_gg_128x128            turnip-nobank  2.812 ok=True
+t512x2048x2048_f16_gg_64x128             stock          2.95 ok=True
+t512x2048x2048_f16_gg_64x128             turnip-bank    2.75 ok=True
+t512x2048x2048_f16_gg_64x128             turnip-nobank  2.801 ok=True
+t512x2048x2048_f16_gg_64x64              stock          2.386 ok=True
+  [thermal] level 1 (1200 MHz cap), 51.3 C: waiting
+t512x2048x2048_f16_gg_64x64              turnip-bank    2.668 ok=True
+t512x2048x2048_f16_gg_64x64              turnip-nobank  2.316 ok=True
+t512x2048x2048_f32_ll_128x128x16         stock          1.224 ok=True
+t512x2048x2048_f32_ll_128x128x16         turnip-bank    1.287 ok=True
+t512x2048x2048_f32_ll_128x128x16         turnip-nobank  1.287 ok=True
+t512x2048x2048_f32_ll_64x128x8           stock          1.373 ok=True
+t512x2048x2048_f32_ll_64x128x8           turnip-bank    1.273 ok=True
+t512x2048x2048_f32_ll_64x128x8           turnip-nobank  1.27 ok=True
+t512x2048x2048_f32_ll_64x64x16           stock          1.287 ok=True
+t512x2048x2048_f32_ll_64x64x16           turnip-bank    1.253 ok=True
+t512x2048x2048_f32_ll_64x64x16           turnip-nobank  1.265 ok=True
+t512x2048x2048_f32_lg_128x128x16         stock          1.709 ok=True
+t512x2048x2048_f32_lg_128x128x16         turnip-bank    1.513 ok=True
+  [thermal] level 1 (1200 MHz cap), 51.3 C: waiting
+t512x2048x2048_f32_lg_128x128x16         turnip-nobank  1.408 ok=True
+t512x2048x2048_f32_lg_64x128x16          stock          1.884 ok=True
+t512x2048x2048_f32_lg_64x128x16          turnip-bank    1.671 ok=True
+t512x2048x2048_f32_lg_64x128x16          turnip-nobank  1.458 ok=True
+t512x2048x2048_f32_lg_64x64x16           stock          1.935 ok=True
+t512x2048x2048_f32_lg_64x64x16           turnip-bank    1.847 ok=True
+t512x2048x2048_f32_lg_64x64x16           turnip-nobank  1.887 ok=True
+t512x2048x2048_f32_gl_128x128x16         stock          1.749 ok=True
+t512x2048x2048_f32_gl_128x128x16         turnip-bank    1.557 ok=True
+t512x2048x2048_f32_gl_128x128x16         turnip-nobank  1.487 ok=True
+t512x2048x2048_f32_gl_64x64x16           stock          1.932 ok=True
+  [thermal] level 1 (1200 MHz cap), 49.8 C: waiting
+t512x2048x2048_f32_gl_64x64x16           turnip-bank    1.939 ok=True
+t512x2048x2048_f32_gl_64x64x16           turnip-nobank  1.931 ok=True
+t512x2048x2048_f32_gg_128x128            stock          1.524 ok=True
+t512x2048x2048_f32_gg_128x128            turnip-bank    1.145 ok=True
+t512x2048x2048_f32_gg_128x128            turnip-nobank  1.02 ok=True
+t512x2048x2048_f32_gg_64x128             stock          1.608 ok=True
+t512x2048x2048_f32_gg_64x128             turnip-bank    1.349 ok=True
+t512x2048x2048_f32_gg_64x128             turnip-nobank  1.286 ok=True
+t512x2048x2048_f32_gg_64x64              stock          1.61 ok=True
+t512x2048x2048_f32_gg_64x64              turnip-bank    1.33 ok=True
+t512x2048x2048_f32_gg_64x64              turnip-nobank  1.301 ok=True
+
+best f16: lg_64x128x16 on turnip-bank: 3.136 TFLOP/s; per compiler: stock 2.998 (lg_64x128x16), turnip-bank 3.136 (lg_64x128x16), turnip-nobank 2.883 (lg_64x128x16)
+
+best f32: gl_64x64x16 on turnip-bank: 1.939 TFLOP/s; per compiler: stock 1.935 (lg_64x64x16), turnip-bank 1.939 (gl_64x64x16), turnip-nobank 1.931 (gl_64x64x16)

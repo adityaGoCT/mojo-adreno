@@ -23,7 +23,7 @@ index d274335..7ad8d4e 100644
  
  extern enum ir3_shader_debug ir3_shader_debug;
 diff --git a/src/freedreno/ir3/ir3_ra.c b/src/freedreno/ir3/ir3_ra.c
-index 34e4bc4..dece7c2 100644
+index 34e4bc4..18b96c7 100644
 --- a/src/freedreno/ir3/ir3_ra.c
 +++ b/src/freedreno/ir3/ir3_ra.c
 @@ -5,7 +5,10 @@
@@ -348,11 +348,12 @@ index 34e4bc4..dece7c2 100644
  
        if (instr->opc == OPC_META_PHI)
           assign_phi(ctx, instr);
-@@ -2918,6 +3137,14 @@ ir3_ra(struct ir3_shader_variant *v)
+@@ -2918,6 +3137,15 @@ ir3_ra(struct ir3_shader_variant *v)
  
     ctx->full.start = ctx->half.start = ctx->shared.start = 0;
  
-+   if (v->compiler->gen >= 8 && !(ir3_shader_debug & IR3_DBG_NOBANKRA)) {
++   if (v->compiler->gen >= 8 && !(ir3_shader_debug & IR3_DBG_NOBANKRA) &&
++       !(v->name && strstr(v->name, "nobankra"))) {
 +      ra_collect_bank_uses(ctx, v->ir);
 +      if (debug_get_option_ir3_bankra_mode() & 16) {
 +         ctx->full.freed_ip = ctx->bank_freed_ip;

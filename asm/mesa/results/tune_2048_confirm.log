@@ -1,0 +1,18 @@
+
+confirming f16: 4 candidates within 3.0% of the best
+  t2048x2048x2048_f16_lg_64x128x16         stock          median 3.097 of ['3.368', '3.097', '3.073']
+  t2048x2048x2048_f16_lg_64x128x16         turnip-bank    median 3.316 of ['3.316', '3.316', '3.316']
+  t2048x2048x2048_f16_gg_64x128            turnip-nobank  median 3.272 of ['3.315', '3.272', '3.114']
+  t2048x2048x2048_f16_gg_128x128           turnip-nobank  median 3.271 of ['3.296', '3.246', '3.271']
+
+confirming f32: 4 candidates within 3.0% of the best
+  [thermal] level 1 (1200 MHz cap), 51.3 C: waiting
+  [thermal] level 1 (1200 MHz cap), 52.5 C: waiting
+  t2048x2048x2048_f32_gl_64x64x16          turnip-nobank  median 1.970 of ['1.918', '1.970', '1.975']
+  t2048x2048x2048_f32_lg_64x64x16          stock          median 1.934 of ['2.044', '1.934', '1.916']
+  t2048x2048x2048_f32_gl_64x64x16          turnip-bank    median 1.987 of ['1.987', '1.997', '1.953']
+  t2048x2048x2048_f32_lg_64x128x16         stock          median 1.870 of ['1.870', '1.980', '1.859']
+
+best f16: lg_64x128x16 on turnip-bank: 3.316 TFLOP/s; per compiler: stock 3.138 (gl_128x128x16), turnip-bank 3.316 (lg_64x128x16), turnip-nobank 3.272 (gg_64x128)
+
+best f32: gl_64x64x16 on turnip-bank: 1.987 TFLOP/s; per compiler: stock 1.934 (lg_64x64x16), turnip-bank 1.987 (gl_64x64x16), turnip-nobank 1.97 (gl_64x64x16)

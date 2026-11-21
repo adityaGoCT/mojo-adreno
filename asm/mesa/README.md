@@ -321,7 +321,23 @@ python3 tune_alu.py 1024 1024 1024 --dry-run          # data, shaders and manife
 ```
 
 The catalogue entry records `compiler` (`stock` / `turnip-bank` / `turnip-nobank`) and `bank_ra` (`on` /
-`off` / null for stock). Results: (pending a device session).
+`off` / null for stock). Candidates within 3% of the best are then re-timed three times, interleaved, and
+the median decides (`--confirm`; `--confirm-only` reuses a finished sweep). That round matters: the stock
+driver's timings vary much more than Turnip's (one stock candidate measured 3.37, 3.10 and 3.07 TFLOP/s).
+
+Results (2026-11-21, all 132 runs checked correct; `results/tune_*.json`, `results/alu_catalogue.json`):
+
+| shape | math | best kernel | compiler | TFLOP/s | best stock | best Turnip, bank RA off |
+|---|---|---|---|---|---|---|
+| 2048³ | fp16 | lg 64×128×16 | Turnip, bank RA on | 3.32 | 3.14 (gl 128×128) | 3.27 (gg 64×128) |
+| 2048³ | fp32 | gl 64×64×16 | Turnip, bank RA on | 1.99 | 1.93 (lg 64×64) | 1.97 (gl 64×64) |
+| 512×2048×2048 | fp16 | lg 64×128×16 | Turnip, bank RA on | 3.14 | 3.00 (lg 64×128) | 2.88 (lg 64×128) |
+| 512×2048×2048 | fp32 | lg 64×64×16 | stock | 2.00 | 2.00 | 1.93 (gl 64×64) |
+
+Across all 22 kernels of a shape, bank RA on vs off is +4.9% geomean for both shapes. Per kernel it ranges
+from −3.9% to +22.6%, so the per-kernel choice is what the tuner adds. The stock compiler is clearly ahead
+on most fp32 kernels (e.g. fp32 gg 128×128: 1.68 vs 1.49 TFLOP/s at 2048³), and it wins the 512×2048×2048
+fp32 slot.
 
 ## Reproduce
 

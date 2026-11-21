@@ -3,29 +3,72 @@
   "date": "2026-11-21",
   "f16": {
    "kernel": "lg_64x128x16",
-   "compiler": "stock",
-   "tflops": 3.375,
-   "bank_ra": null,
+   "compiler": "turnip-bank",
+   "tflops": 3.316,
+   "bank_ra": "on",
    "best_per_compiler": {
     "stock": {
-     "kernel": "lg_64x128x16",
-     "tflops": 3.375
+     "kernel": "gl_128x128x16",
+     "tflops": 3.138
     },
     "turnip-bank": {
      "kernel": "lg_64x128x16",
-     "tflops": 3.315
+     "tflops": 3.316
     },
     "turnip-nobank": {
      "kernel": "gg_64x128",
-     "tflops": 3.311
+     "tflops": 3.272
     }
    }
   },
   "f32": {
    "kernel": "gl_64x64x16",
-   "compiler": "turnip-nobank",
-   "tflops": 2.004,
-   "bank_ra": "off",
+   "compiler": "turnip-bank",
+   "tflops": 1.987,
+   "bank_ra": "on",
+   "best_per_compiler": {
+    "stock": {
+     "kernel": "lg_64x64x16",
+     "tflops": 1.934
+    },
+    "turnip-bank": {
+     "kernel": "gl_64x64x16",
+     "tflops": 1.987
+    },
+    "turnip-nobank": {
+     "kernel": "gl_64x64x16",
+     "tflops": 1.97
+    }
+   }
+  }
+ },
+ "512x2048x2048": {
+  "date": "2026-11-21",
+  "f16": {
+   "kernel": "lg_64x128x16",
+   "compiler": "turnip-bank",
+   "tflops": 3.136,
+   "bank_ra": "on",
+   "best_per_compiler": {
+    "stock": {
+     "kernel": "lg_64x128x16",
+     "tflops": 2.998
+    },
+    "turnip-bank": {
+     "kernel": "lg_64x128x16",
+     "tflops": 3.136
+    },
+    "turnip-nobank": {
+     "kernel": "lg_64x128x16",
+     "tflops": 2.883
+    }
+   }
+  },
+  "f32": {
+   "kernel": "lg_64x64x16",
+   "compiler": "stock",
+   "tflops": 1.997,
+   "bank_ra": null,
    "best_per_compiler": {
     "stock": {
      "kernel": "lg_64x64x16",
@@ -33,11 +76,11 @@
     },
     "turnip-bank": {
      "kernel": "gl_64x64x16",
-     "tflops": 1.995
+     "tflops": 1.928
     },
     "turnip-nobank": {
      "kernel": "gl_64x64x16",
-     "tflops": 2.004
+     "tflops": 1.928
     }
    }
   }

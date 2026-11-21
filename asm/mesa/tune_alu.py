@@ -110,6 +110,9 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--target-ms", type=int, default=150)
     ap.add_argument("--dry-run", action="store_true", help="generate data, shaders and manifest only")
+    ap.add_argument("--confirm", type=float, default=3.0,
+                    help="re-time candidates within this %% of the best, 3 rounds interleaved, median (0 = off)")
+    ap.add_argument("--confirm-only", action="store_true", help="reuse results/tune_<shape>.json, only confirm")
     a = ap.parse_args()
     M, N, K = a.M, a.N, a.K
     dtypes = ["f16", "f32"] if a.dtype == "both" else [a.dtype]
@@ -135,6 +138,9 @@ def main():
         return
     run.adb("push", *spvs, f"{run.DEV}/spv/")
     res = {}
+    if a.confirm_only:
+        res = json.loads((HERE / "results" / f"{tag}.json").read_text())
+        man = []
     for line in man:
         name = line.split()[0]
         for drv in drivers:
@@ -144,6 +150,30 @@ def main():
                                             "clk_mhz": r.get("clk_eff_mhz")}
             tf = r.get("tflops")
             print(f"{name:40s} {drv:14s} {tf if tf is None else round(tf, 3)} ok={r.get('ok')}", flush=True)
+    if a.confirm > 0:
+        for dt in dtypes:
+            rows = sorted(((v["tflops"], n, drv) for n, dv in res.items() if f"_{dt}_" in n
+                           for drv, v in dv.items() if v.get("ok") and v.get("tflops")), reverse=True)
+            if not rows:
+                continue
+            close = [(n, drv) for t, n, drv in rows if t >= rows[0][0] * (1 - a.confirm / 100)]
+            if len(close) < 2:
+                continue
+            print(f"\nconfirming {dt}: {len(close)} candidates within {a.confirm}% of the best", flush=True)
+            runs = {c: [] for c in close}
+            for rnd in range(3):
+                for n, drv in close:
+                    d, env = DRIVERS[drv]
+                    r = run.run(str(mf), d, env, f"{tag}_confirm_{drv}", a.target_ms, a.reps, names=[n], quiet=True)[0]
+                    if r.get("ok") and r.get("tflops"):
+                        runs[(n, drv)].append(r["tflops"])
+            for (n, drv), ts in runs.items():
+                if ts:
+                    med = sorted(ts)[len(ts) // 2]
+                    res[n][drv]["tflops_single"] = res[n][drv]["tflops"]
+                    res[n][drv]["tflops"] = med
+                    res[n][drv]["confirm_runs"] = ts
+                    print(f"  {n:40s} {drv:14s} median {med:.3f} of {['%.3f' % t for t in ts]}", flush=True)
     cat_path = HERE / "results" / "alu_catalogue.json"
     cat = json.loads(cat_path.read_text()) if cat_path.exists() else {}
     entry = pick(res, dtypes, drivers)
