@@ -12,6 +12,23 @@ matrices (fresh operands every step); 8.36 TFLOP/s fp16 ALU.
 
 ## Results
 
+**Update (closing the last 7%): 16.67 TFLOP/s at 4096^3 (95%), 16.99 at 4096 x 4096 x 8192 (97%).** Tried, all
+cooled (`--cool`), K-contiguous tiles with one 64 x 64 tile per subgroup at 4096^3:
+
+| idea | result (TFLOP/s) |
+|---|---|
+| baseline `w2x2` / `w4x2` | **16.67 / 16.60** |
+| K unrolled by 2 / 4 (one 64 x 64 accumulator: no hang, unlike 64 x 32 tiles) | 15.53 / 14.29 |
+| 16-subgroup workgroups (`--big`), grouped order (`--sw 4 8`) | 14.1 at best |
+| persistent workgroups, 2-16 tiles each (`--ps`), stride from `gl_NumWorkGroups` or constant | 5.4-7.5 |
+| library, pre-packed: 4096^3 / 4096 x 4096 x 8192 / 4096 x 4096 x 16384 | 16.35 / **16.99** / 16.82 |
+
+Efficiency rises with K, so the inner loop runs at about 97% of peak and the rest at 4096^3 is per-tile fixed
+cost, mostly the store of C (32 MB, ~0.4 ms of 8.3 ms) issued by every workgroup at once. Persistent
+workgroups, which would overlap one tile's store with the next tile's loop, compile to the same inner loop
+(`asm/isa/dump/ps2_code.dis`) but run 3x slower on this driver.
+
+
 **Update (2026-11-21, last): K-minor tiles, 16.55 TFLOP/s at 4096^3 (95% of peak).** The driver statistics and
 disassembly of the 64-wide panel kernel showed 16 scalar 4-byte loads per K step: each lane of the matrix unit
 holds one row of A and one column of B along K, and those panels put K outside the tile. Packing tiles with K

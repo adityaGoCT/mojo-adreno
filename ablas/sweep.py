@@ -57,6 +57,9 @@ def main():
     ap.add_argument("--nt", type=int, nargs="+", default=None, help="tile widths N (default 32)")
     ap.add_argument("--cool", action="store_true", help="before each config wait for gpuss-0 <= 45 C and no thermal cap")
     ap.add_argument("--pf", type=int, nargs="+", default=None, help="software prefetch variants (0 and/or 1)")
+    ap.add_argument("--ku", type=int, nargs="+", default=None, help="K steps per loop iteration (chained into one accumulator)")
+    ap.add_argument("--sw", type=int, nargs="+", default=None, help="grouped workgroup order variants (0 = row order)")
+    ap.add_argument("--ps", type=int, nargs="+", default=None, help="persistent: output tiles per workgroup (0 = one)")
     a = ap.parse_args()
     M, N, K = a.M, a.N, a.K
     shape = make_shape(M, N, K, a.la, a.lb, a.tol)
@@ -70,6 +73,12 @@ def main():
         kw["nts"] = tuple(a.nt)
     if a.pf:
         kw["pfs"] = tuple(a.pf)
+    if a.ku:
+        kw["kus"] = tuple(a.ku)
+    if a.sw:
+        kw["sws"] = tuple(a.sw)
+    if a.ps:
+        kw["pss"] = tuple(a.ps)
     if a.dual:  # chaining two multiplies into one accumulator per iteration loses the device on the 850
         kw.update(duals=(1,), kus=(2,))
         kw.setdefault("stages", ((0, 0, 0), (0, 1, 32), (1, 0, 32), (1, 1, 32)))
@@ -78,7 +87,8 @@ def main():
         if M % BM or N % BN or K % (16 * c["ku"]) or (a.only and not re.search(a.only, name(c))):
             continue
         spv = build(c, M, N, K, out)
-        lines.append(f"{name(c)} {shape.name} 64 1 kernels/{shape.name}/{spv.name} {N // BN} {M // BM} 1\n")
+        gx, gy = (N // BN, M // BM) if not c.get("ps") else (-(-(N // BN) * (M // BM) // c["ps"]), 1)
+        lines.append(f"{name(c)} {shape.name} 64 1 kernels/{shape.name}/{spv.name} {gx} {gy} 1\n")
     (out / "manifest.txt").write_text("".join(lines))
     print(f"{shape.name}: {len(lines)} configs")
     adb("shell", f"mkdir -p {DEV}/kernels/{shape.name} {DEV}/shapes")

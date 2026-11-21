@@ -27,7 +27,7 @@ def name(c):
     return (f"g{c['la']}{c['lb']}_w{c['wm']}x{c['wn']}_t{c['tm']}x{c['tn']}_n{c['nt']}_{c['acc']}_k{c['ku']}"
             + ("_p1" if c.get("pf") else "") + (f"_s{c['sw']}" if c.get("sw") else "")
             + (f"_sh{'a' if c.get('sa') else ''}{'b' if c.get('sb') else ''}{c['kc']}" if c.get("sa") or c.get("sb") else "")
-            + ("_d2" if c.get("dual") else ""))
+            + ("_d2" if c.get("dual") else "") + (f"_ps{c['ps']}" if c.get("ps") else ""))
 
 def tile(c):
     return 64 * c["tm"] * c["wm"], c["nt"] * c["tn"] * c["wn"]
@@ -96,6 +96,12 @@ def glsl(c, M, N, K, spec=False):
               f"  uint gsz = min({gy}u - first, {G}u);",
               f"  uint wy = first + (pid % gsz);",
               f"  uint wx = (pid % {G * gx}u) / gsz;"]
+    elif c.get("ps"):  # persistent: fewer workgroups, each loops over output tiles, so one tile's C store overlaps
+        # the next tile's K loop (the store is ~5% of a 4096^3 run when every workgroup stores at the same moment)
+        L += [f"  uint ntx = {U(N)} / {BN}u, ntiles = ({U(M)} / {BM}u) * ntx;",
+              f"  for (uint t = gl_WorkGroupID.x; t < ntiles; t += {-(-(N // BN) * (M // BM) // c['ps'])}u) {{" if not spec else
+              "  for (uint t = gl_WorkGroupID.x; t < ntiles; t += gl_NumWorkGroups.x) {",
+              "  uint wy = t / ntx;", "  uint wx = t % ntx;"]
     else:
         L += ["  uint wy = gl_WorkGroupID.y;", "  uint wx = gl_WorkGroupID.x;"]
     L += [f"  uint row0 = wy * {BM}u + (sg / {c['wn']}u) * {64 * tm}u;",
@@ -150,6 +156,8 @@ def glsl(c, M, N, K, spec=False):
         for j in range(tn):
             src = f"c{i}{j}" if acc == "float16_t" else f"{H_}(c{i}{j})"
             L.append(f"  coopMatStore({src}, c, (row0 + {64 * i}u) * {U(N)} + col0 + {nt * j}u, {N}, {RM});")
+    if c.get("ps"):
+        L.append("  }")
     L.append("}")
     return "\n".join(L) + "\n"
 
@@ -235,9 +243,9 @@ def build(c, M, N, K, out):
 
 # Known 850 (driver E17.52.10.04) failures, so excluded: f32 accumulators (the f32->f16 conversion for the
 # store segfaults the compiler), ku=2 (device lost), nt=64 (device lost); nt=16 runs but is 3x slower.
-def space(la="N", lb="N", accs=("f16",), kus=(1,), nts=(32,), pfs=(0,), sws=(0,), wms=(1, 2, 4), wns=(1, 2, 4), max_sg=8, stages=((0, 0, 0),), duals=(0,)):  # sw=4/8 measured slower at 4096^3 TN  # pf=1 measured slower (2048^3 TN: 8.7 vs 10.8)
+def space(la="N", lb="N", accs=("f16",), kus=(1,), nts=(32,), pfs=(0,), sws=(0,), wms=(1, 2, 4), wns=(1, 2, 4), max_sg=8, stages=((0, 0, 0),), duals=(0,), pss=(0,)):  # sw=4/8 measured slower at 4096^3 TN  # pf=1 measured slower (2048^3 TN: 8.7 vs 10.8)
     for wm, wn, tm, tn, nt, acc, ku, pf, sw in itertools.product(wms, wns, (1, 2), (1, 2, 4), nts, accs, kus, pfs, sws):
-      for (sa, sb, kc), dual in itertools.product(stages, duals):
+      for (sa, sb, kc), dual, ps in itertools.product(stages, duals, pss):
         regs = tm * tn * nt * (1 if acc == "f16" else 2) // 2  # 32-bit registers per lane for accumulators
         if regs > 64 or tm * tn > 4 or wm * wn > max_sg:
             continue
@@ -247,7 +255,9 @@ def space(la="N", lb="N", accs=("f16",), kus=(1,), nts=(32,), pfs=(0,), sws=(0,)
         steps = kc // 16 if kc else ku
         if dual and steps < 2:
             continue
-        yield dict(wm=wm, wn=wn, tm=tm, tn=tn, nt=nt, acc=acc, ku=ku, la=la, lb=lb, pf=pf, sw=sw, sa=sa, sb=sb, kc=kc, dual=dual)
+        if ps and sw:
+            continue
+        yield dict(wm=wm, wn=wn, tm=tm, tn=tn, nt=nt, acc=acc, ku=ku, la=la, lb=lb, pf=pf, sw=sw, sa=sa, sb=sb, kc=kc, dual=dual, ps=ps)
 
 if __name__ == "__main__":
     print(sum(1 for _ in space()), "configs in the NN space")
@@ -262,6 +272,8 @@ def parse(n):
              pf=int("_p1" in rest), sw=0, sa=0, sb=0, kc=0, dual=int("_d2" in rest))
     if (s := re.search(r"_s(\d+)", rest)) and not re.search(r"_sh", rest[:s.start() + 3]):
         c["sw"] = int(s.group(1))
+    if (s := re.search(r"_ps(\d+)", rest)):
+        c["ps"] = int(s.group(1))
     if (s := re.search(r"_sh(a?)(b?)(\d+)", rest)):
         c.update(sa=int(bool(s.group(1))), sb=int(bool(s.group(2))), kc=int(s.group(3)))
     assert name(c) == n, (name(c), n)

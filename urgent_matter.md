@@ -4,11 +4,13 @@
 
 ## Summary
 
-Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the core of LLM prefill. AdrenoBLAS works around all of them and reaches **13.8 TFLOP/s at 2048³ and 14.1 at 4096³**. The matrix hardware sustains **17.5**, so that is 79-81% of peak.
+Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the core of LLM prefill. AdrenoBLAS works around all of them and reaches **16.6 TFLOP/s at 4096³ (95% of the 17.5 peak) and 17.0 at 4096 x 4096 x 8192 (97%)**, with one 64 x 64 tile per subgroup and tiles that store K contiguously.
+
+**Update (later): #1 is narrower too.** With a single 64 x 64 accumulator per subgroup, K unrolled by 2 or 4 runs correctly; the hang needs 64 x 32 tiles. Unrolling is slower there anyway (15.5 and 14.3 vs 16.6 TFLOP/s), so fixing #1 is no longer worth much for GEMM. What's left at 4096³ is the store of C, which every workgroup issues at the same moment; persistent workgroups, the usual fix, ran 3x slower on this driver (same inner loop in the disassembly).
 
 **Update (same day): #4 is narrower than first reported, and its workaround is measured.** One 64 x 64 tile per subgroup does not hang; two or more do. With one 64-wide tile per subgroup and 64-wide B panels, fp16 GEMM went from 10.8 to **13.8 TFLOP/s at 2048³ (+28%)** and from 12.5 to **14.1 at 4096³ (+13%)**. That is the low end of the +20-35% estimated below, now measured.
 
-- **Biggest remaining win: #1** (unrolled K loops hang the GPU), plus the rest of #4 (two 64-wide tiles per subgroup hang it). They are what stands between 13.8-14.1 TFLOP/s and the 17.5 peak. The gain from fixing them is not estimated with any confidence: the one comparable experiment for #1 (software prefetch) was negative.
+- **Remaining performance cost:** small. #4 (two 64-wide tiles per subgroup hang) blocks more reuse per load; #1 no longer blocks the best kernel. The last 3-5% at 4096³ is the C store burst, not a driver bug we can name.
 - **Urgent for every Vulkan app on this driver, not just ours.**
   - #7: specialization constants make kernels up to **2x slower** and can **hang the GPU**.
   - #5: cooperative loads from `uint`/`uvec4` shared memory return **wrong data with no error**.
@@ -25,7 +27,7 @@ Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the 
 | # | bug | kind | what it costs today | estimated gain if fixed | confidence |
 | --- | --- | --- | --- | --- | --- |
 | 4 | fp16 cooperative matrices with N = 64 tiles: hang with two or more 64-wide accumulators per subgroup (or B held in registers across steps) | **GPU hang** | worked around: one 64 x 64 tile per subgroup (+28% at 2048³, +13% at 4096³, measured) | larger tiles per subgroup: unknown | measured |
-| 1 | two dependent `coopMatMulAdd` into one accumulator in one loop body | **GPU hang** | no K unrolling; shared-memory staging limited to K steps of 16 | +0-10% direct kernels; staged kernels unblocked | low |
+| 1 | two dependent `coopMatMulAdd` into one accumulator in one loop body, with 64 x 32 tiles | **GPU hang** | none for the best kernel (a single 64 x 64 accumulator unrolls fine, but slower); shared-memory staging limited to K steps of 16 | ~0% for the best kernel; staged kernels unblocked | measured |
 | 7 | M, N, K as specialization constants | 2x slowdown, **GPU hang** | none for AdrenoBLAS (rewritten in the runtime); **up to 2x for other apps** | 0% for us; up to 2x elsewhere | measured |
 | 5 | `coopMatLoad` from a `uint`/`uvec4` shared array | **silent wrong results** | none (we use `f16vec4` arrays) | correctness for other apps | measured |
 | 3 | converting an fp32 accumulator to fp16 (`coopmat<float16_t>(c)`) | compiler segfault | no fp32 accumulation with fp16 output | accuracy (costs ~9% speed) | measured crash, cause inferred |
@@ -67,7 +69,7 @@ for (uint k = 0u; k < K; k += 32u) {            // K unrolled by 2
 }
 ```
 
-- **Observed:** device lost for every K-unrolled kernel (`ku=2` in `ablas/gen.py`) and for every shared-memory kernel with K chunks of 32. Splitting the chain across two accumulators (`--dual` in `ablas/sweep.py`) never hangs, which pins the trigger to the chain itself.
+- **Observed:** device lost for every K-unrolled kernel with 64 x 32 tiles (`ku=2` in `ablas/gen.py`) and for every shared-memory kernel with K chunks of 32. Splitting the chain across two accumulators (`--dual` in `ablas/sweep.py`) never hangs. With one 64 x 64 accumulator per subgroup (K-contiguous tiles, 4096³), `--ku 2 4` runs correctly at 15.5 and 14.3 TFLOP/s, below the 16.6 of the unrolled-by-1 loop.
 - **Workaround:** one multiply per accumulator per iteration. The dual-accumulator version is correct but slower (6.2 vs 8.8 TFLOP/s) and hits #6 at larger tiles.
 - **Why it matters:** compilers routinely unroll K loops, so this is a hang risk for any framework's cooperative-matrix shaders. The direct gain is uncertain: software prefetch, which also puts more loads in flight, was slower (8.7 vs 10.8). The clear gain is for shared-memory staging, which today pays a barrier every 16 elements of K (7.8 TFLOP/s).
 
@@ -130,7 +132,7 @@ Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` thi
 
 ## What to ask for, in order
 
-1. **#1 and the rest of #4** (GPU hangs that cap GEMM): #4's workaround already gave +13-28%; these are what's left between 14 and 17.5 TFLOP/s.
+1. **The rest of #4** (two 64-wide accumulators per subgroup hang the GPU) and **#1** for 64 x 32 tiles: GPU hangs, a robustness problem for every framework; for AdrenoBLAS's best kernel they no longer cost speed.
 2. **#7 and #5** (2x slowdown and hang; silent wrong data): ecosystem-wide correctness and performance.
 3. **#3 and #2** (compiler crashes): fp32 accumulation for accuracy, int8 matrix work.
 4. **#6** after #1.
