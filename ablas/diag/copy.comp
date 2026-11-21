@@ -1,0 +1,12 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+layout(local_size_x = 512) in;
+layout(std430, binding = 1) readonly buffer B4 { uvec4 b4[]; };
+layout(std430, binding = 2) writeonly buffer C4 { uvec4 c4[]; };
+shared uvec4 shB[512];
+void main() {
+  uint t = gl_LocalInvocationIndex;
+  shB[t] = b4[t];
+  memoryBarrierShared(); barrier();
+  c4[t] = shB[(t + 37u) % 512u];   // read someone else's element
+}

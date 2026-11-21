@@ -1,0 +1,16 @@
+peak_f32_w1_c8 shape 64 1 spv/peak_f32_w1_c8.spv 8192 1 1
+peak_f32_w1_c16 shape 64 1 spv/peak_f32_w1_c16.spv 8192 1 1
+peak_f32_w1_c32 shape 64 1 spv/peak_f32_w1_c32.spv 8192 1 1
+peak_f32_w2_c8 shape 64 1 spv/peak_f32_w2_c8.spv 8192 1 1
+peak_f32_w2_c16 shape 64 1 spv/peak_f32_w2_c16.spv 8192 1 1
+peak_f32_w2_c32 shape 64 1 spv/peak_f32_w2_c32.spv 8192 1 1
+peak_f32_w4_c8 shape 64 1 spv/peak_f32_w4_c8.spv 8192 1 1
+peak_f32_w4_c16 shape 64 1 spv/peak_f32_w4_c16.spv 8192 1 1
+peak_f16_w1_c8 shape 64 1 spv/peak_f16_w1_c8.spv 8192 1 1
+peak_f16_w1_c16 shape 64 1 spv/peak_f16_w1_c16.spv 8192 1 1
+peak_f16_w1_c32 shape 64 1 spv/peak_f16_w1_c32.spv 8192 1 1
+peak_f16_w2_c8 shape 64 1 spv/peak_f16_w2_c8.spv 8192 1 1
+peak_f16_w2_c16 shape 64 1 spv/peak_f16_w2_c16.spv 8192 1 1
+peak_f16_w2_c32 shape 64 1 spv/peak_f16_w2_c32.spv 8192 1 1
+peak_f16_w4_c8 shape 64 1 spv/peak_f16_w4_c8.spv 8192 1 1
+peak_f16_w4_c16 shape 64 1 spv/peak_f16_w4_c16.spv 8192 1 1

@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+void main() {
+  float m = float(float(a[0])); float d = float(float(a[1]));
+  float seed = float(gl_LocalInvocationID.x) * float(0.0009765625);
+  float x0 = float(seed + float(0));
+  float x1 = float(seed + float(1));
+  float x2 = float(seed + float(2));
+  float x3 = float(seed + float(3));
+  float x4 = float(seed + float(4));
+  float x5 = float(seed + float(5));
+  float x6 = float(seed + float(6));
+  float x7 = float(seed + float(7));
+  for (int i = 0; i < 512; ++i) {
+    x0 = x0 * m + d;
+    x1 = x1 * m + d;
+    x2 = x2 * m + d;
+    x3 = x3 * m + d;
+    x4 = x4 * m + d;
+    x5 = x5 * m + d;
+    x6 = x6 * m + d;
+    x7 = x7 * m + d;
+  }
+  float sum = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
+  float r = float(sum);
+  if (r == 1234.0) c[gl_GlobalInvocationID.x] = r;
+}

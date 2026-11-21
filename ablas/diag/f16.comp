@@ -1,0 +1,21 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 512) in;
+layout(std430, binding = 1) readonly buffer B { float16_t b[]; };
+layout(std430, binding = 1) readonly buffer B4 { uvec4 b4[]; };
+layout(std430, binding = 1) readonly buffer B1 { uint b1[]; };
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+shared float16_t sh[4096];
+void main() {
+  uint t = gl_LocalInvocationIndex;
+  for (uint i = 0u; i < 8u; ++i) sh[t * 8u + i] = b[t * 8u + i];
+  memoryBarrierShared(); barrier();
+  uint s = gl_SubgroupID;
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> m;
+  coopMatLoad(m, sh, s * 32u, 256, gl_CooperativeMatrixLayoutRowMajor);
+  coopMatStore(m, c, s * 32u, 256, gl_CooperativeMatrixLayoutRowMajor);
+}

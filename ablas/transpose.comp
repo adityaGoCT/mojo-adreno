@@ -1,0 +1,17 @@
+#version 450
+// AdrenoBLAS pack kernel: dst[C, R] = transpose(src[R, C]), fp16. Workgroups (C/32, R/32).
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 32, local_size_y = 8) in;
+layout(constant_id = 0) const uint R = 32u;
+layout(constant_id = 1) const uint C = 32u;
+layout(std430, binding = 0) readonly buffer S { float16_t s[]; };
+layout(std430, binding = 2) writeonly buffer D { float16_t d[]; };
+shared float16_t tile[32][33];
+void main() {
+  uint tx = gl_LocalInvocationID.x, ty = gl_LocalInvocationID.y;
+  uint r0 = gl_WorkGroupID.y * 32u, c0 = gl_WorkGroupID.x * 32u;
+  for (uint i = ty; i < 32u; i += 8u) tile[i][tx] = s[(r0 + i) * C + c0 + tx];
+  barrier();
+  for (uint i = ty; i < 32u; i += 8u) d[(c0 + i) * R + r0 + tx] = tile[tx][i];
+}

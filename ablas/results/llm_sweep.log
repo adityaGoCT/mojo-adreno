@@ -1,0 +1,24 @@
+512x2048x2048_TN: 40 configs
+  gTN_w1x2_t2x1_n32_f16_k1                  11.36 TFLOP/s  err 4.7e-03  378 us
+  gTN_w1x4_t2x1_n32_f16_k1                  11.36 TFLOP/s  err 4.7e-03  378 us
+  gTN_w2x4_t2x1_n32_f16_k1                  11.28 TFLOP/s  err 4.7e-03  381 us
+2048x512x2048_TN: 40 configs
+  gTN_w1x2_t1x2_n32_f16_k1                  12.13 TFLOP/s  err 6.4e-03  354 us
+  gTN_w1x4_t2x1_n32_f16_k1                  11.74 TFLOP/s  err 6.4e-03  366 us
+  gTN_w2x2_t1x2_n32_f16_k1                  11.57 TFLOP/s  err 6.4e-03  371 us
+512x8192x2048_TN: 40 configs
+  gTN_w1x2_t2x1_n32_f16_k1                  10.18 TFLOP/s  err 5.4e-03  1688 us
+  gTN_w1x1_t2x1_n32_f16_k1                  10.00 TFLOP/s  err 5.4e-03  1717 us
+  gTN_w2x2_t2x1_n32_f16_k1                   9.83 TFLOP/s  err 5.4e-03  1747 us
+8192x512x2048_TN: 40 configs
+  gTN_w1x1_t1x2_n32_f16_k1                  10.91 TFLOP/s  err 5.5e-03  1575 us
+  gTN_w1x4_t1x1_n32_f16_k1                   9.77 TFLOP/s  err 5.5e-03  1759 us
+  gTN_w1x4_t1x2_n32_f16_k1                   9.72 TFLOP/s  err 5.5e-03  1768 us
+512x2048x8192_TN: 40 configs
+  gTN_w1x1_t1x2_n32_f16_k1                  11.28 TFLOP/s  err 1.0e-02  1524 us
+  gTN_w1x1_t2x1_n32_f16_k1                  10.73 TFLOP/s  err 1.0e-02  1601 us
+  gTN_w1x2_t1x2_n32_f16_k1                  10.67 TFLOP/s  err 1.0e-02  1610 us
+2048x512x8192_TN: 40 configs
+  gTN_w1x1_t1x2_n32_f16_k1                  11.28 TFLOP/s  err 1.1e-02  1523 us
+  gTN_w1x2_t1x2_n32_f16_k1                  10.74 TFLOP/s  err 1.1e-02  1600 us
+  gTN_w1x4_t1x2_n32_f16_k1                  10.13 TFLOP/s  err 1.1e-02  1697 us

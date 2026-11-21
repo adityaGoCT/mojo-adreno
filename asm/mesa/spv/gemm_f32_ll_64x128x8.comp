@@ -1,0 +1,55 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer A { vec4 at4[]; };   // K x M (A transposed)
+layout(std430, binding = 1) readonly buffer B { vec4 b4[]; };    // K x N
+layout(std430, binding = 2) writeonly buffer C { f16vec4 c4[]; };   // M x N
+shared vec4 As[8][16];
+shared vec4 Bs[8][32];
+void main() {
+  uint tid = gl_LocalInvocationID.x;
+  uint tx = tid % 16u, ty = tid / 16u;
+  uint bm = gl_WorkGroupID.y * 64u, bn = gl_WorkGroupID.x * 128u;
+  vec4 acc[8][2];
+  for (int i = 0; i < 8; ++i) { acc[i][0] = vec4(0); acc[i][1] = vec4(0); }
+  for (uint k0 = 0; k0 < 2048u; k0 += 8u) {
+    { uint i = tid + 0u; uint kk = i / 16u, mm = i % 16u;
+      As[kk][mm] = at4[(k0 + kk) * 512u + bm / 4u + mm]; }
+    { uint i = tid + 0u; uint kk = i / 32u, nn = i % 32u;
+      Bs[kk][nn] = b4[(k0 + kk) * 512u + bn / 4u + nn]; }
+    { uint i = tid + 128u; uint kk = i / 32u, nn = i % 32u;
+      Bs[kk][nn] = b4[(k0 + kk) * 512u + bn / 4u + nn]; }
+    barrier();
+    [[unroll]] for (uint k = 0; k < 8u; ++k) {
+      vec4 a0 = As[k][ty], a1 = As[k][ty + 8u];
+      vec4 b0 = Bs[k][tx], b1 = Bs[k][tx + 16u];
+      acc[0][0] = a0.x * b0 + acc[0][0]; acc[0][1] = a0.x * b1 + acc[0][1];
+      acc[1][0] = a0.y * b0 + acc[1][0]; acc[1][1] = a0.y * b1 + acc[1][1];
+      acc[2][0] = a0.z * b0 + acc[2][0]; acc[2][1] = a0.z * b1 + acc[2][1];
+      acc[3][0] = a0.w * b0 + acc[3][0]; acc[3][1] = a0.w * b1 + acc[3][1];
+      acc[4][0] = a1.x * b0 + acc[4][0]; acc[4][1] = a1.x * b1 + acc[4][1];
+      acc[5][0] = a1.y * b0 + acc[5][0]; acc[5][1] = a1.y * b1 + acc[5][1];
+      acc[6][0] = a1.z * b0 + acc[6][0]; acc[6][1] = a1.z * b1 + acc[6][1];
+      acc[7][0] = a1.w * b0 + acc[7][0]; acc[7][1] = a1.w * b1 + acc[7][1];
+    }
+    barrier();
+  }
+  c4[(bm + 0u + ty * 4u + 0u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[0][0]);
+  c4[(bm + 0u + ty * 4u + 0u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[0][1]);
+  c4[(bm + 0u + ty * 4u + 1u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[1][0]);
+  c4[(bm + 0u + ty * 4u + 1u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[1][1]);
+  c4[(bm + 0u + ty * 4u + 2u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[2][0]);
+  c4[(bm + 0u + ty * 4u + 2u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[2][1]);
+  c4[(bm + 0u + ty * 4u + 3u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[3][0]);
+  c4[(bm + 0u + ty * 4u + 3u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[3][1]);
+  c4[(bm + 32u + ty * 4u + 0u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[4][0]);
+  c4[(bm + 32u + ty * 4u + 0u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[4][1]);
+  c4[(bm + 32u + ty * 4u + 1u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[5][0]);
+  c4[(bm + 32u + ty * 4u + 1u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[5][1]);
+  c4[(bm + 32u + ty * 4u + 2u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[6][0]);
+  c4[(bm + 32u + ty * 4u + 2u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[6][1]);
+  c4[(bm + 32u + ty * 4u + 3u) * 512u + bn / 4u + 0u + tx] = f16vec4(acc[7][0]);
+  c4[(bm + 32u + ty * 4u + 3u) * 512u + bn / 4u + 16u + tx] = f16vec4(acc[7][1]);
+}

@@ -1,0 +1,24 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+layout(std430, binding = 3) readonly buffer F { float16_t flag[]; };
+void main() {
+  coopmat<float, gl_ScopeSubgroup, 64, 8, gl_MatrixUseA> ma;
+  coopmat<float, gl_ScopeSubgroup, 8, 64, gl_MatrixUseB> mb0; coopMatLoad(mb0, b, 0, 64, gl_CooperativeMatrixLayoutRowMajor);
+  coopmat<float, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> c0 = coopmat<float, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0);
+  uint base = (gl_WorkGroupID.x * 7u + gl_SubgroupID * 3u) & 31u;
+  for (uint i = 0; i < 64; ++i) {
+    coopMatLoad(ma, a, ((base + i) & 31u) * 512u, 8, gl_CooperativeMatrixLayoutRowMajor);
+    c0 = coopMatMulAdd(ma, mb0, c0);
+  }
+  if (flag[0] == float16_t(1.0)) {
+    coopMatStore(c0, c, 0, 64, gl_CooperativeMatrixLayoutRowMajor);
+  }
+}

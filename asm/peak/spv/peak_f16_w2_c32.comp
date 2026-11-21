@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+void main() {
+  f16vec2 m = f16vec2(float16_t(a[0])); f16vec2 d = f16vec2(float16_t(a[1]));
+  float16_t seed = float16_t(gl_LocalInvocationID.x) * float16_t(0.0009765625);
+  f16vec2 x0 = f16vec2(seed + float16_t(0));
+  f16vec2 x1 = f16vec2(seed + float16_t(1));
+  f16vec2 x2 = f16vec2(seed + float16_t(2));
+  f16vec2 x3 = f16vec2(seed + float16_t(3));
+  f16vec2 x4 = f16vec2(seed + float16_t(4));
+  f16vec2 x5 = f16vec2(seed + float16_t(5));
+  f16vec2 x6 = f16vec2(seed + float16_t(6));
+  f16vec2 x7 = f16vec2(seed + float16_t(7));
+  f16vec2 x8 = f16vec2(seed + float16_t(8));
+  f16vec2 x9 = f16vec2(seed + float16_t(9));
+  f16vec2 x10 = f16vec2(seed + float16_t(10));
+  f16vec2 x11 = f16vec2(seed + float16_t(11));
+  f16vec2 x12 = f16vec2(seed + float16_t(12));
+  f16vec2 x13 = f16vec2(seed + float16_t(13));
+  f16vec2 x14 = f16vec2(seed + float16_t(14));
+  f16vec2 x15 = f16vec2(seed + float16_t(15));
+  f16vec2 x16 = f16vec2(seed + float16_t(16));
+  f16vec2 x17 = f16vec2(seed + float16_t(17));
+  f16vec2 x18 = f16vec2(seed + float16_t(18));
+  f16vec2 x19 = f16vec2(seed + float16_t(19));
+  f16vec2 x20 = f16vec2(seed + float16_t(20));
+  f16vec2 x21 = f16vec2(seed + float16_t(21));
+  f16vec2 x22 = f16vec2(seed + float16_t(22));
+  f16vec2 x23 = f16vec2(seed + float16_t(23));
+  f16vec2 x24 = f16vec2(seed + float16_t(24));
+  f16vec2 x25 = f16vec2(seed + float16_t(25));
+  f16vec2 x26 = f16vec2(seed + float16_t(26));
+  f16vec2 x27 = f16vec2(seed + float16_t(27));
+  f16vec2 x28 = f16vec2(seed + float16_t(28));
+  f16vec2 x29 = f16vec2(seed + float16_t(29));
+  f16vec2 x30 = f16vec2(seed + float16_t(30));
+  f16vec2 x31 = f16vec2(seed + float16_t(31));
+  for (int i = 0; i < 512; ++i) {
+    x0 = x0 * m + d;
+    x1 = x1 * m + d;
+    x2 = x2 * m + d;
+    x3 = x3 * m + d;
+    x4 = x4 * m + d;
+    x5 = x5 * m + d;
+    x6 = x6 * m + d;
+    x7 = x7 * m + d;
+    x8 = x8 * m + d;
+    x9 = x9 * m + d;
+    x10 = x10 * m + d;
+    x11 = x11 * m + d;
+    x12 = x12 * m + d;
+    x13 = x13 * m + d;
+    x14 = x14 * m + d;
+    x15 = x15 * m + d;
+    x16 = x16 * m + d;
+    x17 = x17 * m + d;
+    x18 = x18 * m + d;
+    x19 = x19 * m + d;
+    x20 = x20 * m + d;
+    x21 = x21 * m + d;
+    x22 = x22 * m + d;
+    x23 = x23 * m + d;
+    x24 = x24 * m + d;
+    x25 = x25 * m + d;
+    x26 = x26 * m + d;
+    x27 = x27 * m + d;
+    x28 = x28 * m + d;
+    x29 = x29 * m + d;
+    x30 = x30 * m + d;
+    x31 = x31 * m + d;
+  }
+  f16vec2 sum = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10 + x11 + x12 + x13 + x14 + x15 + x16 + x17 + x18 + x19 + x20 + x21 + x22 + x23 + x24 + x25 + x26 + x27 + x28 + x29 + x30 + x31;
+  float r = float(sum.x + sum.y);
+  if (r == 1234.0) c[gl_GlobalInvocationID.x] = r;
+}

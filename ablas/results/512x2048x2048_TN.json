@@ -1,0 +1,402 @@
+[
+ {
+  "name": "gTN_w1x2_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 403.355,
+  "us_min": 378.083,
+  "iters": 253,
+  "reps": 5,
+  "tflops": 11.359852984662098
+ },
+ {
+  "name": "gTN_w1x4_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 425.125,
+  "us_min": 378.099,
+  "iters": 252,
+  "reps": 5,
+  "tflops": 11.359372270225524
+ },
+ {
+  "name": "gTN_w2x4_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 419.89,
+  "us_min": 380.848,
+  "iters": 256,
+  "reps": 5,
+  "tflops": 11.277379153888166
+ },
+ {
+  "name": "gTN_w2x2_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 416.689,
+  "us_min": 384.205,
+  "iters": 259,
+  "reps": 5,
+  "tflops": 11.178842794862119
+ },
+ {
+  "name": "gTN_w4x2_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 420.982,
+  "us_min": 389.904,
+  "iters": 250,
+  "reps": 5,
+  "tflops": 11.015448151339816
+ },
+ {
+  "name": "gTN_w1x1_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 414.606,
+  "us_min": 395.167,
+  "iters": 241,
+  "reps": 5,
+  "tflops": 10.868739788494484
+ },
+ {
+  "name": "gTN_w2x1_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 426.312,
+  "us_min": 395.658,
+  "iters": 248,
+  "reps": 5,
+  "tflops": 10.855252000465047
+ },
+ {
+  "name": "gTN_w2x2_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 424.578,
+  "us_min": 397.953,
+  "iters": 252,
+  "reps": 5,
+  "tflops": 10.79264962445314
+ },
+ {
+  "name": "gTN_w1x2_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 419.904,
+  "us_min": 401.72,
+  "iters": 243,
+  "reps": 5,
+  "tflops": 10.691445026386537
+ },
+ {
+  "name": "gTN_w4x1_t2x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 435.761,
+  "us_min": 402.625,
+  "iters": 246,
+  "reps": 5,
+  "tflops": 10.667413339956536
+ },
+ {
+  "name": "gTN_w4x2_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 426.31,
+  "us_min": 403.599,
+  "iters": 243,
+  "reps": 5,
+  "tflops": 10.641669815832051
+ },
+ {
+  "name": "gTN_w4x1_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 439.937,
+  "us_min": 407.475,
+  "iters": 243,
+  "reps": 5,
+  "tflops": 10.540443698386404
+ },
+ {
+  "name": "gTN_w1x1_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 413.324,
+  "us_min": 411.318,
+  "iters": 234,
+  "reps": 5,
+  "tflops": 10.441962899751532
+ },
+ {
+  "name": "gTN_w2x1_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 438.813,
+  "us_min": 419.487,
+  "iters": 231,
+  "reps": 5,
+  "tflops": 10.238618350509075
+ },
+ {
+  "name": "gTN_w1x4_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 459.162,
+  "us_min": 429.0,
+  "iters": 235,
+  "reps": 5,
+  "tflops": 10.01157877855478
+ },
+ {
+  "name": "gTN_w1x4_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 443.909,
+  "us_min": 433.797,
+  "iters": 221,
+  "reps": 5,
+  "tflops": 9.900869060874095
+ },
+ {
+  "name": "gTN_w1x2_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 449.277,
+  "us_min": 437.625,
+  "iters": 212,
+  "reps": 5,
+  "tflops": 9.814264029705798
+ },
+ {
+  "name": "gTN_w4x2_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 485.142,
+  "us_min": 442.392,
+  "iters": 244,
+  "reps": 5,
+  "tflops": 9.708510316642254
+ },
+ {
+  "name": "gTN_w2x2_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 469.953,
+  "us_min": 449.964,
+  "iters": 215,
+  "reps": 5,
+  "tflops": 9.545135379719268
+ },
+ {
+  "name": "gTN_w2x4_t1x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 473.041,
+  "us_min": 451.238,
+  "iters": 214,
+  "reps": 5,
+  "tflops": 9.518186181128364
+ },
+ {
+  "name": "gTN_w2x4_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 522.958,
+  "us_min": 487.449,
+  "iters": 179,
+  "reps": 5,
+  "tflops": 8.811111102905125
+ },
+ {
+  "name": "gTN_w1x1_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 509.985,
+  "us_min": 509.909,
+  "iters": 194,
+  "reps": 5,
+  "tflops": 8.423007430737641
+ },
+ {
+  "name": "gTN_w1x1_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 524.635,
+  "us_min": 524.28,
+  "iters": 180,
+  "reps": 5,
+  "tflops": 8.192125001907378
+ },
+ {
+  "name": "gTN_w1x2_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 531.059,
+  "us_min": 530.824,
+  "iters": 187,
+  "reps": 5,
+  "tflops": 8.091132458215906
+ },
+ {
+  "name": "gTN_w1x4_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 533.634,
+  "us_min": 531.502,
+  "iters": 143,
+  "reps": 5,
+  "tflops": 8.080811165338984
+ },
+ {
+  "name": "gTN_w2x1_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 532.882,
+  "us_min": 532.491,
+  "iters": 177,
+  "reps": 5,
+  "tflops": 8.065802606992419
+ },
+ {
+  "name": "gTN_w2x1_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 540.042,
+  "us_min": 539.055,
+  "iters": 181,
+  "reps": 5,
+  "tflops": 7.96758641697044
+ },
+ {
+  "name": "gTN_w2x1_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 558.154,
+  "us_min": 540.178,
+  "iters": 186,
+  "reps": 5,
+  "tflops": 7.951022248221883
+ },
+ {
+  "name": "gTN_w4x1_t1x1_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 560.633,
+  "us_min": 541.866,
+  "iters": 193,
+  "reps": 5,
+  "tflops": 7.926253531315861
+ },
+ {
+  "name": "gTN_w4x1_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 544.004,
+  "us_min": 542.382,
+  "iters": 180,
+  "reps": 5,
+  "tflops": 7.9187128186407385
+ },
+ {
+  "name": "gTN_w1x1_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 545.291,
+  "us_min": 544.732,
+  "iters": 176,
+  "reps": 5,
+  "tflops": 7.8845511113721995
+ },
+ {
+  "name": "gTN_w4x1_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 545.597,
+  "us_min": 545.082,
+  "iters": 180,
+  "reps": 5,
+  "tflops": 7.879488399910472
+ },
+ {
+  "name": "gTN_w1x4_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 546.677,
+  "us_min": 545.882,
+  "iters": 184,
+  "reps": 5,
+  "tflops": 7.867940866341078
+ },
+ {
+  "name": "gTN_w2x2_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 557.916,
+  "us_min": 556.988,
+  "iters": 180,
+  "reps": 5,
+  "tflops": 7.711058938433143
+ },
+ {
+  "name": "gTN_w1x2_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 570.887,
+  "us_min": 570.4,
+  "iters": 173,
+  "reps": 5,
+  "tflops": 7.529746311360449
+ },
+ {
+  "name": "gTN_w2x2_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 577.498,
+  "us_min": 576.848,
+  "iters": 166,
+  "reps": 5,
+  "tflops": 7.445578897733893
+ },
+ {
+  "name": "gTN_w2x4_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 692.199,
+  "us_min": 691.802,
+  "iters": 144,
+  "reps": 5,
+  "tflops": 6.208376523918694
+ },
+ {
+  "name": "gTN_w2x4_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 701.445,
+  "us_min": 700.508,
+  "iters": 136,
+  "reps": 5,
+  "tflops": 6.131218053184261
+ },
+ {
+  "name": "gTN_w4x2_t1x4_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 703.317,
+  "us_min": 702.966,
+  "iters": 143,
+  "reps": 5,
+  "tflops": 6.109779556906024
+ },
+ {
+  "name": "gTN_w4x2_t2x2_n32_f16_k1",
+  "ok": true,
+  "err": 0.004656,
+  "us": 703.779,
+  "us_min": 703.07,
+  "iters": 139,
+  "reps": 5,
+  "tflops": 6.108875781927831
+ }
+]

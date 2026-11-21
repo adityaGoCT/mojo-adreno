@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+void main() {
+  f16vec4 m = f16vec4(float16_t(a[0])); f16vec4 d = f16vec4(float16_t(a[1]));
+  float16_t seed = float16_t(gl_LocalInvocationID.x) * float16_t(0.0009765625);
+  f16vec4 x0 = f16vec4(seed + float16_t(0));
+  f16vec4 x1 = f16vec4(seed + float16_t(1));
+  f16vec4 x2 = f16vec4(seed + float16_t(2));
+  f16vec4 x3 = f16vec4(seed + float16_t(3));
+  f16vec4 x4 = f16vec4(seed + float16_t(4));
+  f16vec4 x5 = f16vec4(seed + float16_t(5));
+  f16vec4 x6 = f16vec4(seed + float16_t(6));
+  f16vec4 x7 = f16vec4(seed + float16_t(7));
+  for (int i = 0; i < 512; ++i) {
+    x0 = x0 * m + d;
+    x1 = x1 * m + d;
+    x2 = x2 * m + d;
+    x3 = x3 * m + d;
+    x4 = x4 * m + d;
+    x5 = x5 * m + d;
+    x6 = x6 * m + d;
+    x7 = x7 * m + d;
+  }
+  f16vec4 sum = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
+  float r = float(sum.x + sum.y + sum.z + sum.w);
+  if (r == 1234.0) c[gl_GlobalInvocationID.x] = r;
+}

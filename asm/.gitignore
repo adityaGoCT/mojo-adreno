@@ -1,0 +1,5 @@
+# Android executables built from the sources here (see README.md for the NDK commands)
+peak/vk_gemm_bench
+isa/vk_isa_dump
+isa/tools/
+mesa/vk_bench
