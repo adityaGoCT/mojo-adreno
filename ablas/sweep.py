@@ -26,12 +26,16 @@ def make_shape(M, N, K, la, lb, tol):
     rng = np.random.default_rng(0)
     A = rng.uniform(-1, 1, (M, K)).astype(np.float16)
     B = rng.uniform(-1, 1, (K, N)).astype(np.float16)
-    if la == "P":  # 64(M) x 16(K) tiles, column-major inside, K-tiles adjacent: [M/64][K/16][16][64]
+    if la == "R":  # 64(M) x 16(K) tiles, row-major inside: [M/64][K/16][64][16]
+        A.reshape(M // 64, 64, K // 16, 16).transpose(0, 2, 1, 3).copy().tofile(d / "A.bin")
+    elif la == "P":  # 64(M) x 16(K) tiles, column-major inside, K-tiles adjacent: [M/64][K/16][16][64]
         A.reshape(M // 64, 64, K // 16, 16).transpose(0, 2, 3, 1).copy().tofile(d / "A.bin")
     else:
         (A if la == "N" else A.T.copy()).tofile(d / "A.bin")
     if lb == "P":  # 16(K) x 32(N) tiles, row-major inside, K-tiles adjacent: [N/32][K/16][16][32]
         B.reshape(K // 16, 16, N // 32, 32).transpose(2, 0, 1, 3).copy().tofile(d / "B.bin")
+    elif lb == "C":  # 16(K) x 64(N) tiles stored column-major: [N/64][K/16][64][16]
+        B.reshape(K // 16, 16, N // 64, 64).transpose(2, 0, 3, 1).copy().tofile(d / "B.bin")
     elif lb == "Q":  # 16(K) x 64(N) tiles: [N/64][K/16][16][64]
         B.reshape(K // 16, 16, N // 64, 64).transpose(2, 0, 1, 3).copy().tofile(d / "B.bin")
     else:
@@ -51,6 +55,8 @@ def main():
     ap.add_argument("--stage", action="store_true", help="also shared-memory staging of A and/or B (kc 16/32)")
     ap.add_argument("--dual", action="store_true", help="two K steps per iteration into alternating accumulator sets")
     ap.add_argument("--nt", type=int, nargs="+", default=None, help="tile widths N (default 32)")
+    ap.add_argument("--cool", action="store_true", help="before each config wait for gpuss-0 <= 45 C and no thermal cap")
+    ap.add_argument("--pf", type=int, nargs="+", default=None, help="software prefetch variants (0 and/or 1)")
     a = ap.parse_args()
     M, N, K = a.M, a.N, a.K
     shape = make_shape(M, N, K, a.la, a.lb, a.tol)
@@ -62,6 +68,8 @@ def main():
         kw["stages"] = ((0, 0, 0), (0, 1, 16), (0, 1, 32), (1, 0, 16), (1, 0, 32), (1, 1, 16), (1, 1, 32))
     if a.nt:
         kw["nts"] = tuple(a.nt)
+    if a.pf:
+        kw["pfs"] = tuple(a.pf)
     if a.dual:  # chaining two multiplies into one accumulator per iteration loses the device on the 850
         kw.update(duals=(1,), kus=(2,))
         kw.setdefault("stages", ((0, 0, 0), (0, 1, 32), (1, 0, 32), (1, 1, 32)))
@@ -78,7 +86,10 @@ def main():
     if adb("shell", f"ls {DEV}/shapes/{shape.name}/meta.txt", check=False).returncode:
         adb("push", shape, f"{DEV}/shapes/")
     adb("push", *sorted(out.glob("*.spv")), out / "manifest.txt", f"{DEV}/kernels/{shape.name}/")
-    cmd = (f"cd {DEV} && ln -sfn shapes/{shape.name} {shape.name} && while read l; do echo \"$l\" > one.txt; "
+    cool = ("Z=$(for z in /sys/class/thermal/thermal_zone*; do [ \"$(cat $z/type)\" = gpuss-0 ] && echo $z/temp; done); "
+            "n=0; while [ \"$(cat /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel)\" != 0 ] || [ \"$(cat $Z)\" -gt 45000 ]; "
+            "do sleep 2; n=$((n+2)); [ $n -ge 180 ] && break; done; ") if a.cool else ""
+    cmd = (f"cd {DEV} && ln -sfn shapes/{shape.name} {shape.name} && while read l; do {cool}echo \"$l\" > one.txt; "
            f"./vk_gemm_bench --manifest=one.txt --target-ms={a.target_ms} --reps=5 2>/dev/null "
            f"|| echo \"{{\\\"name\\\":\\\"${{l%% *}}\\\",\\\"ok\\\":false,\\\"error\\\":\\\"rc=$?\\\"}}\"; "
            f"done < kernels/{shape.name}/manifest.txt")

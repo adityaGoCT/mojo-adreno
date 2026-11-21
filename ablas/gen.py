@@ -1,6 +1,8 @@
 """AdrenoBLAS kernel generator: fp16 GEMM C[M,N] = A[M,K] @ B[K,N] on VK_KHR_cooperative_matrix (Adreno 8xx).
 
-Layout 'P' (panel): A packed as 64 x 16 tiles and B as 16 x 32 tiles ('Q': 16 x 64), each tile contiguous and K-adjacent
+Layout 'P' (panel): A packed as 64 x 16 tiles and B as 16 x 32 tiles ('Q': 16 x 64), each tile contiguous and K-adjacent;
+'R'/'C': the same panels with K contiguous inside each tile (A row-major, B column-major), so each lane's operand
+elements are adjacent and load as 16-byte vectors
 (see sweep.make_shape for the exact element order); the runtime's pack kernel produces it.
 A kernel config is a dict:
   wm, wn   subgroups per workgroup along M and N (64 lanes each)
@@ -45,7 +47,10 @@ def glsl(c, M, N, K, spec=False):
     H_ = f"coopmat<float16_t, {S}, 64, {nt}, gl_MatrixUseAccumulator>"
     RM, CM = "gl_CooperativeMatrixLayoutRowMajor", "gl_CooperativeMatrixLayoutColumnMajor"
     # A: 'N' = row-major [M,K] (element (r,k) at r*K+k);  'T' = stored [K,M] -> column-major view, stride M
-    if c["la"] == "P":  # A panels: 64 x 16 tiles (column-major, 2 KB contiguous), K-tiles adjacent per 64-row panel
+    if c["la"] == "R":  # A panels, K contiguous inside the tile: 64 x 16 row-major tiles (a lane's 16 halves are adjacent)
+        a_off = lambda r, k: f"((({r}) / 64u) * ({U(K)} / 16u) + ({k}) / 16u) * 1024u"
+        a_lay, a_str = RM, 16
+    elif c["la"] == "P":  # A panels: 64 x 16 tiles (column-major, 2 KB contiguous), K-tiles adjacent per 64-row panel
         a_off = lambda r, k: f"((({r}) / 64u) * ({U(K)} / 16u) + ({k}) / 16u) * 1024u"
         a_lay, a_str = CM, 64
     else:
@@ -56,6 +61,9 @@ def glsl(c, M, N, K, spec=False):
         assert nt == 32
         b_off = lambda k, n: f"((({n}) / 32u) * ({U(K)} / 16u) + ({k}) / 16u) * 512u"
         b_lay, b_str = RM, 32
+    elif c["lb"] == "C":  # B panels 64 wide, K contiguous inside the tile: 16 x 64 tiles stored column-major
+        b_off = lambda k, n: f"((({n}) / 64u) * ({U(K)} / 16u) + ({k}) / 16u) * 1024u + (({n}) % 64u) * 16u"
+        b_lay, b_str = CM, 16
     elif c["lb"] == "Q":  # B panels 64 wide: 16 x 64 tiles (2 KB contiguous); 32-wide tiles read half a panel row
         b_off = lambda k, n: f"((({n}) / 64u) * ({U(K)} / 16u) + ({k}) / 16u) * 1024u + ({n}) % 64u"
         b_lay, b_str = RM, 64
@@ -248,7 +256,7 @@ if __name__ == "__main__":
 
 def parse(n):
     """Inverse of name(): config dict from a kernel name."""
-    m = re.match(r"g([NTP])([NTPQ])_w(\d+)x(\d+)_t(\d+)x(\d+)_n(\d+)_(f16|f32)_k(\d+)(.*)$", n)
+    m = re.match(r"g([NTPR])([NTPQC])_w(\d+)x(\d+)_t(\d+)x(\d+)_n(\d+)_(f16|f32)_k(\d+)(.*)$", n)
     la, lb, wm, wn, tm, tn, nt, acc, ku, rest = m.groups()
     c = dict(la=la, lb=lb, wm=int(wm), wn=int(wn), tm=int(tm), tn=int(tn), nt=int(nt), acc=acc, ku=int(ku),
              pf=int("_p1" in rest), sw=0, sa=0, sb=0, kc=0, dual=int("_d2" in rest))

@@ -12,6 +12,24 @@ matrices (fresh operands every step); 8.36 TFLOP/s fp16 ALU.
 
 ## Results
 
+**Update (2026-11-21, last): K-minor tiles, 16.55 TFLOP/s at 4096^3 (95% of peak).** The driver statistics and
+disassembly of the 64-wide panel kernel showed 16 scalar 4-byte loads per K step: each lane of the matrix unit
+holds one row of A and one column of B along K, and those panels put K outside the tile. Packing tiles with K
+contiguous inside (A 64 x 16 row-major, B 16 x 64 column-major; layouts `R`/`C`) turns them into 4 vector loads
+per step (loop 30 -> 16 instructions). Tuning harness, cooled before every config (`sweep.py --cool`):
+
+| shape (packed operands) | 64-wide panels (`PQ`) | K-minor tiles (`RC`) |
+|---|---|---|
+| 4096^3 | 15.83 | **16.55** (95%) |
+| 2048^3 | 13.82 | **14.83** |
+| 512 x 8192 x 2048 / 2048 x 512 x 2048 | 13.26 / 15.22 | **15.28 / 15.69** |
+
+The runtime now packs into this format (`tile_copy.comp`; `transpose64.comp` mode W = 1 for K-major sources).
+PyTorch's NT case (activations [M,K], weights [N,K]) packs with plain copies and no transposes, so NT always
+takes this path. Every packing path passed the reference check on the phone; a cooled library re-timing is pending.
+The tables below are from earlier kernels.
+
+
 **Update (2026-11-21, later): 64-wide tiles.** The 64-wide-tile hang only hits with two or more 64 x 64
 accumulators per subgroup. With **one 64 x 64 tile per subgroup** and B packed as **64-wide panels**
 (16 x 64 tiles, layout `Q`; `ablas_pack_b` now writes this format), the tuning harness measures:

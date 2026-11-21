@@ -1,7 +1,8 @@
 #version 450
 // AdrenoBLAS pack kernel: dst[C, R] = transpose(src[R, C]), fp16, R and C multiples of 64. Workgroups (C/64, R/64).
 // W = 0: dst is plain row-major [C, R]. W = 64 or 32: dst is in panel layout (see panel_copy.comp) with dst row
-// = k (C = K) and dst column = x (R = M or N): A or B panels (W = 64).
+// = k (C = K) and dst column = x (R = M or N): A or B panels (W = 64). W = 1: K-minor tiles (see tile_copy.comp)
+// from a K-major source: R = K, C = M or N.
 // 64x64 tile: 128-bit loads into shared memory (packed uints), 128-bit stores of 8 halves gathered per tile
 // column. 79 GB/s on the Adreno 850 at 2048x2048 (a plain 128-bit copy: 83 GB/s; transpose.comp: 59 GB/s).
 #extension GL_EXT_shader_explicit_arithmetic_types : require
@@ -14,6 +15,8 @@ layout(std430, binding = 2) writeonly buffer D4 { uvec4 d4[]; };
 shared uint tile[64][33];
 uint out_index(uint row, uint x) {  // uvec4 index of dst element (row, x), x a multiple of 8
   if (W == 0u) return (row * R + x) / 8u;
+  if (W == 1u)  // K-minor tiles (tile_copy.comp's layout) from a K-major source [R = K, C]: dst row = x, column = k
+    return (((row / 64u) * (R / 16u) + x / 16u) * 1024u + (row % 64u) * 16u + x % 16u) / 8u;
   return (((x / W) * (C / 16u) + row / 16u) * 16u * W + (row % 16u) * W + x % W) / 8u;
 }  // 64 rows x 64 halves as 32 packed uints (+1 pad against bank conflicts)
 void main() {

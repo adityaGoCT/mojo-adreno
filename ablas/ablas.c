@@ -16,7 +16,7 @@
 #define NTUNED (sizeof(ablas_tuning) / sizeof(ablas_tuning[0]))
 #define TRANSPOSE_KERNEL 0xffff    // 32x32 tile, any multiple of 32
 #define TRANSPOSE64_KERNEL 0xfffe  // 64x64 tile, 128-bit loads/stores, multiples of 64; optional panel output
-#define PANEL_COPY_KERNEL 0xfffd   // K-major source -> panel layout
+#define TILE_COPY_KERNEL 0xfffd    // K-minor source -> K-minor tiles (no transpose)
 
 typedef struct {
   uint32_t kernel, m, n, k;
@@ -142,11 +142,11 @@ static VkPipeline get_pipeline(ablas_handle h, uint32_t kernel, uint32_t m, uint
   uint32_t vals[3] = {m, n, k};
   const uint32_t* spv = kernel == TRANSPOSE_KERNEL     ? ablas_transpose_spv
                         : kernel == TRANSPOSE64_KERNEL ? ablas_transpose64_spv
-                        : kernel == PANEL_COPY_KERNEL  ? ablas_panel_copy_spv
+                        : kernel == TILE_COPY_KERNEL   ? ablas_tile_copy_spv
                                                        : ablas_kernels[kernel].spv;
   size_t words = kernel == TRANSPOSE_KERNEL     ? sizeof(ablas_transpose_spv) / 4
                  : kernel == TRANSPOSE64_KERNEL ? sizeof(ablas_transpose64_spv) / 4
-                 : kernel == PANEL_COPY_KERNEL  ? sizeof(ablas_panel_copy_spv) / 4
+                 : kernel == TILE_COPY_KERNEL   ? sizeof(ablas_tile_copy_spv) / 4
                                                 : ablas_kernels[kernel].words;
   uint32_t* code = malloc(words * 4);
   VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -221,12 +221,14 @@ static ablas_status transpose(ablas_handle h, VkCommandBuffer cmd, ablas_buf src
   return ABLAS_OK;
 }
 
-// Panel packing: K-major sources are re-tiled by a 128-bit copy, the others transposed straight into panels.
-static ablas_status pack_panel(ablas_handle h, VkCommandBuffer cmd, int kmajor, uint32_t X, uint32_t K, uint32_t W,
-                               ablas_buf src, ablas_buf dst) {
-  if (X % W || K % 16) return ABLAS_BAD_SHAPE;
-  if (!kmajor) return transpose(h, cmd, src, dst, X, K, W);  // src [X, K]
-  VkPipeline p = get_pipeline(h, PANEL_COPY_KERNEL, K, X, W);  // src [K, X]
+// Packing into K-minor tiles: element (x, k) of A [M,K] or B^T [N,K] at ((x/64)*(K/16) + k/16)*1024 + (x%64)*16 + k%16.
+// A stored [M,K] and B stored [N,K] (PyTorch's layouts) are re-tiled by a 128-bit copy; K-major sources
+// (A [K,M], B [K,N]) are transposed straight into tiles.
+static ablas_status pack_tiles(ablas_handle h, VkCommandBuffer cmd, int kminor, uint32_t X, uint32_t K, ablas_buf src,
+                               ablas_buf dst) {
+  if (X % 64 || K % 16) return ABLAS_BAD_SHAPE;
+  if (!kminor) return transpose(h, cmd, src, dst, K, X, 1);  // src [K, X]
+  VkPipeline p = get_pipeline(h, TILE_COPY_KERNEL, X, K, 0);  // src [X, K]
   if (!p) return ABLAS_VK_ERROR;
   h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
   push(h, cmd, src, src, dst);
@@ -236,12 +238,12 @@ static ablas_status pack_panel(ablas_handle h, VkCommandBuffer cmd, int kmajor, 
 
 ablas_status ablas_pack_a(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t K, ablas_buf A,
                           ablas_buf dst) {
-  return opA == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_panel(h, cmd, opA == ABLAS_OP_T, M, K, 64, A, dst);
+  return opA == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_tiles(h, cmd, opA == ABLAS_OP_N, M, K, A, dst);
 }
 
 ablas_status ablas_pack_b(ablas_handle h, VkCommandBuffer cmd, ablas_op opB, uint32_t K, uint32_t N, ablas_buf B,
                           ablas_buf dst) {
-  return opB == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_panel(h, cmd, opB == ABLAS_OP_N, N, K, 64, B, dst);  // 16 x 64 B tiles
+  return opB == ABLAS_OP_P ? ABLAS_BAD_SHAPE : pack_tiles(h, cmd, opB == ABLAS_OP_T, N, K, B, dst);
 }
 
 static void compute_barrier(ablas_handle h, VkCommandBuffer cmd) {
@@ -253,13 +255,12 @@ static void compute_barrier(ablas_handle h, VkCommandBuffer cmd) {
 ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                          uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf ws) {
   if (M % 64 || N % 32 || K % 32 || !M || !N || !K) return ABLAS_BAD_SHAPE;
-  // Panels: operands given as P, or big GEMMs. Panel kernels with one 64 x 64 tile per subgroup reach 13.8 TFLOP/s
-  // at 2048^3 and 14.1 at 4096^3 (TN: 10.8 / 9.4); packing both operands costs ~0.4 ms at 2048^3, about what
-  // panels save there, so on-the-fly packing starts at 2^35 multiply-adds. B panels are 64 wide: N % 64.
-  int panel_ok = N % 64 == 0 && (opA != ABLAS_OP_N || K % 64 == 0) && (opB != ABLAS_OP_T || K % 64 == 0);
-  // NT (X @ W^T with a PyTorch weight) transposes both operands on either path, so from 2^31 multiply-adds it
-  // goes to panels (2048^3: 10.1 vs 8.7 TFLOP/s); below that, packing B only and running NN is faster (1024^3).
-  int nt = opA == ABLAS_OP_N && opB == ABLAS_OP_T && (double)M * N * K >= 2147483648.0;
+  // Packed tiles (K-minor 64 x 16 / 16 x 64, one 64 x 64 tile per subgroup): 16.5 TFLOP/s at 4096^3 and 14.8 at
+  // 2048^3 (TN: 9.4 / 10.8). Used for operands given as P, for NT at any size (PyTorch's X @ W^T: both operands
+  // are K-minor, so packing is a plain re-tiling copy), and for everything else from 2^35 multiply-adds, where
+  // the transposes K-major sources need are paid back. Tiles are 64 wide: M % 64 and N % 64.
+  int panel_ok = N % 64 == 0 && (opA != ABLAS_OP_T || K % 64 == 0) && (opB != ABLAS_OP_N || K % 64 == 0);
+  int nt = opA == ABLAS_OP_N && opB == ABLAS_OP_T;
   if (opA == ABLAS_OP_P || opB == ABLAS_OP_P ||
       (h->pack_to_tn && panel_ok && (nt || (double)M * N * K >= 34359738368.0))) {
     ablas_status st;
@@ -297,7 +298,7 @@ ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, abla
     }
     compute_barrier(h, cmd);
   }
-  char la = "NTP"[opA], lb = "NTQ"[opB];  // panels: A 'P' (64 x 16 tiles), B 'Q' (16 x 64 tiles)
+  char la = "NTR"[opA], lb = "NTC"[opB];  // packed: K-minor tiles, A 'R' (64 x 16 row-major), B 'C' (16 x 64 col-major)
   int kernel = select_kernel(la, lb, M, N, K);
   if (kernel < 0) return ABLAS_BAD_SHAPE;
   const ablas_kernel_t* kk = &ablas_kernels[kernel];

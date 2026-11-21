@@ -8,7 +8,7 @@ import json, pathlib, subprocess
 from gen import glsl, parse, tile
 
 HERE = pathlib.Path(__file__).resolve().parent
-LAYOUTS = ("NN", "TN", "TT", "PQ")  # NT is packed (direct NT kernels: 2.4 TFLOP/s on the 850); PQ = panels (B 64 wide)
+LAYOUTS = ("NN", "TN", "TT", "RC")  # NT is packed (direct NT kernels: 2.4 TFLOP/s on the 850); RC = K-minor tiles
 
 def spv_words(src, out):
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,7 @@ def main():
     for i, n in enumerate(names):
         w = spv_words(glsl(kernels[n], 0, 0, 0, spec=True), HERE / "build/spv" / f"{n}.spv")
         H.append(f"static const uint32_t ablas_spv_{i}[] = {{" + ",".join(f"0x{x:08x}" for x in w) + "};")
-    for t in ("transpose", "transpose64", "panel_copy"):
+    for t in ("transpose", "transpose64", "tile_copy"):
         w = spv_words((HERE / f"{t}.comp").read_text(), HERE / f"build/spv/{t}.spv")
         H.append(f"static const uint32_t ablas_{t}_spv[] = {{" + ",".join(f"0x{x:08x}" for x in w) + "};")
     H.append("static const ablas_kernel_t ablas_kernels[] = {")
