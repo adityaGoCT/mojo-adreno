@@ -257,8 +257,11 @@ ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, abla
   // at 2048^3 and 14.1 at 4096^3 (TN: 10.8 / 9.4); packing both operands costs ~0.4 ms at 2048^3, about what
   // panels save there, so on-the-fly packing starts at 2^35 multiply-adds. B panels are 64 wide: N % 64.
   int panel_ok = N % 64 == 0 && (opA != ABLAS_OP_N || K % 64 == 0) && (opB != ABLAS_OP_T || K % 64 == 0);
+  // NT (X @ W^T with a PyTorch weight) transposes both operands on either path, so from 2^31 multiply-adds it
+  // goes to panels (2048^3: 10.1 vs 8.7 TFLOP/s); below that, packing B only and running NN is faster (1024^3).
+  int nt = opA == ABLAS_OP_N && opB == ABLAS_OP_T && (double)M * N * K >= 2147483648.0;
   if (opA == ABLAS_OP_P || opB == ABLAS_OP_P ||
-      (h->pack_to_tn && panel_ok && (double)M * N * K >= 34359738368.0)) {
+      (h->pack_to_tn && panel_ok && (nt || (double)M * N * K >= 34359738368.0))) {
     ablas_status st;
     ablas_buf wsA = ws, wsB = {ws.buffer, ws.offset + (opA != ABLAS_OP_P ? (VkDeviceSize)M * K * 2 : 0)};
     if (opA != ABLAS_OP_P || opB != ABLAS_OP_P) {

@@ -23,8 +23,25 @@ accumulators per subgroup. With **one 64 x 64 tile per subgroup** and B packed a
 | 1024^3 | | 13.45 | 77% |
 | 512 x 2048 x 2048 | | 13.72 | 78% |
 
-The library table below predates this change. The runtime now selects these kernels for panel operands
-(`ABLAS_OP_P`, and big GEMMs packed on the fly); every packing path passed the reference check on the phone.
+Through the library (`ablas_test`, run shape by shape with `cool_run.sh`, which waits for the GPU to cool to
+45 C with no thermal cap before each shape; every call checked against an fp32 reference). `P` = pre-packed
+with `ablas_pack_a`/`ablas_pack_b` before the timed calls:
+
+| call | TFLOP/s | % of 17.5 |
+|---|---|---|
+| **PP 4096^3** | **15.34** | **88%** |
+| TN / NT 4096^3 (packed to panels in the call) | 13.42 / 13.20 | 75-77% |
+| PP 2048^3 | 13.94 | 80% |
+| TN 2048^3 (64 x 64 TN kernel) / NT 2048^3 (panels in the call) | 11.64 / 10.13 | 58-67% |
+| PP 1024^3 | 13.30 | 76% |
+| LLM prefill, weights pre-packed (NP): 512 x 2048 x 2048 / 512 x 8192 x 2048 / 512 x 2048 x 8192 | 11.70 / 12.69 / 13.31 | 67-76% |
+| LLM prefill, both pre-packed (PP): same shapes | 13.70 / 13.24 / 16.08 | 76-92% |
+| PP 2048 x 512 x 2048 | 15.65 | 89% |
+
+Policy changes with this: B panels are 64 wide (N % 64 for the panel path); NT calls from 2^31 multiply-adds
+go to panels (they transpose both operands on either path). The QDC phone throttles after long runs (we saw
+636-1126 MHz caps): numbers taken without cooling came out up to 2x low. The older tables below are from the
+32-wide kernels.
 
 Through the library (`ablas_test`, GPU timestamps, best of 5 runs after warm-up, every call checked
 against an fp32 CPU reference on 1,024 sampled elements). % = share of the 17.5 TFLOP/s measured peak.
