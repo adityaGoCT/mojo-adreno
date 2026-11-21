@@ -283,10 +283,20 @@ How it got there (the intermediate builds are all reproducible with `IR3_BANKRA_
   later loads reuse registers that earlier mads still read. No allocator-side rule can make both tile
   sizes win from the same code. I tried a strict age threshold (`IR3_BANKRA_AGE` 24/96/200,
   `results/agec_*`); it reshuffles these kernels unpredictably (−12.6% to +1.9%) without fixing them.
-* **What would fix them.** A post-schedule renaming pass between `ir3_postsched` and `ir3_merge_rpt`. It
-  would fix conflicts by renaming a value only into registers idle across its whole lifetime, so the
-  schedule stays bit-for-bit. In these register-tight kernels (16 full registers, fully packed) such room
-  rarely exists without growing the footprint, which runs into the footprint effect above.
+* **Post-schedule renaming does not fix them either (tried).** `bank_rename.py` prototypes the pass that
+  would sit between `ir3_postsched` and `ir3_merge_rpt`. It works on Turnip's final unpatched code, keeps the
+  instruction order and sync flags exactly, and moves a loaded operand vector only into registers that are
+  idle for its whole lifetime (not accessed, no live value, not last read by an asynchronous instruction;
+  the loop body is treated as cyclic). The result runs through the override (`edits/rn_*`):
+  * Within the existing footprint it finds **no** idle room in any of these kernels (fp16 gg 128×128,
+    64×128, 64×64, fp32 lg 64×64): Turnip packs them exactly into their register budget.
+  * Given extra registers it removes conflicts with a bit-identical schedule, and the kernel gets
+    *slower*. fp16 gg 128×128: original 3.32 TFLOP/s (16 regs, 128 conflicting mads); +1 register 2.96 (96);
+    +2 registers 3.05 (48); +4 registers 3.08 (0 conflicts). All results correct.
+  * So in this kernel the conflicts cost nothing: it is bound by its texture loads. The RA patch's −4% there
+    comes entirely from the perturbed load schedule, and the best code for it is the unpatched code. Since
+    the same loop gains +21% with 64×64 tiles, picking per kernel takes a runtime measurement. AdrenoBLAS's
+    tuner can do that by timing each kernel with and without `IR3_SHADER_DEBUG=nobankra`.
 
 Verdict: the bank rule is worth teaching the allocator: +5.0% overall, up to +21% on ALU-heavy kernels. The
 remaining losses come from load-bound kernels where any layout change costs load overlap.
@@ -333,6 +343,8 @@ gen_f16_sweep.py     fp16 operand-placement sweep (the parity rule) -> edits/f16
 bankcheck.py         count same-component 3-register mads in an .asm
 turnip-ra-bank.patch Mesa patch: bank-aware ir3 RA (apply in ~/runix/adreno-port/third_party/mesa at 745709a)
 bank_ab.py           run kernels on a driver with disassembly logged: TFLOP/s, check, conflicts per loop
+bank_rename.py       post-schedule renaming prototype (bank conflicts) on a final .asm; --grow N extra registers
+ab_table.py          A/B table from results/<prefix>_<cfg>.jsonl
 asm_dump/            Turnip's disassembly of the kernels used as templates (and their blake3 names)
 dumps/               raw Mesa logs (NIR + disassembly)
 edits/               every injected .asm (half_loop = the loop-count proof; *_no* = diagnostics)
@@ -345,8 +357,9 @@ manifest_cml.txt     stock cooperative-matrix peak (shaders from ../peak/gen_coo
 * Read the stock driver's machine code on the 840 (the pipeline-cache route from `../isa`) to see whether
   Qualcomm's compiler avoids same-component mads. Its fp16 peak loop at 89% suggests something else is going
   on there.
-* Bank-aware RA (above): a post-schedule renaming pass (or bank cost in the post-RA scheduler) for the
-  load-bound kernels that still lose 3–4%, and for the ll kernels' 50% conflicts.
+* Bank-aware RA (above): let the tuner choose per kernel (`nobankra` on/off). A post-schedule renaming pass
+  was tried and finds no room in the packed kernels (section above). The ll kernels' 50% conflicts would need
+  the post-RA scheduler itself to weigh bank cost against load hoisting.
 * A faster ALU GEMM needs less operand traffic per FMA: larger register tiles (fp16 operands and accumulators
   must fit in hr0–hr47), and interleaved shared-memory and texture loads.
 * Shipping route if assembly is ever used: apps would have to bring Turnip (e.g. libadrenotools, as Android
