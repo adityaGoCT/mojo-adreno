@@ -1,0 +1,48 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer BQ { uvec2 bq[]; };
+layout(std430, binding = 1) readonly buffer BD { float16_t bd[]; };
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+void deq(uvec2 q, float16_t d, out coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b) {
+  f16vec2 dd = f16vec2(d), off = f16vec2(1032.0hf);
+  { f16vec2 v = (unpackFloat2x16(((q.x >> 0u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[0] = v.x; b[1] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.x >> 4u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[2] = v.x; b[3] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.x >> 8u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[4] = v.x; b[5] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.x >> 12u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[6] = v.x; b[7] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.y >> 0u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[8] = v.x; b[9] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.y >> 4u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[10] = v.x; b[11] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.y >> 8u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[12] = v.x; b[13] = v.y; }
+  { f16vec2 v = (unpackFloat2x16(((q.y >> 12u) & 0x000F000Fu) | 0x64006400u) - off) * dd; b[14] = v.x; b[15] = v.y; }
+}
+void main() {
+  uint sg = gl_SubgroupID, l = gl_SubgroupInvocationID;
+  uint row0 = gl_WorkGroupID.y * 128u + (sg / 2u) * 64u;
+  uint col0 = gl_WorkGroupID.x * 128u + (sg % 2u) * 64u;
+  uint KB = 2048u / 32u;
+  uint qb = (col0 / 64u) * KB * 128u + l;
+  uint db = 2048u * 2048u / 4u + (col0 / 64u) * KB * 64u + l;
+  uint ab = (row0 / 64u) * (2048u / 16u) * 1024u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0);
+  for (uint k = 0u; k < 2048u / 16u; ++k) {
+    uvec2 q = bq[qb + k * 64u];
+    float16_t d = bd[db + (k / 2u) * 64u];
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a0; coopMatLoad(a0, a, ab + k * 1024u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b0; 
+    { f16vec2 v = (unpackFloat2x16(((q.x >> 0u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[0] = v.x; b0[1] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.x >> 4u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[2] = v.x; b0[3] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.x >> 8u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[4] = v.x; b0[5] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.x >> 12u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[6] = v.x; b0[7] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.y >> 0u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[8] = v.x; b0[9] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.y >> 4u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[10] = v.x; b0[11] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.y >> 8u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[12] = v.x; b0[13] = v.y; }
+    { f16vec2 v = (unpackFloat2x16(((q.y >> 12u) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0hf)) * f16vec2(d); b0[14] = v.x; b0[15] = v.y; }
+    acc = coopMatMulAdd(a0, b0, acc);
+  }
+  coopMatStore(acc, c, row0 * 2048u + col0, 2048u, gl_CooperativeMatrixLayoutRowMajor);
+}

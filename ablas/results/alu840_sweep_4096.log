@@ -1,0 +1,25 @@
+alu_ll_128x128x16      stock          2.199 ok=True
+alu_ll_128x128x16      turnip-bank    2.217 ok=True
+alu_ll_64x128x8        stock          2.188 ok=True
+alu_ll_64x128x8        turnip-bank    2.23 ok=True
+alu_ll_64x64x16        stock          2.074 ok=True
+alu_ll_64x64x16        turnip-bank    2.054 ok=True
+alu_lg_128x128x16      stock          3.114 ok=True
+alu_lg_128x128x16      turnip-bank    3.263 ok=True
+alu_lg_64x128x16       stock          3.116 ok=True
+alu_lg_64x128x16       turnip-bank    2.921 ok=True
+alu_lg_64x64x16        stock          2.506 ok=True
+alu_lg_64x64x16        turnip-bank    2.513 ok=True
+alu_gl_128x128x16      stock          3.162 ok=True
+alu_gl_128x128x16      turnip-bank    3.346 ok=True
+alu_gl_64x64x16        stock          2.56 ok=True
+alu_gl_64x64x16        turnip-bank    2.721 ok=True
+alu_gg_128x128         stock          2.922 ok=True
+alu_gg_128x128         turnip-bank    3.181 ok=True
+alu_gg_64x128          stock          2.971 ok=True
+alu_gg_64x128          turnip-bank    3.22 ok=True
+alu_gg_64x64           stock          2.319 ok=True
+alu_gg_64x64           turnip-bank    3.02 ok=True
+confirming 2 candidates within 3.0% of the best
+best stock          alu_gl_128x128x16      3.162 TFLOP/s
+best turnip-bank    alu_gl_128x128x16      3.381 TFLOP/s

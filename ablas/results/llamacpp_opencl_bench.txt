@@ -1,0 +1,7 @@
+| llama 3B Q4_0                  |   1.68 GiB |     3.21 B | OpenCL     |  99 |   0 |           pp512 |        455.54 ± 8.52 |   [waited 2s, start 44500mC]
+| llama 3B Q4_0                  |   1.68 GiB |     3.21 B | OpenCL     |  99 |   0 |          pp1024 |        418.48 ± 3.19 |   [waited 10s, start 44800mC]
+| llama 3B Q4_0                  |   1.68 GiB |     3.21 B | OpenCL     |  99 |   0 |          pp2048 |        366.19 ± 4.27 |   [waited 14s, start 44800mC]
+| llama 3B Q4_0                  |   1.78 GiB |     3.21 B | OpenCL     |  99 |   0 |           pp512 |        443.34 ± 5.51 |   [waited 34s, start 45100mC]
+| llama 3B Q4_0                  |   1.78 GiB |     3.21 B | OpenCL     |  99 |   0 |          pp1024 |        415.71 ± 5.21 |   [waited 20s, start 44800mC]
+| llama 3B Q4_0                  |   1.78 GiB |     3.21 B | OpenCL     |  99 |   0 |          pp2048 |        365.86 ± 5.87 |   [waited 26s, start 45100mC]
+llama 3B F16 (Llama-3.2-3B-Instruct-F16.gguf, 6.43 GB): llama-bench -p 512 -n 0 -ngl 99 -ub 512 -fa 0 killed (out of memory) with -lm auto, none and dio; no result.

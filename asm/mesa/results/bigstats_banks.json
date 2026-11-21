@@ -1,0 +1,62 @@
+{
+ "alu840_2048x2048x2048_alu_lg_128x128x16_t8x16": {
+  "tflops": 1.3271593316349992,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 592,
+  "loop_mads": 2048,
+  "hash": "b2d599c24d915e194175a6f45f2d0198aba3e0cd151d8aa06073c8d3a9a7b6a3",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 37 full, 20 constlen",
+   "; CL prog 23/1: 6 max_waves, 0 double_threadsize"
+  ]
+ },
+ "alu840_2048x2048x2048_alu_lg_128x64x16_t16x8": {
+  "tflops": 2.876380364854383,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 146,
+  "loop_mads": 2048,
+  "hash": "a9f9703e5b120116887acd9703d5e8fea1fe6260581a49adb92d7aec28042ada",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 30 full, 16 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "alu840_2048x2048x2048_alu_lg_128x128x16_t16x8": {
+  "tflops": 3.416872834281798,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 60,
+  "loop_mads": 2048,
+  "hash": "307145cdabac534d43a68173fe90b847344a198eaf731a356a6120c07a01cf5f",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 31 full, 16 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "alu840_2048x2048x2048_alu_gl_64x256x16_t8x16": {
+  "tflops": 2.6955643169210712,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 198,
+  "loop_mads": 2048,
+  "hash": "7fade0446f0304247b38746fd3936a6d2ee1c4e0ea10001710e26c14fa45a33b",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 32 full, 20 constlen",
+   "; CL prog 23/1: 8 max_waves, 0 double_threadsize"
+  ]
+ },
+ "alu840_2048x2048x2048_alu_gg_128x128_t16x8": {
+  "tflops": 2.915332233146222,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 132,
+  "loop_mads": 512,
+  "hash": "5fd576cd2e9447edb568a965ff41bc2b08e3e2aee82f8c2cf2d7674627b07117",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 25 full, 12 constlen",
+   "; CL prog 23/1: 10 max_waves, 0 double_threadsize"
+  ]
+ }
+}

@@ -12,6 +12,13 @@ matrices (fresh operands every step); 8.36 TFLOP/s fp16 ALU.
 
 ## Results
 
+**Update (LLM prefill): Q4_0 weights and fused epilogues.** `ablas_hgemm_q4_0` runs ggml-style Q4_0 weights at up
+to **17.7 TFLOP/s** (Llama 3.2 3B's gate/up projection at M = 2048, with the SwiGLU epilogue), faster than fp16
+because the weights stream at 0.56 bytes each and are dequantized in registers. With them, Llama 3.2 3B prefill runs
+at **2,602 tokens/s (Q4_0) and 2,318 (fp16) at 512 tokens**, 5.7x llama.cpp's OpenCL backend on the same phone:
+[llama3b/README.md](llama3b/README.md), section [Q4_0 weights and fused epilogues](#q4_0-weights-and-fused-epilogues)
+below.
+
 **Update (closing the last 7%): 16.67 TFLOP/s at 4096^3 (95%), 16.99 at 4096 x 4096 x 8192 (97%).** Tried, all
 cooled (`--cool`), K-contiguous tiles with one 64 x 64 tile per subgroup at 4096^3:
 
@@ -190,6 +197,121 @@ K % 32. Workspace: `ablas_hgemm_workspace_size()` (operands that get packed).
   64 x 32 fallback kernel of that layout.
 - Pipelines are built on first use of a shape (~150 ms; the driver compiles) and kept in the handle.
 
+## Q4_0 weights and fused epilogues
+
+Added for LLM prefill (`llama3b/`). Both build on one finding about the 850's matrix unit (probe:
+`llama3b/probe/map.comp`): a 16 x 64 B matrix holds output column n in lane n and k in element k, a 64 x 16 A matrix
+holds row r in lane r, and a 64 x 64 accumulator holds row r in lane r and column e in element e.
+
+**Q4_0** (`gen_q4.py`, `q4ref.py`): each lane loads its own column's 4-bit values (8 bytes per 16-deep step) and
+fp16 scale, and fills the B matrix element by element: `((w >> 4j) & 0x000F000F) | 0x64006400` is 1024 + q as two
+halves, minus 1032 is exact, times the scale rounds once. No shared memory. ggml Q4_0 semantics (blocks of 32 along
+K, value (q - 8) * d) in a tiled layout; `ablas_q4_0_from_ggml` converts ggml `block_q4_0` rows (e.g. a GGUF
+tensor) on the host.
+
+```c
+ablas_hgemm_q4_0(h, cmd, ABLAS_OP_P, M, N, K, A_packed, W_q4, C, (ablas_buf){0});   // C = A W^T
+```
+
+**Epilogues** (`epilogue.py`, `ablas_hgemm_ex` / `ablas_hgemm_q4_0_ex`): the accumulator is staged through padded
+shared memory (reading accumulator elements directly costs ~20 clocks each) and lane l handles row l:
+- `ABLAS_EPI_PACKED`: C written in the packed A format, ready to be the next GEMM's `ABLAS_OP_P` operand.
+- `ABLAS_EPI_SWIGLU`: B's rows interleaved 32 gate / 32 up per 64; writes silu(gate) * up, packed.
+- `ABLAS_EPI_RESIDUAL_RMS`: C is an fp32 residual stream, C += A B, and the workspace receives per-row sums of
+  squares per 64 columns for the next RMSNorm.
+
+**Tuning for LLM shapes** (`sweep_llm.py`): every one-tile-per-subgroup configuration of both families, with and
+without each epilogue, at Llama 3.2 3B's projection shapes for M = 512 / 1024 / 2048 and the LM head
+(`results/llm_*.json`, read by `build_lib.py`; tuned entries carry their epilogue). Best rates (TFLOP/s):
+
+| shape (N x K) | fp16, M = 512 / 2048 | Q4_0, M = 512 / 2048 |
+|---|---|---|
+| qkv 5120 x 3072 | 15.8 / 16.6 | 16.3 / 17.1 |
+| o 3072 x 3072 (plain; residual epilogue) | 16.7 / 16.7; 13.7 / 12.7 | 17.0 / 17.3; 14.2 / 15.0 |
+| gate+up 16384 x 3072 + SwiGLU | 17.0 / 16.8 | 17.7 / 17.7 |
+| down 3072 x 8192 (plain; residual epilogue) | 17.3 / 17.4; 15.9 / 15.6 | 17.5 / 17.6; 16.3 / 16.2 |
+| LM head 128256 x 3072, M = 64 | 4.8 (memory bound) | 15.1 |
+
+17.7 TFLOP/s is above the 17.5 the peak microbenchmark
+measured: at 1.45 GHz it means at least 6,114 fp16 multiply-adds per clock, most likely 6,144 (17.8 TFLOP/s). Some
+epilogue tiles are pathological at some shapes (fp16 `w2x2_eg` 8.6 where `w2x1_eg` runs 16.9), so epilogues get
+their own tuning entries. `ABLAS_KERNEL` / `ABLAS_KERNEL_EP` force a kernel by name for benchmarking.
+
+## Adreno 840 backend (ALU)
+
+The Adreno 840 has no matrix unit. Its stock driver's fp16 cooperative matrices run on the ALUs and peak at
+7.35 TFLOP/s, below the 7.99 fp16 ALU peak (`../asm/mesa/README.md`). So on the 840, AdrenoBLAS runs fp16 ALU
+kernels instead (`gen_alu.py`: fp16 multiply-add and accumulate, TN layout, 8 x 8 thread tiles, shared-memory
+and/or texture-path operands). `ablas_create` picks the backend by device ("840" in the name or chip
+0x44050a31), not by cooperative-matrix support, so the 850 path is unchanged. On the 840 the library needs
+only `VK_KHR_push_descriptor`, `shaderFloat16` and `storageBuffer16BitAccess`.
+
+It works with both of the 840's drivers: Qualcomm's, and Mesa Turnip (`../asm/mesa`, built with
+`turnip-ra-bank.patch`). Each driver has its own tuned kernels (`ablas_kernels_840.h`, driver 0 / 1),
+because the best kernel differs. For Turnip the tuner also chooses the register-bank-aware register
+allocation on or off per kernel. That choice travels inside the kernel: `gen_alu.mark_nobankra` tags the
+SPIR-V's source-file string, and the patched Turnip compiles tagged kernels with that allocation off.
+Verified: a tagged copy of `alu_gg_128x128` compiles with 128 same-bank mads, the untagged one with 22. In
+the three tuned shapes the allocation was on for every winner.
+
+Tuning (`sweep_alu.py`, Samsung RTL Galaxy Z Fold SM-F976B, cooled, every result checked against an fp32
+reference, close calls re-timed three times; all runs correct). Configs: 11 with 8 × 8 thread tiles (`--set std`)
+and 12 with 8 × 16 / 16 × 8 tiles (`--set big`, 128 fp16 accumulators per thread, the most the half-register
+file holds):
+
+| shape | Qualcomm driver (8 × 8) | Turnip, bank RA on, 8 × 8 | Turnip, bank RA on, 16 × 8 | Turnip, bank RA off |
+|---|---|---|---|---|
+| 4096³ | 3.16 (alu_gl_128x128x16) | 3.38 (alu_gl_128x128x16) | **3.57** (alu_lg_128x128x16_t16x8) | |
+| 2048³ | 3.15 (alu_lg_64x128x16) | 3.32 (alu_lg_64x128x16) | **3.43** (alu_lg_128x128x16_t16x8) | 3.29 (alu_gg_128x128) |
+| 1024³ | **3.14** (alu_gg_64x128) | **3.14** (alu_lg_64x128x16) | 3.03 | 2.87 |
+| 512 × 2048 × 2048 | 3.01 (alu_gg_64x128) | **3.18** (alu_lg_64x128x16) | 2.90 | 2.90 |
+
+**Bigger register tiles.** A thread tile of TM × TN reads TM values of A and TN of B per k step for TM·TN
+multiply-adds, so 16 × 8 halves the B traffic (B comes through the texture path in the `lg` kernels, the
+scarcer one). At 2048³ an interleaved head-to-head gives 3.436 vs 3.319 TFLOP/s (four rounds each), at 4096³
+3.57 vs 3.38. Turnip compiles these kernels in 25–37 registers with no spills and 6–10 waves. With bank RA
+on, `alu_lg_128x128x16_t16x8` has 3% same-bank mads. The 8 × 16 variants lose: about 29% same-bank mads, and
+6 waves at 37 registers. On small shapes the 128 × 128 workgroup tile leaves too few workgroups (64 at 1024³),
+and the 8 × 8 kernels stay ahead. Qualcomm's compiler cannot run them: the `lg`/`gl` big-tile kernels end in
+`VK_ERROR_DEVICE_LOST` (GPU timeout), and the rest are correct but up to 1000x slow, which suggests the
+accumulators are spilled. So only its 8 × 8 kernels are tuned, and its catalogue never contains a big tile.
+
+Through the library (`ablas_test`, one shape at a time with the thermal gate, `cool_run_840.py`;
+`results/library_840_*.txt`), all calls pass. `P` = pre-packed with `ablas_pack_a`/`_b`, which on the 840
+write plain TN:
+
+| call | Qualcomm driver | Turnip (bank RA, with 16 × 8 tiles) |
+|---|---|---|
+| TN 4096³ / PP 4096³ | 3.39 / 3.21 | **3.58 / 3.58** |
+| TN 3072³ (untuned) | 3.15 | **3.64** |
+| TN / NT / PP 2048³ | 3.32 / 2.98 / 3.37 | **3.46** / 3.05 / **3.46** |
+| NN / TT 2048³ (8 × 8 run, transposed in the call) | 3.18 / 3.17 | 3.12 / 3.12 |
+| TN 1024³ | 3.17 | 3.11 |
+| TN / NT / PP 512 × 2048 × 2048 | 3.14 / 2.44 / 3.10 | 3.12 / 2.38 / 3.12 |
+| TN 768 × 1536 × 1024 (untuned) | 3.07 | 3.11 |
+
+Rows from the second run (`results/library_840_*_big.txt`, after the big tiles went in) except NN/TT and
+the 512 NT/PP pair (first run). That is 39–46% of the 7.99 TFLOP/s fp16 ALU peak. The limits are operand bandwidth and register-bank
+conflicts (`../asm/mesa/README.md`: a hand-written loop reaches 3.65, with its ALU part at 90%).
+
+Notes:
+- **Shapes.** M and N must be multiples of 64, K of 4; K must be a multiple of 32 when an operand is
+  transposed (opA = N or opB = T). Other shapes return `ABLAS_BAD_SHAPE`. Untuned shapes take the nearest
+  tuned kernel that divides them, else `alu_gg_64x64`.
+- **Packed format.** It is device-specific (`ablas.h`): pre-packed weights from the 850 are not valid on the
+  840 and vice versa.
+- **Test threshold.** `ablas_test` passes the 840 at a sampled error below 5e-2 (2e-2 elsewhere). fp16 ALU
+  accumulation rounds every step, which gives ~3e-2 at K = 2048 on 1024 sampled elements.
+- **Reproduce** (RTL serial in `RTL_SERIAL`):
+  ```
+  cd ../asm/mesa; python3 run.py push; python3 run.py pushbank
+  cd ../../ablas; python3 sweep_alu.py 2048 2048 2048
+  python3 build_lib.py                                   # also writes ablas_kernels_840.h
+  $NDK_CLANG -O2 -I <vulkan headers> -o build/ablas_test_840 ablas_test.c ablas.c -ldl -lm
+  adb push build/ablas_test_840 /data/local/tmp/asm_mesa/
+  python3 cool_run_840.py stock "T N 2048 2048 2048"; python3 cool_run_840.py turnip "T N 2048 2048 2048"
+  ```
+
 ## Files
 
 ```
@@ -203,6 +325,17 @@ transpose/      transpose variants + benchmark (gen_transpose.py)
 ablas_test.c    on-device correctness + speed test of the library
 diag/           the shared-memory cooperative-load diagnosis
 results/        tuning results (JSON per shape and layout)
+gen_alu.py      Adreno 840 backend: fp16 ALU kernel template (TN), mark_nobankra (per-kernel Turnip RA choice)
+sweep_alu.py    Adreno 840 tuner: configs x {Qualcomm, Turnip bank RA on/off} -> results/alu840_<shape>.json
+ablas_kernels_840.h  840 catalogue written by build_lib.py (build_840); copy840.comp = 840 pack for TN operands
+cool_run_840.py ablas_test on the RTL 840 one shape at a time with the thermal gate
+gen_q4.py       Q4_0 kernel template (dequantization into the B matrix in registers)
+q4ref.py        Q4_0 quantization (ggml reference rounding) and the AdrenoBLAS Q4_0 / packed-tile layouts
+q4test.py       Q4_0 kernels on the phone vs NumPy
+epilogue.py     fused epilogues (packed output, SwiGLU, residual + RMS statistics), shared by gen.py and gen_q4.py
+sweep_llm.py    tune both families, with epilogues, on LLM shapes -> results/llm_<fmt>_<shape>[_e<ep>].json
+ablas_kernels_q4.h   Q4_0 catalogue written by build_lib.py (build_q4)
+llama3b/        Llama 3.2 3B prefill benchmark on the library (fp16 and Q4_0), with its own README
 ```
 
 Reproduce (QDC tunnel on [::1]:5037):
@@ -219,9 +352,11 @@ The sweep harness is `../asm/peak/vk_bench.c` (built as `../asm/peak/vk_gemm_ben
 
 ## Next
 
-- Close the remaining gap to 17.5 TFLOP/s (best now 12.8 = 73%): per-iteration load cost is what's left. Ideas: B tiles from wider rows, finding a K unroll the driver survives,
-  decoding the 850's matrix instructions (`../asm/README.md`) to see what the compiler emits per step.
-- fp32 accumulation (blocked by the conversion crash: try an element-wise conversion).
-- Edge tiles (shapes that aren't tile multiples), batched/strided GEMM, epilogues (bias, activation).
-- GEMV/decode kernels (M = 1) and int8/int4 weights for LLM decode.
-- Same flow on the Adreno 840 (Samsung RTL), whose cooperative-matrix shapes differ.
+- fp16 at 4096^3 is at 95-97% of peak and Q4_0 LLM shapes at up to 99%; what's left at large sizes is the C store.
+- fp32 accumulation (blocked by the conversion crash; the shared-memory epilogue staging could carry it).
+- Edge tiles (shapes that aren't tile multiples), batched/strided GEMM (attention is model code in `llama3b/`).
+- GEMV/decode kernels (M = 1, memory bound) for Q4_0 and fp16, and the residual epilogue's cost (it reads and
+  writes the fp32 residual inside the GEMM: 14-15 vs 17 TFLOP/s for the o projection).
+- Adreno 840: done as an ALU backend (section above), not cooperative matrices: its stock coopmat runs on the
+  ALUs and Turnip has none. Bigger register tiles are in (16 x 8, Turnip only). Next there: interleaving the
+  shared-memory and texture loads, and splitting K for small shapes so the 16 x 8 tiles get enough workgroups.

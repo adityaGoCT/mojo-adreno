@@ -12,6 +12,7 @@
 
 #include "ablas_kernels.h"
 #include "ablas_kernels_840.h"
+#include "ablas_kernels_q4.h"
 
 #define NKERNELS (sizeof(ablas_kernels) / sizeof(ablas_kernels[0]))
 #define NTUNED (sizeof(ablas_tuning) / sizeof(ablas_tuning[0]))
@@ -20,6 +21,7 @@
 #define TILE_COPY_KERNEL 0xfffd    // K-minor source -> K-minor tiles (no transpose)
 #define COPY840_KERNEL 0xfffc      // Adreno 840: plain 16-byte copy (pack of an operand already in TN layout)
 #define K840_BASE 0x8000           // Adreno 840: ablas840_kernels[kernel - K840_BASE]
+#define Q4_BASE 0x4000             // Q4_0: ablas_q4_kernels[kernel - Q4_BASE]
 
 typedef struct {
   uint32_t kernel, m, n, k;
@@ -77,12 +79,12 @@ ablas_status ablas_create(ablas_handle* out, VkPhysicalDevice pd, VkDevice dev, 
   LOAD(CmdBindPipeline); LOAD(CmdPushDescriptorSetKHR); LOAD(CmdDispatch); LOAD(CmdPipelineBarrier);
 #undef LOAD
   if (!h->CmdPushDescriptorSetKHR) { free(h); return ABLAS_UNSUPPORTED; }
-  VkDescriptorSetLayoutBinding b[3];
-  for (uint32_t i = 0; i < 3; ++i)
+  VkDescriptorSetLayoutBinding b[4];  // A, B, C, epilogue workspace
+  for (uint32_t i = 0; i < 4; ++i)
     b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
   VkDescriptorSetLayoutCreateInfo dli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   dli.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-  dli.bindingCount = 3;
+  dli.bindingCount = 4;
   dli.pBindings = b;
   VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   pli.setLayoutCount = 1;
@@ -155,12 +157,14 @@ static VkPipeline get_pipeline(ablas_handle h, uint32_t kernel, uint32_t m, uint
                         : kernel == TILE_COPY_KERNEL   ? ablas_tile_copy_spv
                         : kernel == COPY840_KERNEL     ? ablas840_copy_spv
                         : kernel >= K840_BASE          ? ablas840_kernels[kernel - K840_BASE].spv
+                        : kernel >= Q4_BASE            ? ablas_q4_kernels[kernel - Q4_BASE].spv
                                                        : ablas_kernels[kernel].spv;
   size_t words = kernel == TRANSPOSE_KERNEL     ? sizeof(ablas_transpose_spv) / 4
                  : kernel == TRANSPOSE64_KERNEL ? sizeof(ablas_transpose64_spv) / 4
                  : kernel == TILE_COPY_KERNEL   ? sizeof(ablas_tile_copy_spv) / 4
                  : kernel == COPY840_KERNEL     ? sizeof(ablas840_copy_spv) / 4
                  : kernel >= K840_BASE          ? ablas840_kernels[kernel - K840_BASE].words
+                 : kernel >= Q4_BASE            ? ablas_q4_kernels[kernel - Q4_BASE].words
                                                 : ablas_kernels[kernel].words;
   uint32_t* code = malloc(words * 4);
   VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -190,35 +194,45 @@ static VkPipeline get_pipeline(ablas_handle h, uint32_t kernel, uint32_t m, uint
 
 // Kernel for a layout and shape: the tuned entry nearest in log-space whose tile divides the shape;
 // otherwise the smallest-tile kernel of that layout that divides it.
-static int select_kernel(char la, char lb, uint32_t M, uint32_t N, uint32_t K) {
+static int select_kernel_ep(char la, char lb, uint32_t M, uint32_t N, uint32_t K, char ep) {
   int best = -1;
   double bestd = 1e30;
   for (size_t i = 0; i < NTUNED; ++i) {
     const ablas_tune_t* t = &ablas_tuning[i];
     const ablas_kernel_t* kk = &ablas_kernels[t->kernel];
-    if (t->la != la || t->lb != lb || M % kk->bm || N % kk->bn) continue;
+    if (t->la != la || t->lb != lb || t->ep != ep || M % kk->bm || N % kk->bn) continue;
     double d = fabs(log((double)M / t->m)) + fabs(log((double)N / t->n)) + fabs(log((double)K / t->k));
     if (d < bestd) bestd = d, best = t->kernel;
   }
-  if (best >= 0) return best;
+  if (best >= 0 || ep) return best;
   for (size_t i = 0; i < NKERNELS; ++i) {
     const ablas_kernel_t* kk = &ablas_kernels[i];
-    if (kk->la == la && kk->lb == lb && M % kk->bm == 0 && N % kk->bn == 0 &&
+    if (kk->la == la && kk->lb == lb && !kk->ep && M % kk->bm == 0 && N % kk->bn == 0 &&
         (best < 0 || kk->bm * kk->bn < ablas_kernels[best].bm * ablas_kernels[best].bn))
       best = (int)i;
   }
   return best;
 }
 
-static void push(ablas_handle h, VkCommandBuffer cmd, ablas_buf a, ablas_buf b, ablas_buf c) {
-  VkDescriptorBufferInfo bi[3] = {{a.buffer, a.offset, VK_WHOLE_SIZE},
+static int select_kernel(char la, char lb, uint32_t M, uint32_t N, uint32_t K) {
+  return select_kernel_ep(la, lb, M, N, K, 0);
+}
+
+static void push4(ablas_handle h, VkCommandBuffer cmd, ablas_buf a, ablas_buf b, ablas_buf c, ablas_buf d) {
+  VkDescriptorBufferInfo bi[4] = {{a.buffer, a.offset, VK_WHOLE_SIZE},
                                   {b.buffer, b.offset, VK_WHOLE_SIZE},
-                                  {c.buffer, c.offset, VK_WHOLE_SIZE}};
-  VkWriteDescriptorSet w[3];
-  for (uint32_t i = 0; i < 3; ++i)
+                                  {c.buffer, c.offset, VK_WHOLE_SIZE},
+                                  {d.buffer, d.offset, VK_WHOLE_SIZE}};
+  VkWriteDescriptorSet w[4];
+  uint32_t n = d.buffer ? 4 : 3;
+  for (uint32_t i = 0; i < n; ++i)
     w[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, VK_NULL_HANDLE, i, 0, 1,
                                   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[i], NULL};
-  h->CmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h->layout, 0, 3, w);
+  h->CmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h->layout, 0, n, w);
+}
+
+static void push(ablas_handle h, VkCommandBuffer cmd, ablas_buf a, ablas_buf b, ablas_buf c) {
+  push4(h, cmd, a, b, c, (ablas_buf){0});
 }
 
 // Records dst[C,R] = transpose(src[R,C]) (R, C multiples of 32); W = 64 / 32 writes A / B panels instead
@@ -336,17 +350,44 @@ static ablas_status hgemm_840(ablas_handle h, VkCommandBuffer cmd, ablas_op opA,
   return ABLAS_OK;
 }
 
+// Epilogue variant of a selected kernel: the same configuration with suffix _e<p|g>, else the epilogue kernel of
+// the same family (by name prefix) with the biggest tile that divides the shape.
+static int with_epilogue(const char* base, char ep, uint32_t M, uint32_t N, int q4) {
+  size_t nk = q4 ? sizeof(ablas_q4_kernels) / sizeof(ablas_q4_kernels[0]) : NKERNELS;
+  int best = -1;
+  uint32_t bestarea = 0;
+  for (size_t i = 0; i < nk; ++i) {
+    const char* n = q4 ? ablas_q4_kernels[i].name : ablas_kernels[i].name;
+    char e = q4 ? ablas_q4_kernels[i].ep : ablas_kernels[i].ep;
+    uint32_t bm = q4 ? ablas_q4_kernels[i].bm : ablas_kernels[i].bm, bn = q4 ? ablas_q4_kernels[i].bn : ablas_kernels[i].bn;
+    size_t bl = strlen(base);
+    if (e != ep || M % bm || N % bn) continue;
+    char suf[4] = {'_', 'e', ep, 0};
+    if (!strncmp(n, base, bl) && !strcmp(n + bl, suf)) return (int)i;
+    if (strncmp(n, base, 3)) continue;  // same family (gRC / q4_)
+    if (bm * bn > bestarea) bestarea = bm * bn, best = (int)i;
+  }
+  return best;
+}
+
 ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                          uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf ws) {
-  if (h->a840) return hgemm_840(h, cmd, opA, opB, M, N, K, A, B, C, ws);
+  return ablas_hgemm_ex(h, cmd, opA, opB, M, N, K, A, B, C, ws, ABLAS_EPI_NONE);
+}
+
+ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
+                            uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf ws, ablas_epilogue ep) {
+  if (h->a840) return ep ? ABLAS_UNSUPPORTED : hgemm_840(h, cmd, opA, opB, M, N, K, A, B, C, ws);
   if (M % 64 || N % 32 || K % 32 || !M || !N || !K) return ABLAS_BAD_SHAPE;
+  if (ep && (N % 64 || K % 64)) return ABLAS_BAD_SHAPE;
+  if (ep == ABLAS_EPI_RESIDUAL_RMS && (opA != ABLAS_OP_P || opB != ABLAS_OP_P || !ws.buffer)) return ABLAS_BAD_SHAPE;
   // Packed tiles (K-minor 64 x 16 / 16 x 64, one 64 x 64 tile per subgroup): 16.5 TFLOP/s at 4096^3 and 14.8 at
   // 2048^3 (TN: 9.4 / 10.8). Used for operands given as P, for NT at any size (PyTorch's X @ W^T: both operands
   // are K-minor, so packing is a plain re-tiling copy), and for everything else from 2^35 multiply-adds, where
   // the transposes K-major sources need are paid back. Needs M, N, K multiples of 64.
   int panel_ok = N % 64 == 0 && K % 64 == 0;  // tiles are 64 wide; the pack kernels work in 64 x 64 blocks
   int nt = opA == ABLAS_OP_N && opB == ABLAS_OP_T;
-  if (opA == ABLAS_OP_P || opB == ABLAS_OP_P ||
+  if (opA == ABLAS_OP_P || opB == ABLAS_OP_P || ep ||
       (h->pack_to_tn && panel_ok && (nt || (double)M * N * K >= 34359738368.0))) {
     ablas_status st;
     ablas_buf wsA = ws, wsB = {ws.buffer, ws.offset + (opA != ABLAS_OP_P ? (VkDeviceSize)M * K * 2 : 0)};
@@ -384,13 +425,110 @@ ablas_status ablas_hgemm(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, abla
     compute_barrier(h, cmd);
   }
   char la = "NTR"[opA], lb = "NTC"[opB];  // packed: K-minor tiles, A 'R' (64 x 16 row-major), B 'C' (16 x 64 col-major)
-  int kernel = select_kernel(la, lb, M, N, K);
+  // with an epilogue: a kernel tuned for it at the nearest shape, else the epilogue variant of the plain choice
+  int kernel = ep ? select_kernel_ep(la, lb, M, N, K, "_pga"[ep]) : -1;
+  if (kernel < 0) {
+    kernel = select_kernel(la, lb, M, N, K);
+    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_kernels[kernel].name, "_pga"[ep], M, N, 0);
+  }
+  const char* force = getenv(ep ? "ABLAS_KERNEL_EP" : "ABLAS_KERNEL");  // benchmarking aid: kernel by name
+  if (force)
+    for (size_t i = 0; i < NKERNELS; ++i)
+      if (!strcmp(ablas_kernels[i].name, force) && ablas_kernels[i].la == la && ablas_kernels[i].lb == lb &&
+          M % ablas_kernels[i].bm == 0 && N % ablas_kernels[i].bn == 0)
+        kernel = (int)i;
   if (kernel < 0) return ABLAS_BAD_SHAPE;
   const ablas_kernel_t* kk = &ablas_kernels[kernel];
   VkPipeline p = get_pipeline(h, (uint32_t)kernel, M, N, K);
   if (!p) return ABLAS_VK_ERROR;
   h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
-  push(h, cmd, A, B, C);
+  push4(h, cmd, A, B, C, ep == ABLAS_EPI_RESIDUAL_RMS ? ws : (ablas_buf){0});
+  h->CmdDispatch(cmd, N / kk->bn, M / kk->bm, 1);
+  h->last = kk->name;
+  return ABLAS_OK;
+}
+
+// ---- Q4_0 weights ----
+
+size_t ablas_q4_0_size(uint32_t N, uint32_t K) { return (size_t)N * K / 2 + (size_t)N * K / 32 * 2; }
+
+// ggml block_q4_0 {fp16 d; uint8 qs[16]} (q[j] = qs[j] & 15, q[j + 16] = qs[j] >> 4), N rows of K/32 blocks ->
+// AdrenoBLAS layout (gen_q4.py): quants as uint2 ((p*(K/32) + kb)*2 + h)*64 + n%64 (p = n/64, h = 16-deep half;
+// word w, nibble j: low half q[16h + 8w + 2j], high half q[16h + 8w + 2j + 1]), then fp16 scales at
+// (p*(K/32) + kb)*64 + n%64.
+void ablas_q4_0_from_ggml(const void* src, uint32_t N, uint32_t K, void* dst) {
+  const uint8_t* s = src;
+  uint32_t KB = K / 32, *qd = dst;
+  uint16_t* sd = (uint16_t*)((uint8_t*)dst + (size_t)N * K / 2);
+  for (uint32_t n = 0; n < N; ++n)
+    for (uint32_t kb = 0; kb < KB; ++kb) {
+      const uint8_t* b = s + ((size_t)n * KB + kb) * 18;
+      uint8_t q[32];
+      for (int j = 0; j < 16; ++j) q[j] = b[2 + j] & 15, q[j + 16] = b[2 + j] >> 4;
+      size_t blk = (size_t)(n / 64) * KB + kb;
+      for (int hh = 0; hh < 2; ++hh) {
+        uint32_t w[2] = {0, 0};
+        for (int i = 0; i < 8; ++i)
+          w[i / 4] |= (uint32_t)q[16 * hh + 2 * i] << (4 * (i % 4)) | (uint32_t)q[16 * hh + 2 * i + 1] << (16 + 4 * (i % 4));
+        size_t idx = (blk * 2 + hh) * 64 + n % 64;
+        qd[2 * idx] = w[0], qd[2 * idx + 1] = w[1];
+      }
+      sd[blk * 64 + n % 64] = (uint16_t)(b[0] | b[1] << 8);
+    }
+}
+
+static int select_q4(uint32_t M, uint32_t N, uint32_t K, char ep) {
+  int best = -1;
+  double bestd = 1e30;
+  for (const ablas_q4_tune_t* t = ablas_q4_tuning; t->m; ++t) {
+    const ablas_q4_kernel_t* kk = &ablas_q4_kernels[t->kernel];
+    if (t->ep != ep || M % kk->bm || N % kk->bn || K % kk->kstep) continue;
+    double d = fabs(log((double)M / t->m)) + fabs(log((double)N / t->n)) + fabs(log((double)K / t->k));
+    if (d < bestd) bestd = d, best = t->kernel;
+  }
+  if (best >= 0 || ep) return best;
+  for (size_t i = 0; i < sizeof(ablas_q4_kernels) / sizeof(ablas_q4_kernels[0]); ++i) {
+    const ablas_q4_kernel_t* kk = &ablas_q4_kernels[i];
+    if (!kk->ep && M % kk->bm == 0 && N % kk->bn == 0 && K % kk->kstep == 0 &&
+        (best < 0 || kk->bm * kk->bn > ablas_q4_kernels[best].bm * ablas_q4_kernels[best].bn))
+      best = (int)i;  // untuned: the biggest tile that divides the shape
+  }
+  return best;
+}
+
+ablas_status ablas_hgemm_q4_0(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t N, uint32_t K,
+                              ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf ws) {
+  return ablas_hgemm_q4_0_ex(h, cmd, opA, M, N, K, A, W, C, ws, ABLAS_EPI_NONE);
+}
+
+ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t N, uint32_t K,
+                                 ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf ws, ablas_epilogue ep) {
+  if (h->a840) return ABLAS_UNSUPPORTED;
+  if (!M || !N || !K || M % 64 || N % 64 || K % 32 || opA == ABLAS_OP_T) return ABLAS_BAD_SHAPE;
+  if (ep == ABLAS_EPI_RESIDUAL_RMS && (opA != ABLAS_OP_P || !ws.buffer)) return ABLAS_BAD_SHAPE;
+  if (opA == ABLAS_OP_N) {
+    ablas_status st;
+    if (!ws.buffer) return ABLAS_BAD_SHAPE;
+    if ((st = ablas_pack_a(h, cmd, ABLAS_OP_N, M, K, A, ws))) return st;
+    A = ws;
+    compute_barrier(h, cmd);
+  }
+  int kernel = ep ? select_q4(M, N, K, "_pga"[ep]) : -1;
+  if (kernel < 0) {
+    kernel = select_q4(M, N, K, 0);
+    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_q4_kernels[kernel].name, "_pga"[ep], M, N, 1);
+  }
+  const char* force = getenv(ep ? "ABLAS_KERNEL_EP" : "ABLAS_KERNEL");
+  if (force)
+    for (size_t i = 0; i < sizeof(ablas_q4_kernels) / sizeof(ablas_q4_kernels[0]); ++i)
+      if (!strcmp(ablas_q4_kernels[i].name, force) && M % ablas_q4_kernels[i].bm == 0 && N % ablas_q4_kernels[i].bn == 0)
+        kernel = (int)i;
+  if (kernel < 0) return ABLAS_BAD_SHAPE;
+  const ablas_q4_kernel_t* kk = &ablas_q4_kernels[kernel];
+  VkPipeline p = get_pipeline(h, Q4_BASE + (uint32_t)kernel, M, N, K);
+  if (!p) return ABLAS_VK_ERROR;
+  h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+  push4(h, cmd, A, W, C, ep == ABLAS_EPI_RESIDUAL_RMS ? ws : (ablas_buf){0});
   h->CmdDispatch(cmd, N / kk->bn, M / kk->bm, 1);
   h->last = kk->name;
   return ABLAS_OK;

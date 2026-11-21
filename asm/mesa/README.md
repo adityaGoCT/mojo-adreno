@@ -303,6 +303,10 @@ remaining losses come from load-bound kernels where any layout change costs load
 
 ## ALU GEMM tuner with the compiler choice (`tune_alu.py`)
 
+(Merged into AdrenoBLAS as its Adreno 840 backend: `../../ablas/gen_alu.py`, `sweep_alu.py`,
+`ablas_kernels_840.h`; per-kernel bank-RA choice via `gen_alu.mark_nobankra`, which `turnip-ra-bank.patch`
+honours for shaders whose SPIR-V source name contains "nobankra". See `../../ablas/README.md`.)
+
 Because the bank-aware RA helps some kernels and hurts others depending on runtime behaviour, the choice is
 made by measurement. For one GEMM shape, `tune_alu.py` builds every `gen_gemm.py` configuration that divides
 it (operand paths ll/lg/gl/gg × workgroup tile, fp16 and fp32). It times each one under three compilers:

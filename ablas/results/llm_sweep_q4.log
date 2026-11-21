@@ -1,0 +1,166 @@
+q4 512x5120x3072 q4_w1x1_k32                           0.990 ms  16.27 TFLOP/s
+q4 512x5120x3072 q4_w1x2_k32                           1.010 ms  15.95 TFLOP/s
+q4 512x5120x3072 q4_w2x1_k32                           0.989 ms  16.28 TFLOP/s
+q4 512x5120x3072 q4_w2x2_k32                           1.004 ms  16.04 TFLOP/s
+q4 512x5120x3072 q4_w1x4_k32                           0.999 ms  16.13 TFLOP/s
+q4 512x5120x3072 q4_w4x1_k32                           1.014 ms  15.89 TFLOP/s
+q4 512x5120x3072 q4_w2x4_k32                           1.000 ms  16.10 TFLOP/s
+q4 512x5120x3072 q4_w4x2_k32                           0.999 ms  16.12 TFLOP/s
+BEST llm_q4_512x5120x3072 q4_w2x1_k32 16.28
+q4 512x3072x3072_ea q4_w1x1_k32_ea                        1.001 ms   9.65 TFLOP/s
+q4 512x3072x3072_ea q4_w1x2_k32_ea                        0.955 ms  10.12 TFLOP/s
+q4 512x3072x3072_ea q4_w2x1_k32_ea                        1.090 ms   8.87 TFLOP/s
+q4 512x3072x3072_ea q4_w2x2_k32_ea                        0.681 ms  14.18 TFLOP/s
+q4 512x3072x3072_ea q4_w1x4_k32_ea                        0.717 ms  13.48 TFLOP/s
+q4 512x3072x3072_ea q4_w4x1_k32_ea                        0.779 ms  12.41 TFLOP/s
+q4 512x3072x3072_ea q4_w2x4_k32_ea                        0.731 ms  13.22 TFLOP/s
+q4 512x3072x3072_ea q4_w4x2_k32_ea                        0.690 ms  14.00 TFLOP/s
+BEST llm_q4_512x3072x3072_ea q4_w2x2_k32_ea 14.18
+q4 512x16384x3072_eg q4_w1x1_k32_eg                        2.919 ms  17.66 TFLOP/s
+q4 512x16384x3072_eg q4_w1x2_k32_eg                        2.932 ms  17.58 TFLOP/s
+q4 512x16384x3072_eg q4_w2x1_k32_eg                        2.983 ms  17.28 TFLOP/s
+q4 512x16384x3072_eg q4_w2x2_k32_eg                        2.931 ms  17.58 TFLOP/s
+q4 512x16384x3072_eg q4_w1x4_k32_eg                        2.928 ms  17.60 TFLOP/s
+q4 512x16384x3072_eg q4_w4x1_k32_eg                        2.932 ms  17.58 TFLOP/s
+q4 512x16384x3072_eg q4_w2x4_k32_eg                        3.138 ms  16.42 TFLOP/s
+q4 512x16384x3072_eg q4_w4x2_k32_eg                        3.138 ms  16.42 TFLOP/s
+BEST llm_q4_512x16384x3072_eg q4_w1x1_k32_eg 17.66
+q4 512x3072x8192_ea q4_w1x1_k32_ea                        1.992 ms  12.94 TFLOP/s
+q4 512x3072x8192_ea q4_w1x2_k32_ea                        2.051 ms  12.56 TFLOP/s
+q4 512x3072x8192_ea q4_w2x1_k32_ea                        2.130 ms  12.10 TFLOP/s
+q4 512x3072x8192_ea q4_w2x2_k32_ea                        1.585 ms  16.25 TFLOP/s
+q4 512x3072x8192_ea q4_w1x4_k32_ea                        1.635 ms  15.76 TFLOP/s
+q4 512x3072x8192_ea q4_w4x1_k32_ea                        1.729 ms  14.90 TFLOP/s
+q4 512x3072x8192_ea q4_w2x4_k32_ea                        1.637 ms  15.74 TFLOP/s
+q4 512x3072x8192_ea q4_w4x2_k32_ea                        1.592 ms  16.18 TFLOP/s
+BEST llm_q4_512x3072x8192_ea q4_w2x2_k32_ea 16.25
+q4 512x3072x3072 q4_w1x1_k32                           0.661 ms  14.61 TFLOP/s
+q4 512x3072x3072 q4_w1x2_k32                           0.586 ms  16.50 TFLOP/s
+q4 512x3072x3072 q4_w2x1_k32                           0.659 ms  14.67 TFLOP/s
+q4 512x3072x3072 q4_w2x2_k32                           0.575 ms  16.80 TFLOP/s
+q4 512x3072x3072 q4_w1x4_k32                           0.582 ms  16.60 TFLOP/s
+q4 512x3072x3072 q4_w4x1_k32                           0.589 ms  16.42 TFLOP/s
+q4 512x3072x3072 q4_w2x4_k32                           0.576 ms  16.79 TFLOP/s
+q4 512x3072x3072 q4_w4x2_k32                           0.569 ms  16.98 TFLOP/s
+BEST llm_q4_512x3072x3072 q4_w4x2_k32 16.98
+q4 512x3072x8192 q4_w1x1_k32                           1.715 ms  15.03 TFLOP/s
+q4 512x3072x8192 q4_w1x2_k32                           1.670 ms  15.43 TFLOP/s
+q4 512x3072x8192 q4_w2x1_k32                           1.700 ms  15.16 TFLOP/s
+q4 512x3072x8192 q4_w2x2_k32                           1.480 ms  17.41 TFLOP/s
+q4 512x3072x8192 q4_w1x4_k32                           1.481 ms  17.40 TFLOP/s
+q4 512x3072x8192 q4_w4x1_k32                           1.492 ms  17.27 TFLOP/s
+q4 512x3072x8192 q4_w2x4_k32                           1.479 ms  17.42 TFLOP/s
+q4 512x3072x8192 q4_w4x2_k32                           1.473 ms  17.50 TFLOP/s
+BEST llm_q4_512x3072x8192 q4_w4x2_k32 17.50
+q4 1024x5120x3072 q4_w1x1_k32                           2.051 ms  15.70 TFLOP/s
+q4 1024x5120x3072 q4_w1x2_k32                           1.989 ms  16.20 TFLOP/s
+q4 1024x5120x3072 q4_w2x1_k32                           2.103 ms  15.32 TFLOP/s
+q4 1024x5120x3072 q4_w2x2_k32                           1.970 ms  16.35 TFLOP/s
+q4 1024x5120x3072 q4_w1x4_k32                           1.957 ms  16.46 TFLOP/s
+q4 1024x5120x3072 q4_w4x1_k32                           2.044 ms  15.76 TFLOP/s
+q4 1024x5120x3072 q4_w2x4_k32                           1.952 ms  16.50 TFLOP/s
+q4 1024x5120x3072 q4_w4x2_k32                           1.974 ms  16.31 TFLOP/s
+BEST llm_q4_1024x5120x3072 q4_w2x4_k32 16.50
+q4 1024x3072x3072_ea q4_w1x1_k32_ea                        1.988 ms   9.72 TFLOP/s
+q4 1024x3072x3072_ea q4_w1x2_k32_ea                        1.852 ms  10.44 TFLOP/s
+q4 1024x3072x3072_ea q4_w2x1_k32_ea                        2.393 ms   8.08 TFLOP/s
+q4 1024x3072x3072_ea q4_w2x2_k32_ea                        1.451 ms  13.32 TFLOP/s
+q4 1024x3072x3072_ea q4_w1x4_k32_ea                        1.345 ms  14.36 TFLOP/s
+q4 1024x3072x3072_ea q4_w4x1_k32_ea                        2.021 ms   9.56 TFLOP/s
+q4 1024x3072x3072_ea q4_w2x4_k32_ea                        1.405 ms  13.75 TFLOP/s
+q4 1024x3072x3072_ea q4_w4x2_k32_ea                        1.396 ms  13.84 TFLOP/s
+BEST llm_q4_1024x3072x3072_ea q4_w1x4_k32_ea 14.36
+q4 1024x16384x3072_eg q4_w1x1_k32_eg                        5.833 ms  17.67 TFLOP/s
+q4 1024x16384x3072_eg q4_w1x2_k32_eg                        5.854 ms  17.61 TFLOP/s
+q4 1024x16384x3072_eg q4_w2x1_k32_eg                        5.860 ms  17.59 TFLOP/s
+q4 1024x16384x3072_eg q4_w2x2_k32_eg                        5.849 ms  17.62 TFLOP/s
+q4 1024x16384x3072_eg q4_w1x4_k32_eg                        5.846 ms  17.63 TFLOP/s
+q4 1024x16384x3072_eg q4_w4x1_k32_eg                        6.852 ms  15.04 TFLOP/s
+q4 1024x16384x3072_eg q4_w2x4_k32_eg                        6.130 ms  16.82 TFLOP/s
+q4 1024x16384x3072_eg q4_w4x2_k32_eg                        6.130 ms  16.81 TFLOP/s
+BEST llm_q4_1024x16384x3072_eg q4_w1x1_k32_eg 17.67
+q4 1024x3072x8192_ea q4_w1x1_k32_ea                        3.960 ms  13.01 TFLOP/s
+q4 1024x3072x8192_ea q4_w1x2_k32_ea                        3.916 ms  13.16 TFLOP/s
+q4 1024x3072x8192_ea q4_w2x1_k32_ea                        5.289 ms   9.74 TFLOP/s
+q4 1024x3072x8192_ea q4_w2x2_k32_ea                        3.282 ms  15.71 TFLOP/s
+q4 1024x3072x8192_ea q4_w1x4_k32_ea                        3.267 ms  15.77 TFLOP/s
+q4 1024x3072x8192_ea q4_w4x1_k32_ea                        5.075 ms  10.16 TFLOP/s
+q4 1024x3072x8192_ea q4_w2x4_k32_ea                        3.220 ms  16.00 TFLOP/s
+q4 1024x3072x8192_ea q4_w4x2_k32_ea                        3.203 ms  16.09 TFLOP/s
+BEST llm_q4_1024x3072x8192_ea q4_w4x2_k32_ea 16.09
+q4 1024x3072x3072 q4_w1x1_k32                           1.279 ms  15.11 TFLOP/s
+q4 1024x3072x3072 q4_w1x2_k32                           1.166 ms  16.58 TFLOP/s
+q4 1024x3072x3072 q4_w2x1_k32                           1.267 ms  15.25 TFLOP/s
+q4 1024x3072x3072 q4_w2x2_k32                           1.150 ms  16.80 TFLOP/s
+q4 1024x3072x3072 q4_w1x4_k32                           1.141 ms  16.94 TFLOP/s
+q4 1024x3072x3072 q4_w4x1_k32                           1.200 ms  16.10 TFLOP/s
+q4 1024x3072x3072 q4_w2x4_k32                           1.134 ms  17.04 TFLOP/s
+q4 1024x3072x3072 q4_w4x2_k32                           1.145 ms  16.87 TFLOP/s
+BEST llm_q4_1024x3072x3072 q4_w2x4_k32 17.04
+q4 1024x3072x8192 q4_w1x1_k32                           3.365 ms  15.32 TFLOP/s
+q4 1024x3072x8192 q4_w1x2_k32                           3.203 ms  16.09 TFLOP/s
+q4 1024x3072x8192 q4_w2x1_k32                           3.336 ms  15.45 TFLOP/s
+q4 1024x3072x8192 q4_w2x2_k32                           2.957 ms  17.43 TFLOP/s
+q4 1024x3072x8192 q4_w1x4_k32                           2.942 ms  17.52 TFLOP/s
+q4 1024x3072x8192 q4_w4x1_k32                           3.006 ms  17.15 TFLOP/s
+q4 1024x3072x8192 q4_w2x4_k32                           2.939 ms  17.54 TFLOP/s
+q4 1024x3072x8192 q4_w4x2_k32                           2.953 ms  17.46 TFLOP/s
+BEST llm_q4_1024x3072x8192 q4_w2x4_k32 17.54
+q4 2048x5120x3072 q4_w1x1_k32                           4.876 ms  13.21 TFLOP/s
+q4 2048x5120x3072 q4_w1x2_k32                           3.814 ms  16.89 TFLOP/s
+q4 2048x5120x3072 q4_w2x1_k32                           6.338 ms  10.16 TFLOP/s
+q4 2048x5120x3072 q4_w2x2_k32                           3.796 ms  16.97 TFLOP/s
+q4 2048x5120x3072 q4_w1x4_k32                           3.773 ms  17.08 TFLOP/s
+q4 2048x5120x3072 q4_w4x1_k32                           4.796 ms  13.43 TFLOP/s
+q4 2048x5120x3072 q4_w2x4_k32                           3.760 ms  17.13 TFLOP/s
+q4 2048x5120x3072 q4_w4x2_k32                           3.814 ms  16.89 TFLOP/s
+BEST llm_q4_2048x5120x3072 q4_w2x4_k32 17.13
+q4 2048x3072x3072_ea q4_w1x1_k32_ea                        3.902 ms   9.91 TFLOP/s
+q4 2048x3072x3072_ea q4_w1x2_k32_ea                        3.247 ms  11.91 TFLOP/s
+q4 2048x3072x3072_ea q4_w2x1_k32_ea                        6.022 ms   6.42 TFLOP/s
+q4 2048x3072x3072_ea q4_w2x2_k32_ea                        3.046 ms  12.69 TFLOP/s
+q4 2048x3072x3072_ea q4_w1x4_k32_ea                        2.570 ms  15.04 TFLOP/s
+q4 2048x3072x3072_ea q4_w4x1_k32_ea                        5.490 ms   7.04 TFLOP/s
+q4 2048x3072x3072_ea q4_w2x4_k32_ea                        2.713 ms  14.25 TFLOP/s
+q4 2048x3072x3072_ea q4_w4x2_k32_ea                        2.724 ms  14.19 TFLOP/s
+BEST llm_q4_2048x3072x3072_ea q4_w1x4_k32_ea 15.04
+q4 2048x16384x3072_eg q4_w1x1_k32_eg                       11.644 ms  17.70 TFLOP/s
+q4 2048x16384x3072_eg q4_w1x2_k32_eg                       11.629 ms  17.73 TFLOP/s
+q4 2048x16384x3072_eg q4_w2x1_k32_eg                       14.143 ms  14.58 TFLOP/s
+q4 2048x16384x3072_eg q4_w2x2_k32_eg                       11.899 ms  17.33 TFLOP/s
+q4 2048x16384x3072_eg q4_w1x4_k32_eg                       11.632 ms  17.72 TFLOP/s
+q4 2048x16384x3072_eg q4_w4x1_k32_eg                       22.379 ms   9.21 TFLOP/s
+q4 2048x16384x3072_eg q4_w2x4_k32_eg                       12.255 ms  16.82 TFLOP/s
+q4 2048x16384x3072_eg q4_w4x2_k32_eg                       12.256 ms  16.82 TFLOP/s
+BEST llm_q4_2048x16384x3072_eg q4_w1x2_k32_eg 17.73
+q4 2048x3072x8192_ea q4_w1x1_k32_ea                        9.842 ms  10.47 TFLOP/s
+q4 2048x3072x8192_ea q4_w1x2_k32_ea                        9.265 ms  11.13 TFLOP/s
+q4 2048x3072x8192_ea q4_w2x1_k32_ea                       14.580 ms   7.07 TFLOP/s
+q4 2048x3072x8192_ea q4_w2x2_k32_ea                        6.760 ms  15.25 TFLOP/s
+q4 2048x3072x8192_ea q4_w1x4_k32_ea                        6.449 ms  15.98 TFLOP/s
+q4 2048x3072x8192_ea q4_w4x1_k32_ea                       15.535 ms   6.64 TFLOP/s
+q4 2048x3072x8192_ea q4_w2x4_k32_ea                        6.351 ms  16.23 TFLOP/s
+q4 2048x3072x8192_ea q4_w4x2_k32_ea                        6.349 ms  16.23 TFLOP/s
+BEST llm_q4_2048x3072x8192_ea q4_w4x2_k32_ea 16.23
+q4 2048x3072x3072 q4_w1x1_k32                           2.674 ms  14.45 TFLOP/s
+q4 2048x3072x3072 q4_w1x2_k32                           2.280 ms  16.95 TFLOP/s
+q4 2048x3072x3072 q4_w2x1_k32                           3.783 ms  10.22 TFLOP/s
+q4 2048x3072x3072 q4_w2x2_k32                           2.270 ms  17.03 TFLOP/s
+q4 2048x3072x3072 q4_w1x4_k32                           2.250 ms  17.18 TFLOP/s
+q4 2048x3072x3072 q4_w4x1_k32                           2.983 ms  12.96 TFLOP/s
+q4 2048x3072x3072 q4_w2x4_k32                           2.239 ms  17.27 TFLOP/s
+q4 2048x3072x3072 q4_w4x2_k32                           2.264 ms  17.07 TFLOP/s
+BEST llm_q4_2048x3072x3072 q4_w2x4_k32 17.27
+q4 2048x3072x8192 q4_w1x1_k32                           6.261 ms  16.46 TFLOP/s
+q4 2048x3072x8192 q4_w1x2_k32                           6.114 ms  16.86 TFLOP/s
+q4 2048x3072x8192 q4_w2x1_k32                          10.864 ms   9.49 TFLOP/s
+q4 2048x3072x8192 q4_w2x2_k32                           5.884 ms  17.52 TFLOP/s
+q4 2048x3072x8192 q4_w1x4_k32                           5.854 ms  17.61 TFLOP/s
+q4 2048x3072x8192 q4_w4x1_k32                           8.741 ms  11.79 TFLOP/s
+q4 2048x3072x8192 q4_w2x4_k32                           5.851 ms  17.62 TFLOP/s
+q4 2048x3072x8192 q4_w4x2_k32                           5.894 ms  17.49 TFLOP/s
+BEST llm_q4_2048x3072x8192 q4_w2x4_k32 17.62
+q4 64x128256x3072 q4_w1x1_k32                           3.347 ms  15.07 TFLOP/s
+q4 64x128256x3072 q4_w1x2_k32                           3.382 ms  14.91 TFLOP/s
+q4 64x128256x3072 q4_w1x4_k32                           3.364 ms  14.99 TFLOP/s
+BEST llm_q4_64x128256x3072 q4_w1x1_k32 15.07

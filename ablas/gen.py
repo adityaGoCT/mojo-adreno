@@ -15,6 +15,7 @@ Workgroup tile: BM = 64*tm*wm, BN = nt*tn*wn.
 Avoids the 850 driver bugs found in asm/README.md: no adds of two cooperative matrices.
 """
 import itertools, json, pathlib, re, subprocess, sys
+import epilogue
 
 HERE = pathlib.Path(__file__).resolve().parent
 KT = 16  # K of one fp16 multiply on the 850
@@ -27,7 +28,8 @@ def name(c):
     return (f"g{c['la']}{c['lb']}_w{c['wm']}x{c['wn']}_t{c['tm']}x{c['tn']}_n{c['nt']}_{c['acc']}_k{c['ku']}"
             + ("_p1" if c.get("pf") else "") + (f"_s{c['sw']}" if c.get("sw") else "")
             + (f"_sh{'a' if c.get('sa') else ''}{'b' if c.get('sb') else ''}{c['kc']}" if c.get("sa") or c.get("sb") else "")
-            + ("_d2" if c.get("dual") else "") + (f"_ps{c['ps']}" if c.get("ps") else ""))
+            + ("_d2" if c.get("dual") else "") + (f"_ps{c['ps']}" if c.get("ps") else "")
+            + (f"_e{c['ep']}" if c.get("ep") else ""))
 
 def tile(c):
     return 64 * c["tm"] * c["wm"], c["nt"] * c["tn"] * c["wn"]
@@ -84,7 +86,8 @@ def glsl(c, M, N, K, spec=False):
          "layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };",
          "layout(std430, binding = 0) readonly buffer A4 { uvec4 a4[]; };",
          "layout(std430, binding = 1) readonly buffer B4 { uvec4 b4[]; };",
-         ] + staged_decls(c, M, N, K) + [
+         "layout(std430, binding = 2) writeonly buffer C4 { uvec4 c4[]; };",
+         ] + staged_decls(c, M, N, K) + (epilogue.decls(c["wm"] * c["wn"], c["ep"]) if c.get("ep") else []) + [
          "void main() {",
          f"  uint sg = gl_SubgroupID;",
          ]
@@ -152,7 +155,11 @@ def glsl(c, M, N, K, spec=False):
         for i in range(tm):
             for j in range(tn):
                 L.append(f"  for (int e = 0; e < c{i}{j}.length(); ++e) c{i}{j}[e] += d{i}{j}[e];")
-    for i in range(tm):
+    if c.get("ep"):  # fused epilogue (epilogue.py): one 64 x 64 f16 tile per subgroup
+        assert tm == tn == 1 and nt == 64 and acc == "float16_t"
+        L += epilogue.body(c["ep"], c["wm"] * c["wn"], U(N), acc="c00")
+    else:
+     for i in range(tm):
         for j in range(tn):
             src = f"c{i}{j}" if acc == "float16_t" else f"{H_}(c{i}{j})"
             L.append(f"  coopMatStore({src}, c, (row0 + {64 * i}u) * {U(N)} + col0 + {nt * j}u, {N}, {RM});")
@@ -266,6 +273,9 @@ if __name__ == "__main__":
 
 def parse(n):
     """Inverse of name(): config dict from a kernel name."""
+    ep = None
+    if (e := re.search(r"_e([pga])$", n)):
+        ep, n = e.group(1), n[:e.start()]
     m = re.match(r"g([NTPR])([NTPQC])_w(\d+)x(\d+)_t(\d+)x(\d+)_n(\d+)_(f16|f32)_k(\d+)(.*)$", n)
     la, lb, wm, wn, tm, tn, nt, acc, ku, rest = m.groups()
     c = dict(la=la, lb=lb, wm=int(wm), wn=int(wn), tm=int(tm), tn=int(tn), nt=int(nt), acc=acc, ku=int(ku),
@@ -276,5 +286,7 @@ def parse(n):
         c["ps"] = int(s.group(1))
     if (s := re.search(r"_sh(a?)(b?)(\d+)", rest)):
         c.update(sa=int(bool(s.group(1))), sb=int(bool(s.group(2))), kc=int(s.group(3)))
-    assert name(c) == n, (name(c), n)
+    if ep:
+        c["ep"] = ep
+    assert name(c) == n + (f"_e{ep}" if ep else ""), (name(c), n)
     return c

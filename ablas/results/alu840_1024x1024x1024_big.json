@@ -1,0 +1,170 @@
+[
+ {
+  "name": "alu_lg_128x128x16_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 3.0250296138215678,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_128x64x16_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 2.5337814312227964,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_128x128x16_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 2.4261897718516914,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gl_64x256x16_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 2.3114535391610036,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_128x64x16_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 2.071834745922145,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_128x64_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.9652769281595441,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_128x128_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.9468315114417452,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_ll_64x256x8_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.902534264039215,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gl_64x256x16_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.8943777334160192,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_ll_64x256x8_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.8837856775057176,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gl_128x128x16_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.7974891442547292,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_128x128_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.791731729620409,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_64x128_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.7666024032556735,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_ll_128x64x8_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.751392274078871,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_ll_128x64x8_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.745886179549196,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_128x128_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.7299415061843362,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_128x64_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.7171091322116139,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gl_128x128x16_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.7004882144777382,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_64x128_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.5600692232866533,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_gg_128x128_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.5127833086073272,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_64x256x16_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.4950123973846308,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_64x256x16_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.4854878649070793,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_128x128x16_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.351754460351591,
+  "ok": true,
+  "err": 0.0113
+ },
+ {
+  "name": "alu_lg_128x128x16_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.297055162862446,
+  "ok": true,
+  "err": 0.0113
+ }
+]

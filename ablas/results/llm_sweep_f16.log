@@ -1,0 +1,171 @@
+f16 512x5120x3072 gRC_w1x1_t1x1_n64_f16_k1              1.052 ms  15.31 TFLOP/s
+f16 512x5120x3072 gRC_w1x2_t1x1_n64_f16_k1              1.050 ms  15.34 TFLOP/s
+f16 512x5120x3072 gRC_w2x1_t1x1_n64_f16_k1              1.050 ms  15.34 TFLOP/s
+f16 512x5120x3072 gRC_w2x2_t1x1_n64_f16_k1              1.028 ms  15.67 TFLOP/s
+f16 512x5120x3072 gRC_w1x4_t1x1_n64_f16_k1              1.187 ms  13.57 TFLOP/s
+f16 512x5120x3072 gRC_w4x1_t1x1_n64_f16_k1              1.044 ms  15.43 TFLOP/s
+f16 512x5120x3072 gRC_w2x4_t1x1_n64_f16_k1              1.168 ms  13.79 TFLOP/s
+f16 512x5120x3072 gRC_w4x2_t1x1_n64_f16_k1              1.022 ms  15.77 TFLOP/s
+BEST llm_f16_512x5120x3072 gRC_w4x2_t1x1_n64_f16_k1 15.77
+f16 512x3072x3072 gRC_w1x1_t1x1_n64_f16_k1              0.604 ms  16.01 TFLOP/s
+f16 512x3072x3072 gRC_w1x2_t1x1_n64_f16_k1              0.602 ms  16.07 TFLOP/s
+f16 512x3072x3072 gRC_w2x1_t1x1_n64_f16_k1              0.600 ms  16.11 TFLOP/s
+f16 512x3072x3072 gRC_w2x2_t1x1_n64_f16_k1              0.585 ms  16.53 TFLOP/s
+f16 512x3072x3072 gRC_w1x4_t1x1_n64_f16_k1              0.682 ms  14.17 TFLOP/s
+f16 512x3072x3072 gRC_w4x1_t1x1_n64_f16_k1              0.594 ms  16.27 TFLOP/s
+f16 512x3072x3072 gRC_w2x4_t1x1_n64_f16_k1              0.678 ms  14.26 TFLOP/s
+f16 512x3072x3072 gRC_w4x2_t1x1_n64_f16_k1              0.579 ms  16.70 TFLOP/s
+BEST llm_f16_512x3072x3072 gRC_w4x2_t1x1_n64_f16_k1 16.70
+f16 512x16384x3072_eg gRC_w1x1_t1x1_n64_f16_k1_eg           3.038 ms  16.97 TFLOP/s
+f16 512x16384x3072_eg gRC_w1x2_t1x1_n64_f16_k1_eg           5.671 ms   9.09 TFLOP/s
+f16 512x16384x3072_eg gRC_w2x1_t1x1_n64_f16_k1_eg           3.037 ms  16.97 TFLOP/s
+f16 512x16384x3072_eg gRC_w2x2_t1x1_n64_f16_k1_eg           4.367 ms  11.80 TFLOP/s
+f16 512x16384x3072_eg gRC_w1x4_t1x1_n64_f16_k1_eg           6.838 ms   7.54 TFLOP/s
+f16 512x16384x3072_eg gRC_w4x1_t1x1_n64_f16_k1_eg           3.046 ms  16.92 TFLOP/s
+f16 512x16384x3072_eg gRC_w2x4_t1x1_n64_f16_k1_eg           3.574 ms  14.42 TFLOP/s
+f16 512x16384x3072_eg gRC_w4x2_t1x1_n64_f16_k1_eg           3.167 ms  16.28 TFLOP/s
+BEST llm_f16_512x16384x3072_eg gRC_w2x1_t1x1_n64_f16_k1_eg 16.97
+f16 512x3072x8192 gRC_w1x1_t1x1_n64_f16_k1              1.512 ms  17.04 TFLOP/s
+f16 512x3072x8192 gRC_w1x2_t1x1_n64_f16_k1              1.718 ms  15.00 TFLOP/s
+f16 512x3072x8192 gRC_w2x1_t1x1_n64_f16_k1              1.706 ms  15.11 TFLOP/s
+f16 512x3072x8192 gRC_w2x2_t1x1_n64_f16_k1              1.492 ms  17.28 TFLOP/s
+f16 512x3072x8192 gRC_w1x4_t1x1_n64_f16_k1              1.716 ms  15.01 TFLOP/s
+f16 512x3072x8192 gRC_w4x1_t1x1_n64_f16_k1              1.503 ms  17.14 TFLOP/s
+f16 512x3072x8192 gRC_w2x4_t1x1_n64_f16_k1              1.715 ms  15.03 TFLOP/s
+f16 512x3072x8192 gRC_w4x2_t1x1_n64_f16_k1              1.488 ms  17.32 TFLOP/s
+BEST llm_f16_512x3072x8192 gRC_w4x2_t1x1_n64_f16_k1 17.32
+f16 1024x5120x3072 gRC_w1x1_t1x1_n64_f16_k1              2.312 ms  13.93 TFLOP/s
+f16 1024x5120x3072 gRC_w1x2_t1x1_n64_f16_k1              2.085 ms  15.45 TFLOP/s
+f16 1024x5120x3072 gRC_w2x1_t1x1_n64_f16_k1              2.263 ms  14.24 TFLOP/s
+f16 1024x5120x3072 gRC_w2x2_t1x1_n64_f16_k1              2.046 ms  15.74 TFLOP/s
+f16 1024x5120x3072 gRC_w1x4_t1x1_n64_f16_k1              2.378 ms  13.55 TFLOP/s
+f16 1024x5120x3072 gRC_w4x1_t1x1_n64_f16_k1              2.240 ms  14.38 TFLOP/s
+f16 1024x5120x3072 gRC_w2x4_t1x1_n64_f16_k1              2.167 ms  14.87 TFLOP/s
+f16 1024x5120x3072 gRC_w4x2_t1x1_n64_f16_k1              2.052 ms  15.70 TFLOP/s
+BEST llm_f16_1024x5120x3072 gRC_w2x2_t1x1_n64_f16_k1 15.74
+f16 1024x3072x3072 gRC_w1x1_t1x1_n64_f16_k1              1.288 ms  15.01 TFLOP/s
+f16 1024x3072x3072 gRC_w1x2_t1x1_n64_f16_k1              1.198 ms  16.13 TFLOP/s
+f16 1024x3072x3072 gRC_w2x1_t1x1_n64_f16_k1              1.271 ms  15.20 TFLOP/s
+f16 1024x3072x3072 gRC_w2x2_t1x1_n64_f16_k1              1.175 ms  16.44 TFLOP/s
+f16 1024x3072x3072 gRC_w1x4_t1x1_n64_f16_k1              1.355 ms  14.27 TFLOP/s
+f16 1024x3072x3072 gRC_w4x1_t1x1_n64_f16_k1              1.230 ms  15.71 TFLOP/s
+f16 1024x3072x3072 gRC_w2x4_t1x1_n64_f16_k1              1.253 ms  15.43 TFLOP/s
+f16 1024x3072x3072 gRC_w4x2_t1x1_n64_f16_k1              1.167 ms  16.57 TFLOP/s
+BEST llm_f16_1024x3072x3072 gRC_w4x2_t1x1_n64_f16_k1 16.57
+f16 1024x16384x3072_eg gRC_w1x1_t1x1_n64_f16_k1_eg           6.225 ms  16.56 TFLOP/s
+f16 1024x16384x3072_eg gRC_w1x2_t1x1_n64_f16_k1_eg           7.945 ms  12.97 TFLOP/s
+f16 1024x16384x3072_eg gRC_w2x1_t1x1_n64_f16_k1_eg           6.115 ms  16.86 TFLOP/s
+f16 1024x16384x3072_eg gRC_w2x2_t1x1_n64_f16_k1_eg          11.965 ms   8.62 TFLOP/s
+f16 1024x16384x3072_eg gRC_w1x4_t1x1_n64_f16_k1_eg          14.747 ms   6.99 TFLOP/s
+f16 512x3072x3072_ea gRC_w1x1_t1x1_n64_f16_k1_ea           1.042 ms   9.27 TFLOP/s
+f16 512x3072x3072_ea gRC_w1x2_t1x1_n64_f16_k1_ea           1.153 ms   8.38 TFLOP/s
+f16 512x3072x3072_ea gRC_w2x1_t1x1_n64_f16_k1_ea           1.184 ms   8.16 TFLOP/s
+f16 512x3072x3072_ea gRC_w2x2_t1x1_n64_f16_k1_ea           0.759 ms  12.74 TFLOP/s
+f16 512x3072x3072_ea gRC_w1x4_t1x1_n64_f16_k1_ea           1.044 ms   9.26 TFLOP/s
+f16 512x3072x3072_ea gRC_w4x1_t1x1_n64_f16_k1_ea           0.860 ms  11.24 TFLOP/s
+f16 512x3072x3072_ea gRC_w2x4_t1x1_n64_f16_k1_ea           0.841 ms  11.49 TFLOP/s
+f16 512x3072x3072_ea gRC_w4x2_t1x1_n64_f16_k1_ea           0.706 ms  13.68 TFLOP/s
+BEST llm_f16_512x3072x3072_ea gRC_w4x2_t1x1_n64_f16_k1_ea 13.68
+f16 512x3072x8192_ea gRC_w1x1_t1x1_n64_f16_k1_ea           2.043 ms  12.61 TFLOP/s
+f16 512x3072x8192_ea gRC_w1x2_t1x1_n64_f16_k1_ea           2.671 ms   9.65 TFLOP/s
+f16 512x3072x8192_ea gRC_w2x1_t1x1_n64_f16_k1_ea           2.523 ms  10.21 TFLOP/s
+f16 512x3072x8192_ea gRC_w2x2_t1x1_n64_f16_k1_ea           1.704 ms  15.12 TFLOP/s
+f16 512x3072x8192_ea gRC_w1x4_t1x1_n64_f16_k1_ea           2.929 ms   8.80 TFLOP/s
+f16 512x3072x8192_ea gRC_w4x1_t1x1_n64_f16_k1_ea           1.812 ms  14.22 TFLOP/s
+f16 512x3072x8192_ea gRC_w2x4_t1x1_n64_f16_k1_ea           1.917 ms  13.44 TFLOP/s
+f16 512x3072x8192_ea gRC_w4x2_t1x1_n64_f16_k1_ea           1.623 ms  15.88 TFLOP/s
+BEST llm_f16_512x3072x8192_ea gRC_w4x2_t1x1_n64_f16_k1_ea 15.88
+f16 1024x3072x3072_ea gRC_w1x1_t1x1_n64_f16_k1_ea           2.341 ms   8.25 TFLOP/s
+f16 1024x3072x3072_ea gRC_w1x2_t1x1_n64_f16_k1_ea           2.749 ms   7.03 TFLOP/s
+f16 1024x3072x3072_ea gRC_w2x1_t1x1_n64_f16_k1_ea           2.763 ms   6.99 TFLOP/s
+f16 1024x3072x3072_ea gRC_w2x2_t1x1_n64_f16_k1_ea           1.663 ms  11.62 TFLOP/s
+f16 1024x3072x3072_ea gRC_w1x4_t1x1_n64_f16_k1_ea           2.192 ms   8.82 TFLOP/s
+f16 1024x3072x3072_ea gRC_w4x1_t1x1_n64_f16_k1_ea           2.414 ms   8.01 TFLOP/s
+f16 1024x3072x3072_ea gRC_w2x4_t1x1_n64_f16_k1_ea           1.727 ms  11.19 TFLOP/s
+f16 1024x3072x3072_ea gRC_w4x2_t1x1_n64_f16_k1_ea           1.458 ms  13.25 TFLOP/s
+BEST llm_f16_1024x3072x3072_ea gRC_w4x2_t1x1_n64_f16_k1_ea 13.25
+f16 1024x16384x3072_eg gRC_w1x1_t1x1_n64_f16_k1_eg           6.286 ms  16.40 TFLOP/s
+f16 1024x16384x3072_eg gRC_w1x2_t1x1_n64_f16_k1_eg           7.810 ms  13.20 TFLOP/s
+f16 1024x16384x3072_eg gRC_w2x1_t1x1_n64_f16_k1_eg           5.997 ms  17.19 TFLOP/s
+f16 1024x16384x3072_eg gRC_w2x2_t1x1_n64_f16_k1_eg          13.049 ms   7.90 TFLOP/s
+f16 1024x16384x3072_eg gRC_w1x4_t1x1_n64_f16_k1_eg          15.266 ms   6.75 TFLOP/s
+f16 1024x16384x3072_eg gRC_w4x1_t1x1_n64_f16_k1_eg          13.088 ms   7.88 TFLOP/s
+f16 1024x16384x3072_eg gRC_w2x4_t1x1_n64_f16_k1_eg           6.555 ms  15.73 TFLOP/s
+f16 1024x16384x3072_eg gRC_w4x2_t1x1_n64_f16_k1_eg           6.138 ms  16.79 TFLOP/s
+BEST llm_f16_1024x16384x3072_eg gRC_w2x1_t1x1_n64_f16_k1_eg 17.19
+f16 1024x3072x8192_ea gRC_w1x1_t1x1_n64_f16_k1_ea           4.699 ms  10.97 TFLOP/s
+f16 1024x3072x8192_ea gRC_w1x2_t1x1_n64_f16_k1_ea           7.751 ms   6.65 TFLOP/s
+f16 1024x3072x8192_ea gRC_w2x1_t1x1_n64_f16_k1_ea           7.488 ms   6.88 TFLOP/s
+f16 1024x3072x8192_ea gRC_w2x2_t1x1_n64_f16_k1_ea           3.507 ms  14.70 TFLOP/s
+f16 1024x3072x8192_ea gRC_w1x4_t1x1_n64_f16_k1_ea           7.248 ms   7.11 TFLOP/s
+f16 1024x3072x8192_ea gRC_w4x1_t1x1_n64_f16_k1_ea           6.635 ms   7.77 TFLOP/s
+f16 1024x3072x8192_ea gRC_w2x4_t1x1_n64_f16_k1_ea           4.123 ms  12.50 TFLOP/s
+f16 1024x3072x8192_ea gRC_w4x2_t1x1_n64_f16_k1_ea           3.272 ms  15.75 TFLOP/s
+BEST llm_f16_1024x3072x8192_ea gRC_w4x2_t1x1_n64_f16_k1_ea 15.75
+f16 1024x3072x8192 gRC_w1x1_t1x1_n64_f16_k1              3.268 ms  15.77 TFLOP/s
+f16 1024x3072x8192 gRC_w1x2_t1x1_n64_f16_k1              3.725 ms  13.84 TFLOP/s
+f16 1024x3072x8192 gRC_w2x1_t1x1_n64_f16_k1              3.670 ms  14.04 TFLOP/s
+f16 1024x3072x8192 gRC_w2x2_t1x1_n64_f16_k1              2.984 ms  17.27 TFLOP/s
+f16 1024x3072x8192 gRC_w1x4_t1x1_n64_f16_k1              4.154 ms  12.41 TFLOP/s
+f16 1024x3072x8192 gRC_w4x1_t1x1_n64_f16_k1              3.041 ms  16.95 TFLOP/s
+f16 1024x3072x8192 gRC_w2x4_t1x1_n64_f16_k1              3.228 ms  15.96 TFLOP/s
+f16 1024x3072x8192 gRC_w4x2_t1x1_n64_f16_k1              2.975 ms  17.32 TFLOP/s
+BEST llm_f16_1024x3072x8192 gRC_w4x2_t1x1_n64_f16_k1 17.32
+f16 2048x5120x3072 gRC_w1x1_t1x1_n64_f16_k1              5.010 ms  12.86 TFLOP/s
+f16 2048x5120x3072 gRC_w1x2_t1x1_n64_f16_k1              4.005 ms  16.08 TFLOP/s
+f16 2048x5120x3072 gRC_w2x1_t1x1_n64_f16_k1              5.298 ms  12.16 TFLOP/s
+f16 2048x5120x3072 gRC_w2x2_t1x1_n64_f16_k1              3.891 ms  16.56 TFLOP/s
+f16 2048x5120x3072 gRC_w1x4_t1x1_n64_f16_k1              6.266 ms  10.28 TFLOP/s
+f16 2048x5120x3072 gRC_w4x1_t1x1_n64_f16_k1              5.364 ms  12.01 TFLOP/s
+f16 2048x5120x3072 gRC_w2x4_t1x1_n64_f16_k1              4.139 ms  15.57 TFLOP/s
+f16 2048x5120x3072 gRC_w4x2_t1x1_n64_f16_k1              3.901 ms  16.51 TFLOP/s
+BEST llm_f16_2048x5120x3072 gRC_w2x2_t1x1_n64_f16_k1 16.56
+f16 2048x3072x3072_ea gRC_w1x1_t1x1_n64_f16_k1_ea           4.549 ms   8.50 TFLOP/s
+f16 2048x3072x3072_ea gRC_w1x2_t1x1_n64_f16_k1_ea           6.016 ms   6.43 TFLOP/s
+f16 2048x3072x3072_ea gRC_w2x1_t1x1_n64_f16_k1_ea           6.690 ms   5.78 TFLOP/s
+f16 2048x3072x3072_ea gRC_w2x2_t1x1_n64_f16_k1_ea           3.600 ms  10.74 TFLOP/s
+f16 2048x3072x3072_ea gRC_w1x4_t1x1_n64_f16_k1_ea           4.902 ms   7.89 TFLOP/s
+f16 2048x3072x3072_ea gRC_w4x1_t1x1_n64_f16_k1_ea           6.198 ms   6.24 TFLOP/s
+f16 2048x3072x3072_ea gRC_w2x4_t1x1_n64_f16_k1_ea           3.826 ms  10.10 TFLOP/s
+f16 2048x3072x3072_ea gRC_w4x2_t1x1_n64_f16_k1_ea           3.048 ms  12.68 TFLOP/s
+BEST llm_f16_2048x3072x3072_ea gRC_w4x2_t1x1_n64_f16_k1_ea 12.68
+f16 2048x16384x3072_eg gRC_w1x1_t1x1_n64_f16_k1_eg          12.532 ms  16.45 TFLOP/s
+f16 2048x16384x3072_eg gRC_w1x2_t1x1_n64_f16_k1_eg          24.726 ms   8.34 TFLOP/s
+f16 2048x16384x3072_eg gRC_w2x1_t1x1_n64_f16_k1_eg          24.131 ms   8.54 TFLOP/s
+f16 2048x16384x3072_eg gRC_w2x2_t1x1_n64_f16_k1_eg          27.623 ms   7.46 TFLOP/s
+f16 2048x16384x3072_eg gRC_w1x4_t1x1_n64_f16_k1_eg          32.805 ms   6.28 TFLOP/s
+f16 2048x16384x3072_eg gRC_w4x1_t1x1_n64_f16_k1_eg          32.024 ms   6.44 TFLOP/s
+f16 2048x16384x3072_eg gRC_w2x4_t1x1_n64_f16_k1_eg          12.691 ms  16.24 TFLOP/s
+f16 2048x16384x3072_eg gRC_w4x2_t1x1_n64_f16_k1_eg          12.263 ms  16.81 TFLOP/s
+BEST llm_f16_2048x16384x3072_eg gRC_w4x2_t1x1_n64_f16_k1_eg 16.81
+f16 2048x3072x8192_ea gRC_w1x1_t1x1_n64_f16_k1_ea          10.306 ms  10.00 TFLOP/s
+f16 2048x3072x8192_ea gRC_w1x2_t1x1_n64_f16_k1_ea          18.878 ms   5.46 TFLOP/s
+f16 2048x3072x8192_ea gRC_w2x1_t1x1_n64_f16_k1_ea          17.484 ms   5.90 TFLOP/s
+f16 2048x3072x8192_ea gRC_w2x2_t1x1_n64_f16_k1_ea           7.492 ms  13.76 TFLOP/s
+f16 2048x3072x8192_ea gRC_w1x4_t1x1_n64_f16_k1_ea          18.787 ms   5.49 TFLOP/s
+f16 2048x3072x8192_ea gRC_w4x1_t1x1_n64_f16_k1_ea          18.827 ms   5.48 TFLOP/s
+f16 2048x3072x8192_ea gRC_w2x4_t1x1_n64_f16_k1_ea           8.742 ms  11.79 TFLOP/s
+f16 2048x3072x8192_ea gRC_w4x2_t1x1_n64_f16_k1_ea           6.594 ms  15.63 TFLOP/s
+BEST llm_f16_2048x3072x8192_ea gRC_w4x2_t1x1_n64_f16_k1_ea 15.63
+f16 2048x3072x3072 gRC_w1x1_t1x1_n64_f16_k1              2.599 ms  14.87 TFLOP/s
+f16 2048x3072x3072 gRC_w1x2_t1x1_n64_f16_k1              2.349 ms  16.46 TFLOP/s
+f16 2048x3072x3072 gRC_w2x1_t1x1_n64_f16_k1              2.998 ms  12.89 TFLOP/s
+f16 2048x3072x3072 gRC_w2x2_t1x1_n64_f16_k1              2.316 ms  16.69 TFLOP/s
+f16 2048x3072x3072 gRC_w1x4_t1x1_n64_f16_k1              3.089 ms  12.51 TFLOP/s
+f16 2048x3072x3072 gRC_w4x1_t1x1_n64_f16_k1              3.006 ms  12.86 TFLOP/s
+f16 2048x3072x3072 gRC_w2x4_t1x1_n64_f16_k1              2.395 ms  16.14 TFLOP/s
+f16 2048x3072x3072 gRC_w4x2_t1x1_n64_f16_k1              2.326 ms  16.62 TFLOP/s
+BEST llm_f16_2048x3072x3072 gRC_w2x2_t1x1_n64_f16_k1 16.69
+f16 2048x3072x8192 gRC_w1x1_t1x1_n64_f16_k1              6.969 ms  14.79 TFLOP/s
+f16 2048x3072x8192 gRC_w1x2_t1x1_n64_f16_k1              8.918 ms  11.56 TFLOP/s
+f16 2048x3072x8192 gRC_w2x1_t1x1_n64_f16_k1             11.703 ms   8.81 TFLOP/s
+f16 2048x3072x8192 gRC_w2x2_t1x1_n64_f16_k1              5.921 ms  17.41 TFLOP/s
+f16 2048x3072x8192 gRC_w1x4_t1x1_n64_f16_k1              8.758 ms  11.77 TFLOP/s
+f16 2048x3072x8192 gRC_w4x1_t1x1_n64_f16_k1              7.276 ms  14.17 TFLOP/s
+f16 2048x3072x8192 gRC_w2x4_t1x1_n64_f16_k1              6.149 ms  16.76 TFLOP/s
+f16 2048x3072x8192 gRC_w4x2_t1x1_n64_f16_k1              5.933 ms  17.37 TFLOP/s
+BEST llm_f16_2048x3072x8192 gRC_w2x2_t1x1_n64_f16_k1 17.41
+f16 64x128256x3072 gRC_w1x1_t1x1_n64_f16_k1             10.504 ms   4.80 TFLOP/s
+f16 64x128256x3072 gRC_w1x2_t1x1_n64_f16_k1             10.512 ms   4.80 TFLOP/s
+f16 64x128256x3072 gRC_w1x4_t1x1_n64_f16_k1             10.613 ms   4.75 TFLOP/s
+BEST llm_f16_64x128256x3072 gRC_w1x1_t1x1_n64_f16_k1 4.80

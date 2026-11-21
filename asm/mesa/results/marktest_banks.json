@@ -1,0 +1,26 @@
+{
+ "alu840_2048x2048x2048_alu_gg_128x128": {
+  "tflops": 3.173777302959672,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 22,
+  "loop_mads": 256,
+  "hash": "aaf9437b596847fa2fae63adf11c3e6691e670d51574bf8632e3b9a95cbb5f97",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ },
+ "mark_gg128": {
+  "tflops": 3.3203672810294838,
+  "ok": true,
+  "err": 0.01496,
+  "loop_conflicts": 128,
+  "loop_mads": 256,
+  "hash": "71722f6082a37ecd5c983d3bacb192704522de5bf0bf8a36341c8c27fd520b8f",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 16 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ }
+}

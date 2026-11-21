@@ -1,0 +1,50 @@
+[
+ {
+  "name": "gRC_w2x1_t1x1_n64_f16_k1_eg",
+  "ms": 3.0371,
+  "tflops": 16.97000676698166,
+  "ok": true
+ },
+ {
+  "name": "gRC_w1x1_t1x1_n64_f16_k1_eg",
+  "ms": 3.0375,
+  "tflops": 16.967772033580246,
+  "ok": true
+ },
+ {
+  "name": "gRC_w4x1_t1x1_n64_f16_k1_eg",
+  "ms": 3.0459,
+  "tflops": 16.92097821727568,
+  "ok": true
+ },
+ {
+  "name": "gRC_w4x2_t1x1_n64_f16_k1_eg",
+  "ms": 3.1666,
+  "tflops": 16.27600819554096,
+  "ok": true
+ },
+ {
+  "name": "gRC_w2x4_t1x1_n64_f16_k1_eg",
+  "ms": 3.5738,
+  "tflops": 14.42151422911187,
+  "ok": true
+ },
+ {
+  "name": "gRC_w2x2_t1x1_n64_f16_k1_eg",
+  "ms": 4.3667,
+  "tflops": 11.802873463256006,
+  "ok": true
+ },
+ {
+  "name": "gRC_w1x2_t1x1_n64_f16_k1_eg",
+  "ms": 5.6715,
+  "tflops": 9.087473781539277,
+  "ok": true
+ },
+ {
+  "name": "gRC_w1x4_t1x1_n64_f16_k1_eg",
+  "ms": 6.8377,
+  "tflops": 7.537564905158167,
+  "ok": true
+ }
+]

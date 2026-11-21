@@ -1,0 +1,27 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint M; } pc;
+layout(std430, binding = 0) readonly buffer Q { float16_t q[]; };
+layout(std430, binding = 1) readonly buffer K { float16_t k[]; };
+layout(std430, binding = 2) writeonly buffer SS { f16vec4 s[]; };
+void main() {
+  uint M = pc.M, z = gl_WorkGroupID.z, sg = gl_SubgroupID;
+  uint row0 = gl_WorkGroupID.y * 128u + (sg / 2u) * 64u, col0 = gl_WorkGroupID.x * 128u + (sg % 2u) * 64u;
+  if (col0 > row0 + 63u) return;  // above the diagonal: the softmax never reads it
+  uint qa = z * M * 128u + (row0 / 64u) * 8192u, kb = (z / 3u) * M * 128u + (col0 / 64u) * 8192u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0);
+  for (uint kk = 0u; kk < 8u; ++kk) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a; coopMatLoad(a, q, qa + kk * 1024u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b; coopMatLoad(b, k, kb + kk * 1024u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+    acc = coopMatMulAdd(a, b, acc);
+  }
+  // lane l = row row0 + l, element e = key col0 + e -> R tiles of S [24][M, M] (the softmax runs in place)
+  uint l = gl_SubgroupInvocationID;
+  uint ob = (z * M * M + ((row0 / 64u) * (M / 16u) + col0 / 16u) * 1024u + l * 16u) / 4u;
+  for (int e = 0; e < 64; e += 4) s[ob + uint(e / 16) * 256u + uint(e % 16) / 4u] = f16vec4(acc[e], acc[e + 1], acc[e + 2], acc[e + 3]);
+}

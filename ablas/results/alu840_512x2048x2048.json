@@ -1,0 +1,233 @@
+[
+ {
+  "name": "alu_lg_64x128x16",
+  "compiler": "turnip-bank",
+  "tflops": 3.175118778438599,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x128",
+  "compiler": "stock",
+  "tflops": 3.005312548587423,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x128x16",
+  "compiler": "stock",
+  "tflops": 2.9554343909212775,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_128x128x16",
+  "compiler": "turnip-bank",
+  "tflops": 2.9418329752192354,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x128x16",
+  "compiler": "turnip-nobank",
+  "tflops": 2.8978676362733475,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_128x128x16",
+  "compiler": "stock",
+  "tflops": 2.880027208585296,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x128x16",
+  "compiler": "turnip-bank",
+  "tflops": 2.8615659754216596,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x128x16",
+  "compiler": "stock",
+  "tflops": 2.8413667084550323,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x128",
+  "compiler": "turnip-nobank",
+  "tflops": 2.8362574165889636,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128",
+  "compiler": "stock",
+  "tflops": 2.8320756245779877,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_128x128x16",
+  "compiler": "turnip-nobank",
+  "tflops": 2.8166804469735376,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_64x64x16",
+  "compiler": "turnip-bank",
+  "tflops": 2.802188330672485,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128",
+  "compiler": "turnip-nobank",
+  "tflops": 2.795360054879291,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x128",
+  "compiler": "turnip-bank",
+  "tflops": 2.734444455338447,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128",
+  "compiler": "turnip-bank",
+  "tflops": 2.7123699511327626,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x128x16",
+  "compiler": "turnip-nobank",
+  "tflops": 2.7014530695219054,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x64",
+  "compiler": "turnip-bank",
+  "tflops": 2.6646511302984,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_64x64x16",
+  "compiler": "stock",
+  "tflops": 2.6596629144182695,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x64x16",
+  "compiler": "stock",
+  "tflops": 2.599487782617011,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x64x16",
+  "compiler": "turnip-bank",
+  "tflops": 2.5509646200191964,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x64",
+  "compiler": "stock",
+  "tflops": 2.382003835637711,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x64",
+  "compiler": "turnip-nobank",
+  "tflops": 2.312391874532269,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_64x64x16",
+  "compiler": "turnip-nobank",
+  "tflops": 2.278273642109395,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x64x16",
+  "compiler": "turnip-nobank",
+  "tflops": 2.226301396334428,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x128x8",
+  "compiler": "stock",
+  "tflops": 2.0820580954380037,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x128x8",
+  "compiler": "turnip-bank",
+  "tflops": 2.0631235573036335,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x128x8",
+  "compiler": "turnip-nobank",
+  "tflops": 2.044690902270172,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_128x128x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.986684393237913,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_128x128x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.9643304582390226,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_128x128x16",
+  "compiler": "stock",
+  "tflops": 1.9625146771627353,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x64x16",
+  "compiler": "stock",
+  "tflops": 1.9442026766374774,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x64x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.9151902255437938,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x64x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.913846100648128,
+  "ok": true,
+  "err": 0.01227
+ }
+]

@@ -1,0 +1,40 @@
+alu_lg_64x256x16_t8x16 stock          None ok=False
+alu_lg_64x256x16_t8x16 turnip-bank    1.499 ok=True
+alu_lg_64x256x16_t8x16 turnip-nobank  1.554 ok=True
+alu_lg_128x128x16_t8x16 stock          None ok=False
+alu_lg_128x128x16_t8x16 turnip-bank    1.347 ok=True
+alu_lg_128x128x16_t8x16 turnip-nobank  1.306 ok=True
+alu_lg_128x64x16_t16x8 stock          None ok=False
+alu_lg_128x64x16_t16x8 turnip-bank    2.936 ok=True
+alu_lg_128x64x16_t16x8 turnip-nobank  2.395 ok=True
+alu_lg_128x128x16_t16x8 stock          None ok=False
+alu_lg_128x128x16_t16x8 turnip-bank    3.432 ok=True
+alu_lg_128x128x16_t16x8 turnip-nobank  2.948 ok=True
+alu_gl_64x256x16_t8x16 stock          0.003 ok=True
+alu_gl_64x256x16_t8x16 turnip-bank    2.704 ok=True
+alu_gl_64x256x16_t8x16 turnip-nobank  2.221 ok=True
+alu_gl_128x128x16_t16x8 stock          None ok=False
+  [thermal] level 1 (1200 MHz cap), 51.3 C: waiting
+alu_gl_128x128x16_t16x8 turnip-bank    1.738 ok=True
+alu_gl_128x128x16_t16x8 turnip-nobank  1.843 ok=True
+alu_gg_64x128_t8x16    stock          1.875 ok=True
+alu_gg_64x128_t8x16    turnip-bank    2.316 ok=True
+alu_gg_64x128_t8x16    turnip-nobank  2.299 ok=True
+alu_gg_128x128_t8x16   stock          1.926 ok=True
+alu_gg_128x128_t8x16   turnip-bank    2.361 ok=True
+alu_gg_128x128_t8x16   turnip-nobank  2.76 ok=True
+alu_gg_128x64_t16x8    stock          1.869 ok=True
+alu_gg_128x64_t16x8    turnip-bank    2.691 ok=True
+alu_gg_128x64_t16x8    turnip-nobank  2.271 ok=True
+alu_gg_128x128_t16x8   stock          1.909 ok=True
+alu_gg_128x128_t16x8   turnip-bank    3.003 ok=True
+alu_gg_128x128_t16x8   turnip-nobank  2.689 ok=True
+alu_ll_64x256x8_t8x16  stock          0.061 ok=True
+alu_ll_64x256x8_t8x16  turnip-bank    2.367 ok=True
+alu_ll_64x256x8_t8x16  turnip-nobank  2.364 ok=True
+alu_ll_128x64x8_t16x8  stock          0.041 ok=True
+alu_ll_128x64x8_t16x8  turnip-bank    2.213 ok=True
+alu_ll_128x64x8_t16x8  turnip-nobank  2.21 ok=True
+best stock          alu_gg_128x128_t8x16   1.926 TFLOP/s
+best turnip-bank    alu_lg_128x128x16_t16x8 3.432 TFLOP/s
+best turnip-nobank  alu_lg_128x128x16_t16x8 2.948 TFLOP/s

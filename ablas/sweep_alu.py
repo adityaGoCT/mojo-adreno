@@ -10,7 +10,9 @@ bridge, thermal gate before each run, result checked against an fp32 reference).
 of the best are re-timed three times, interleaved; the median decides (the stock driver's timings vary).
 Writes results/alu840_<M>x<N>x<K>.json (best first); build_lib.py turns those into ablas_kernels_840.h.
 
-  RTL_SERIAL=localhost:<port> python3 sweep_alu.py 2048 2048 2048
+  RTL_SERIAL=localhost:<port> python3 sweep_alu.py 2048 2048 2048 [--set std|big|all] [--compilers ...] [--tag _big]
+(--set big: 8x16 / 16x8 thread tiles; Qualcomm's compiler hangs or spills on those, so tune them with
+ --compilers turnip-bank[,turnip-nobank]; build_lib.py merges results/alu840_<shape>*.json per shape)
 Once per (wiped) phone: cd ../asm/mesa; python3 run.py push; python3 run.py pushbank
 """
 import argparse, json, pathlib, subprocess, sys
@@ -48,6 +50,9 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--target-ms", type=int, default=150)
     ap.add_argument("--confirm", type=float, default=3.0)
+    ap.add_argument("--set", default="all", choices=["std", "big", "all"],
+                    help="8x8 thread tiles (std), 8x16 / 16x8 (big), or both")
+    ap.add_argument("--tag", default="", help="suffix for the results file (results/alu840_<shape><tag>.json)")
     a = ap.parse_args()
     M, N, K = a.M, a.N, a.K
     comps = a.compilers.split(",")
@@ -55,7 +60,8 @@ def main():
     push_f16_data(hn)
     tag = f"alu840_{M}x{N}x{K}"
     man, spvs = [], []
-    for c in gen_alu.CONFIGS:
+    cfgs = {"std": gen_alu.CONFIGS, "big": gen_alu.BIG_CONFIGS, "all": gen_alu.CONFIGS + gen_alu.BIG_CONFIGS}[a.set]
+    for c in cfgs:
         if not gen_alu.fits(c, M, N, K):
             continue
         n = gen_alu.name(c)
@@ -65,6 +71,7 @@ def main():
         spvs.append(p.with_suffix(".spv"))
         groups = (N // c[2]) * (M // c[1])
         man.append(f"{tag}_{n} shape/{hn} 64 1 spv/{tag}_{n}.spv {N // c[2]} {M // c[1]} 1 # flops={2 * M * N * K // groups}")
+    tag_out = tag + a.tag
     mf = MESA / f"manifest_{tag}.txt"
     mf.write_text("\n".join(man) + "\n")
     run.adb("push", *spvs, f"{run.DEV}/spv/")
@@ -98,7 +105,7 @@ def main():
             "err": r.get("err"), **({"confirm_runs": r["confirm_runs"]} if "confirm_runs" in r else {})}
            for (full, comp), r in res.items()]
     out.sort(key=lambda j: -(j["tflops"] or 0) if j["ok"] else 1)
-    (HERE / "results" / f"{tag}.json").write_text(json.dumps(out, indent=1))
+    (HERE / "results" / f"{tag_out}.json").write_text(json.dumps(out, indent=1))
     for comp in comps:
         best = next((j for j in out if j["ok"] and j["compiler"] == comp), None)
         if best:

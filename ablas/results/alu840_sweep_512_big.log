@@ -1,0 +1,26 @@
+alu_lg_64x256x16_t8x16 turnip-bank    1.496 ok=True
+alu_lg_64x256x16_t8x16 turnip-nobank  1.45 ok=True
+alu_lg_128x128x16_t8x16 turnip-bank    1.369 ok=True
+alu_lg_128x128x16_t8x16 turnip-nobank  1.323 ok=True
+alu_lg_128x64x16_t16x8 turnip-bank    2.501 ok=True
+alu_lg_128x64x16_t16x8 turnip-nobank  2.054 ok=True
+alu_lg_128x128x16_t16x8 turnip-bank    2.904 ok=True
+alu_lg_128x128x16_t16x8 turnip-nobank  2.335 ok=True
+alu_gl_64x256x16_t8x16 turnip-bank    2.275 ok=True
+alu_gl_64x256x16_t8x16 turnip-nobank  1.875 ok=True
+alu_gl_128x128x16_t16x8 turnip-bank    1.728 ok=True
+alu_gl_128x128x16_t16x8 turnip-nobank  1.845 ok=True
+alu_gg_64x128_t8x16    turnip-bank    1.647 ok=True
+alu_gg_64x128_t8x16    turnip-nobank  1.746 ok=True
+alu_gg_128x128_t8x16   turnip-bank    1.617 ok=True
+alu_gg_128x128_t8x16   turnip-nobank  1.756 ok=True
+alu_gg_128x64_t16x8    turnip-bank    1.951 ok=True
+alu_gg_128x64_t16x8    turnip-nobank  1.639 ok=True
+alu_gg_128x128_t16x8   turnip-bank    1.935 ok=True
+alu_gg_128x128_t16x8   turnip-nobank  1.616 ok=True
+alu_ll_64x256x8_t8x16  turnip-bank    1.84 ok=True
+alu_ll_64x256x8_t8x16  turnip-nobank  1.839 ok=True
+alu_ll_128x64x8_t16x8  turnip-bank    1.796 ok=True
+alu_ll_128x64x8_t16x8  turnip-nobank  1.801 ok=True
+best turnip-bank    alu_lg_128x128x16_t16x8 2.904 TFLOP/s
+best turnip-nobank  alu_lg_128x128x16_t16x8 2.335 TFLOP/s

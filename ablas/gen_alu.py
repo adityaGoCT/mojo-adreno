@@ -3,8 +3,9 @@
 C[M,N] = A[M,K] @ B[K,N], fp16 in, fp16 multiply-add and accumulate, fp16 out, in the layout AdrenoBLAS calls
 TN: A stored [K,M] (binding 0), B stored [K,N] (binding 1), C [M,N] (binding 2), all read as f16vec4.
 
-Config (name alu_<src>_<BM>x<BN>[x<BK>]): workgroup tile BM x BN, thread tile 8 x 8 (two 4-wide chunks each way,
-(BN/8) x (BM/8) threads). src gives where A and B come from in each k step: l = a BK-deep shared-memory tile
+Config (name alu_<src>_<BM>x<BN>[x<BK>][_t<TM>x<TN>]): workgroup tile BM x BN, thread tile TM x TN (default 8 x 8;
+TM/4 row chunks and TN/4 column chunks of 4, so neighbouring threads read neighbouring vec4s; (BN/TN) x (BM/TM)
+threads). fp16 values only live in hr0..hr47 (192 halves), so TM*TN <= 128 (8x16, 16x8) is the largest tile. src gives where A and B come from in each k step: l = a BK-deep shared-memory tile
 staged with barriers, g = straight from the buffer (L1/texture path); gg kernels step K by 4.
 Measured on the 840 in ../asm/mesa (README there): the operand paths matter more than the compiler, and the
 best compiler differs per kernel (Qualcomm's stock driver, or Mesa Turnip with or without its bank-aware RA).
@@ -16,22 +17,33 @@ bank-aware RA (the per-kernel form of IR3_SHADER_DEBUG=nobankra; the stock drive
 """
 import re
 
-CONFIGS = [  # (src, BM, BN, BK)
+CONFIGS = [  # (src, BM, BN, BK[, TM, TN]); 8 x 8 thread tiles
     ("ll", 128, 128, 16), ("ll", 64, 128, 8), ("ll", 64, 64, 16),
     ("lg", 128, 128, 16), ("lg", 64, 128, 16), ("lg", 64, 64, 16),
     ("gl", 128, 128, 16), ("gl", 64, 64, 16),
     ("gg", 128, 128, 0), ("gg", 64, 128, 0), ("gg", 64, 64, 0),
 ]
+BIG_CONFIGS = [  # 128 fp16 accumulators per thread: 8 x 16 and 16 x 8 thread tiles
+    ("lg", 64, 256, 16, 8, 16), ("lg", 128, 128, 16, 8, 16), ("lg", 128, 64, 16, 16, 8), ("lg", 128, 128, 16, 16, 8),
+    ("gl", 64, 256, 16, 8, 16), ("gl", 128, 128, 16, 16, 8),
+    ("gg", 64, 128, 0, 8, 16), ("gg", 128, 128, 0, 8, 16), ("gg", 128, 64, 0, 16, 8), ("gg", 128, 128, 0, 16, 8),
+    ("ll", 64, 256, 8, 8, 16), ("ll", 128, 64, 8, 16, 8),
+]
+
+
+def full(c):
+    """(src, BM, BN, BK, TM, TN)"""
+    return tuple(c) + (8, 8) if len(c) == 4 else tuple(c)
 
 
 def name(c):
-    src, BM, BN, BK = c
-    return f"alu_{src}_{BM}x{BN}" + (f"x{BK}" if BK else "")
+    src, BM, BN, BK, TM, TN = full(c)
+    return f"alu_{src}_{BM}x{BN}" + (f"x{BK}" if BK else "") + ("" if (TM, TN) == (8, 8) else f"_t{TM}x{TN}")
 
 
 def parse(n):
-    m = re.match(r"alu_(ll|lg|gl|gg)_(\d+)x(\d+)(?:x(\d+))?$", n)
-    return (m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4) or 0))
+    m = re.match(r"alu_(ll|lg|gl|gg)_(\d+)x(\d+)(?:x(\d+))?(?:_t(\d+)x(\d+))?$", n)
+    return (m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4) or 0), int(m.group(5) or 8), int(m.group(6) or 8))
 
 
 def kstep(c):
@@ -39,7 +51,8 @@ def kstep(c):
 
 
 def threads(c):
-    return (c[2] // 8) * (c[1] // 8)
+    src, BM, BN, BK, TM, TN = full(c)
+    return (BN // TN) * (BM // TM)
 
 
 def fits(c, M, N, K):
@@ -47,14 +60,16 @@ def fits(c, M, N, K):
 
 
 def glsl(c, M, N, K, spec=False):
-    src, BM, BN, BK = c
+    src, BM, BN, BK, TM, TN = full(c)
     if spec:
         M, N, K = "M_", "N_", "K_"
     u = lambda x: f"{x}u" if isinstance(x, int) else x
-    TX, TY = BN // 8, BM // 8
+    TX, TY = BN // TN, BM // TM
+    RM, CN = TM // 4, TN // 4          # 4-row chunks (A vectors) and 4-column chunks (B vectors) per thread
     NT = TX * TY
     sa, sb = src
     V = "f16vec4"
+    big = (TM, TN) != (8, 8)
     L = ["#version 450",
          "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require",
          "#extension GL_EXT_shader_16bit_storage : require",
@@ -76,43 +91,50 @@ def glsl(c, M, N, K, spec=False):
           f"  uint bm = gl_WorkGroupID.y * {BM}u, bn = gl_WorkGroupID.x * {BN}u;",
           f"  uint M4 = {u(M)}, N4 = {u(N)};",       # runtime ops, not spec-constant ops (ablas.c's specialize()
           "  M4 >>= 2; N4 >>= 2;",                    # only rewrites OpSpecConstant)
-          f"  {V} acc[8][2];",
-          f"  for (int i = 0; i < 8; ++i) {{ acc[i][0] = {V}(0); acc[i][1] = {V}(0); }}"]
+          f"  {V} acc[{TM}][{CN}];"]
+    if big:
+        L.append(f"  for (int i = 0; i < {TM}; ++i) for (int j = 0; j < {CN}; ++j) acc[i][j] = {V}(0);")
+    else:
+        L.append(f"  for (int i = 0; i < 8; ++i) {{ acc[i][0] = {V}(0); acc[i][1] = {V}(0); }}")
     staged = "l" in src
     step = kstep(c)
     L.append(f"  for (uint k0 = 0; k0 < {u(K)}; k0 += {step}u) {{")
     if sa == "l":
+        assert BK * BM // 4 % NT == 0
         for r in range(BK * BM // 4 // NT):
             L.append(f"    {{ uint i = tid + {r * NT}u; uint kk = i / {BM // 4}u, mm = i % {BM // 4}u;")
             L.append(f"      As[kk][mm] = at4[(k0 + kk) * M4 + bm / 4u + mm]; }}")
     if sb == "l":
+        assert BK * BN // 4 % NT == 0
         for r in range(BK * BN // 4 // NT):
             L.append(f"    {{ uint i = tid + {r * NT}u; uint kk = i / {BN // 4}u, nn = i % {BN // 4}u;")
             L.append(f"      Bs[kk][nn] = b4[(k0 + kk) * N4 + bn / 4u + nn]; }}")
     if staged:
         L.append("    barrier();")
     L.append(f"    [[unroll]] for (uint k = 0; k < {step}u; ++k) {{")
+    off = lambda q, stride: "" if q == 0 else f" + {q * stride}u"
     if sa == "l":
-        L.append(f"      {V} a0 = As[k][ty], a1 = As[k][ty + {BM // 8}u];")
+        L.append(f"      {V} " + ", ".join(f"a{r} = As[k][ty{off(r, TY)}]" for r in range(RM)) + ";")
     else:
         L.append("      uint ar = (k0 + k) * M4 + bm / 4u + ty;")
-        L.append(f"      {V} a0 = at4[ar], a1 = at4[ar + {BM // 8}u];")
+        L.append(f"      {V} " + ", ".join(f"a{r} = at4[ar{off(r, TY)}]" for r in range(RM)) + ";")
     if sb == "l":
-        L.append(f"      {V} b0 = Bs[k][tx], b1 = Bs[k][tx + {BN // 8}u];")
+        L.append(f"      {V} " + ", ".join(f"b{q} = Bs[k][tx{off(q, TX)}]" for q in range(CN)) + ";")
     else:
         L.append("      uint br = (k0 + k) * N4 + bn / 4u + tx;")
-        L.append(f"      {V} b0 = b4[br], b1 = b4[br + {BN // 8}u];")
-    for i in range(8):
+        L.append(f"      {V} " + ", ".join(f"b{q} = b4[br{off(q, TX)}]" for q in range(CN)) + ";")
+    for i in range(TM):
         a = f"a{i // 4}.{'xyzw'[i % 4]}"
-        L.append(f"      acc[{i}][0] = {a} * b0 + acc[{i}][0]; acc[{i}][1] = {a} * b1 + acc[{i}][1];")
+        L.append("      " + " ".join(f"acc[{i}][{q}] = {a} * b{q} + acc[{i}][{q}];" for q in range(CN)))
     L.append("    }")
     if staged:
         L.append("    barrier();")
     L.append("  }")
-    for i in range(8):
-        row = f"bm + {'0u' if i < 4 else f'{BM // 2}u'} + ty * 4u + {i % 4}u"
-        for h in range(2):
-            L.append(f"  c4[({row}) * N4 + bn / 4u + {h * BN // 8}u + tx] = acc[{i}][{h}];")
+    for i in range(TM):
+        r = i // 4
+        row = f"bm + {f'{r * 4 * TY}u' if (r or big) else '0u'} + ty * 4u + {i % 4}u"
+        for q in range(CN):
+            L.append(f"  c4[({row}) * N4 + bn / 4u + {q * TX}u + tx] = acc[{i}][{q}];")
     L.append("}")
     return "\n".join(L) + "\n"
 

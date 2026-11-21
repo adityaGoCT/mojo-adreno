@@ -6,6 +6,12 @@
 
 Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the core of LLM prefill. AdrenoBLAS works around all of them and reaches **16.6 TFLOP/s at 4096³ (95% of the 17.5 peak) and 17.0 at 4096 x 4096 x 8192 (97%)**, with one 64 x 64 tile per subgroup and tiles that store K contiguously.
 
+**Update (LLM prefill): four more, #8-#11, all about element access to cooperative matrices.** Building a Q4_0
+GEMM that dequantizes weights straight into the matrix unit's B operand, fused epilogues and a flash attention for
+Llama 3.2 3B (`ablas/llama3b/`) found one silent wrong-result bug (#9: a constant-index write to element 4 of a B
+matrix is dropped) and three compiler crashes (#8, #10, #11). All have free or near-free workarounds; the prefill
+runs 2,602 tokens/s (Q4_0) at 512 tokens with them. #9 matters to anyone writing elements of a B matrix.
+
 **Update (later): #1 is narrower too.** With a single 64 x 64 accumulator per subgroup, K unrolled by 2 or 4 runs correctly; the hang needs 64 x 32 tiles. Unrolling is slower there anyway (15.5 and 14.3 vs 16.6 TFLOP/s), so fixing #1 is no longer worth much for GEMM. What's left at 4096³ is the store of C, which every workgroup issues at the same moment; persistent workgroups, the usual fix, ran 3x slower on this driver (same inner loop in the disassembly).
 
 **Update (same day): #4 is narrower than first reported, and its workaround is measured.** One 64 x 64 tile per subgroup does not hang; two or more do. With one 64-wide tile per subgroup and 64-wide B panels, fp16 GEMM went from 10.8 to **13.8 TFLOP/s at 2048³ (+28%)** and from 12.5 to **14.1 at 4096³ (+13%)**. That is the low end of the +20-35% estimated below, now measured.
@@ -22,7 +28,7 @@ Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the 
 - Driver build: `dbca1a4c11, Ie9dcd0093d, 1787853470`, dated 08/27/26.
 - Compiler: **E17.52.10.04**.
 
-## The seven bugs at a glance
+## The eleven bugs at a glance
 
 | # | bug | kind | what it costs today | estimated gain if fixed | confidence |
 | --- | --- | --- | --- | --- | --- |
@@ -33,6 +39,10 @@ Seven bugs in the Adreno 850's stock Vulkan driver block or slow fp16 GEMM, the 
 | 3 | converting an fp32 accumulator to fp16 (`coopmat<float16_t>(c)`) | compiler segfault | no fp32 accumulation with fp16 output | accuracy (costs ~9% speed) | measured crash, cause inferred |
 | 2 | adding two cooperative matrices (`c0 + c1`, `ma + ma`) | compiler segfault | element-wise loops instead; no int8 matrix arithmetic | small speed gain; unblocks int8 work | measured |
 | 6 | 4+ accumulator tiles combined element-wise | `vkCreateComputePipelines` -> `VK_ERROR_UNKNOWN` | blocks the workaround for #1 at larger tiles | small; moot if #1 is fixed | measured |
+| 8 | element writes into a cooperative matrix that was never initialized | compiler segfault | initialize first (`B b = B(0)`) | none (free workaround) | measured |
+| 9 | a constant-index write to element 4 of a 16 x 64 B matrix (`b[4] = x`) | **silent wrong results** (the write is dropped) | write that element with a runtime index | none; correctness for other apps | measured |
+| 10 | constant-index reads of accumulator elements into a vector constructor | compiler segfault (`SPIRVCodeGen::handleOpLoad`) | read elements in a loop | none | measured |
+| 11 | `coopMatMulAdd` under a per-subgroup branch (two subgroups of one workgroup taking different sides) | compiler segfault (`CoopMatLayoutNode::getUseCommonMask`, recursive) | make every multiply unconditional (redo a block, multiply zeros) | ~2% of flash-attention work | measured |
 
 ## Details
 
@@ -117,6 +127,24 @@ Same kernels, with M, N, K supplied three ways (`ablas/gen.py` `spec=True`; `abl
 
 Dual-accumulator kernels with `t1x2` tiles (four 64 x 32 accumulators plus the element-wise combine) return `VK_ERROR_UNKNOWN` (-13) from `vkCreateComputePipelines`. This matters only because it blocks the workaround for #1 at useful tile sizes.
 
+### 8-11. Element access to cooperative matrices (found building an LLM prefill, `ablas/llama3b/`)
+
+Writing a Q4_0 GEMM that dequantizes weights into the B operand element by element, and epilogues and a flash
+attention that touch accumulator elements, hit four more problems. On this driver a 16 x 64 B matrix holds column n
+in lane n and k in element k, and a 64 x 64 accumulator holds row r in lane r and column e in element e
+(`ablas/llama3b/probe/map.comp`). That makes per-lane element code natural, but:
+- **8.** Element writes into an uninitialized matrix segfault the compiler (`probe/crash_uninit_element_write.comp`).
+- **9.** A constant-index write to element 4 of a B matrix is dropped; elements 0-3 and 5-15 are written. The Q4_0
+  GEMM gave relative error 0.25 until element 4 was written with an index the compiler can't fold
+  (`probe/q4dbg.py`). Silent, so worth fixing first among these.
+- **10.** Constant-index reads of accumulator elements into a vector constructor crash the compiler
+  (`probe/crash_const_acc_element_read.comp`); a loop index compiles.
+- **11.** Multiplies under a per-subgroup branch crash the layout analysis (recursion in
+  `CoopMatLayoutNode::getUseCommonMask`).
+Not a bug but a cost worth knowing: element reads and writes of an accumulator run at about 20 clocks each, and a
+matrix-times-scalar is slower still. Staging an accumulator through shared memory (`coopMatStore`, lanes read rows)
+is how AdrenoBLAS's epilogues and flash attention avoid it.
+
 ## Adreno 840 (Snapdragon 8 Elite Gen 5), for completeness
 
 Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` this week; the shared-memory and pipeline rows are from `BLOG-COOPMAT.md`):
@@ -136,6 +164,7 @@ Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` thi
 2. **#7 and #5** (2x slowdown and hang; silent wrong data): ecosystem-wide correctness and performance.
 3. **#3 and #2** (compiler crashes): fp32 accumulation for accuracy, int8 matrix work.
 4. **#6** after #1.
+4a. **#9** (silent wrong data), then **#8, #10, #11** (compiler crashes on element access and branches).
 5. **Ours to do:** the Turnip register-allocator fix for the 840 (+10%), and an honest int8 throughput probe on the 850.
 
 ## How the estimates were made

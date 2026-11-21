@@ -68,6 +68,37 @@ ablas_status ablas_pack_b(ablas_handle h, VkCommandBuffer cmd, ablas_op opB, uin
 // 2: always pack. 0: run layout-specific kernels directly (NT still packs B).
 void ablas_set_pack(ablas_handle h, int pack_to_tn);
 
+// Q4_0 weights. C[M,N] = op(A)[M,K] * dequant(W)^T for a weight W [N,K] quantized in ggml's Q4_0 (blocks of 32
+// along K, value = (q - 8) * d, fp16 d), in AdrenoBLAS's layout: per 64-column panel and 32-deep K block, the
+// 4-bit values of each column as 2 x 8 bytes, then all scales (ablas_q4_0_size bytes). The kernels dequantize in
+// registers into the matrix unit's B operand (Adreno 850). Build the layout on the host with ablas_q4_0_from_ggml
+// (from ggml block_q4_0 rows, e.g. a GGUF tensor) or ablas/q4ref.py. opA: N (A [M,K] row-major, packed into
+// ws: M*K*2 bytes) or P (already packed with ablas_pack_a). M, N multiples of 64; K of 64 (N) or 32 (P).
+// fp16 out, fp16 accumulation. Not available on the Adreno 840 backend (ABLAS_UNSUPPORTED).
+size_t ablas_q4_0_size(uint32_t N, uint32_t K);
+void ablas_q4_0_from_ggml(const void* blocks, uint32_t N, uint32_t K, void* dst);
+ablas_status ablas_hgemm_q4_0(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t N, uint32_t K,
+                              ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf workspace);
+
+// Fused epilogues (Adreno 850 cooperative-matrix backend). The accumulator is staged through shared memory and
+// written straight into the format the next operation wants:
+//   ABLAS_EPI_PACKED  C written in the packed A format of an [M, N] matrix (ablas_pack_a's output), so it can be
+//                     the next GEMM's A with ABLAS_OP_P (no pack pass). N multiple of 64.
+//   ABLAS_EPI_SWIGLU  for a gated MLP: B's columns come in 64-column groups [32 gate | 32 up] (interleave the gate
+//                     and up weights 32 rows at a time); C receives silu(gate) * up, an [M, N/2] matrix in the
+//                     packed A format (the down projection's A operand). fp32 math, fp16 out.
+//   ABLAS_EPI_RESIDUAL_RMS  for a pre-norm transformer's residual stream: C is fp32 row-major [M, N] and receives
+//                     C += op(A) op(B); the workspace receives each row's sum of squares of the updated C per 64
+//                     columns (fp32 [M][N/64]) for the next RMSNorm. The workspace is this output (the operands
+//                     must then be given as P).
+// The epilogue kernels exist for the packed path (operands are packed first if not given as P) and the Q4_0
+// kernels. ABLAS_UNSUPPORTED on the Adreno 840 backend.
+typedef enum { ABLAS_EPI_NONE = 0, ABLAS_EPI_PACKED = 1, ABLAS_EPI_SWIGLU = 2, ABLAS_EPI_RESIDUAL_RMS = 3 } ablas_epilogue;
+ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
+                            uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf workspace, ablas_epilogue ep);
+ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t N, uint32_t K,
+                                 ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf workspace, ablas_epilogue ep);
+
 // Name of the kernel the last ablas_hgemm call used (for logs and benchmarks).
 const char* ablas_last_kernel(ablas_handle h);
 

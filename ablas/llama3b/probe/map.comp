@@ -1,0 +1,25 @@
+#version 450
+// Probe: which (row, col) each lane's element e of a cooperative matrix holds on this driver.
+// out layout: [B 64 lanes x 16][A 64 x 16][acc rows 64 x 64][acc cols 64 x 64] as fp16 values.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer S { float16_t s[]; };   // [0,1024): (k,n) at n*16+k = n*16+k ; [1024,2048) A (r,k) at r*16+k ; [2048, 6144) acc rows ; [6144, 10240) acc cols
+layout(std430, binding = 1) writeonly buffer O { float16_t o[]; };
+void main() {
+  uint l = gl_SubgroupInvocationID;
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b;
+  coopMatLoad(b, s, 0u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+  for (int e = 0; e < b.length(); ++e) o[l * 16u + uint(e)] = b[e];
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a;
+  coopMatLoad(a, s, 1024u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+  for (int e = 0; e < a.length(); ++e) o[1024u + l * 16u + uint(e)] = a[e];
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> c;
+  coopMatLoad(c, s, 2048u, 64u, gl_CooperativeMatrixLayoutRowMajor);
+  for (int e = 0; e < c.length(); ++e) o[2048u + l * 64u + uint(e)] = c[e];
+  coopMatLoad(c, s, 6144u, 64u, gl_CooperativeMatrixLayoutRowMajor);
+  for (int e = 0; e < c.length(); ++e) o[6144u + l * 64u + uint(e)] = c[e];
+  if (l == 0u) o[10240u] = float16_t(b.length()), o[10241u] = float16_t(a.length()), o[10242u] = float16_t(c.length());
+}

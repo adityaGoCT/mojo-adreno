@@ -1,0 +1,55 @@
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+TN  2048x 2048x 2048  gTN_w4x2_t1x1_n64_f16_k1            11.19 TFLOP/s    1535.6 us  err 3.4e-03 PASS  (first call 97 ms incl. pipeline)   [waited 26s, start 44500mC, 5/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+NN  2048x 2048x 2048  gTN_w4x2_t1x1_n64_f16_k1             9.68 TFLOP/s    1774.3 us  err 4.3e-03 PASS  (first call 99 ms incl. pipeline)   [waited 8s, start 45400mC, 8/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+TT  2048x 2048x 2048  gTN_w4x2_t1x1_n64_f16_k1            10.17 TFLOP/s    1688.7 us  err 4.4e-03 PASS  (first call 74 ms incl. pipeline)   [waited 6s, start 44800mC, 8/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+NT  2048x 2048x 2048  gRC_w2x2_t1x1_n64_f16_k1            10.67 TFLOP/s    1609.8 us  err 4.3e-03 PASS  (first call 62 ms incl. pipeline)   [waited 6s, start 44800mC, 7/8 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+TN  1024x 1024x 1024  gTN_w2x2_t1x2_n32_f16_k1            10.01 TFLOP/s     214.6 us  err 5.3e-04 PASS  (first call 121 ms incl. pipeline)   [waited 6s, start 44800mC, 6/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+TN   512x 2048x 2048  gTN_w1x2_t2x1_n32_f16_k1            10.69 TFLOP/s     401.7 us  err 3.4e-03 PASS  (first call 105 ms incl. pipeline)   [waited 4s, start 45100mC, 5/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+TN   768x 1536x 1024  gTN_w2x2_t1x2_n32_f16_k1            10.78 TFLOP/s     224.0 us  err 2.7e-03 PASS  (first call 123 ms incl. pipeline)   [waited 8s, start 43900mC, 6/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+NT   512x 8192x 2048  gRC_w4x2_t1x1_n64_f16_k1             8.38 TFLOP/s    2050.0 us  err 3.8e-03 PASS  (first call 66 ms incl. pipeline)   [waited 6s, start 44500mC, 8/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+PP  4096x 4096x 4096  gRC_w2x2_t1x1_n64_f16_k1            15.29 TFLOP/s    8989.8 us  err 4.3e-03 PASS  (first call 35 ms incl. pipeline)   [waited 6s, start 44500mC, 5/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+PP  2048x 2048x 2048  gRC_w2x2_t1x1_n64_f16_k1            14.39 TFLOP/s    1193.5 us  err 3.4e-03 PASS  (first call 59 ms incl. pipeline)   [waited 6s, start 44500mC, 7/9 clock samples at 1.45 GHz]
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+)
+NT   512x 3072x 8192  gRC_w4x2_t1x1_n64_f16_k1             8.57 TFLOP/s    3008.7 us  err 7.6e-03 PASS  (first call 44 ms incl. pipeline)   [waited 6s, start 44500mC, 8/9 clock samples at 1.45 GHz]

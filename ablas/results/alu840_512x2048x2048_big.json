@@ -1,0 +1,170 @@
+[
+ {
+  "name": "alu_lg_128x128x16_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 2.9044265935246005,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x64x16_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 2.5007873877839537,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x128x16_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 2.334501750481987,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_64x256x16_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 2.275175603575046,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x64x16_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 2.0543673916079768,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x64_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.9508727421712404,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.9345374983334476,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_64x256x16_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.8753718770672365,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_128x128x16_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.844517102604461,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x256x8_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.8399474683500923,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_64x256x8_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.8392233733454895,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_128x64x8_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.801081620021303,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_ll_128x64x8_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.7964839241698154,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.7558141790739696,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x128_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.7455846111015152,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gl_128x128x16_t16x8",
+  "compiler": "turnip-bank",
+  "tflops": 1.7284940882637378,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_64x128_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.6467599400643833,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x64_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.6388326142002207,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.6173958921973892,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_gg_128x128_t16x8",
+  "compiler": "turnip-nobank",
+  "tflops": 1.6156928783326976,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x256x16_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.4958314207790153,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_64x256x16_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.4495411706576884,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x128x16_t8x16",
+  "compiler": "turnip-bank",
+  "tflops": 1.3694734536948645,
+  "ok": true,
+  "err": 0.01227
+ },
+ {
+  "name": "alu_lg_128x128x16_t8x16",
+  "compiler": "turnip-nobank",
+  "tflops": 1.3229991667660077,
+  "ok": true,
+  "err": 0.01227
+ }
+]
