@@ -1,0 +1,26 @@
+{
+ "peak_f32_w4_c16_rr": {
+  "tflops": 3.951978764048337,
+  "ok": true,
+  "err": -1.0,
+  "loop_conflicts": 0,
+  "loop_mads": 64,
+  "hash": "8b818899a1be04badbfacde928df62daae863a9e9c0d1f95230919accd671fcf",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 18 full, 8 constlen",
+   "; CL prog 23/1: 14 max_waves, 0 double_threadsize"
+  ]
+ },
+ "peak_f16_w4_c16_rr": {
+  "tflops": 7.80669210101473,
+  "ok": true,
+  "err": -1.0,
+  "loop_conflicts": 0,
+  "loop_mads": 64,
+  "hash": "13282b39739e61eef5254b7f96ea897fa0ca935a00c63b1c9b1cf6369e8a8ba1",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 10 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ }
+}

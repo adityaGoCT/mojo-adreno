@@ -19,7 +19,7 @@ TURNIP = pathlib.Path.home() / "runix/adreno-port/build"
 SERIAL = os.environ.get("RTL_SERIAL", "localhost:59796")
 DEV = "/data/local/tmp/asm_mesa"
 # turnip-bank: Mesa with the register-bank-aware RA patch (turnip-ra-bank.patch), built in build/turnip-android-bankra
-TURNIP_DIRS = {"turnip": "turnip", "turnip-bank": "turnip_bank"}
+TURNIP_DIRS = {"turnip": "turnip", "turnip-bank": "turnip_bank", "turnip-bank2": "turnip_bank2"}
 BANK_SO = pathlib.Path.home() / "runix/adreno-port/build/turnip-android-bankra/src/freedreno/vulkan/libvulkan_freedreno.so"
 FREQS = [1300, 1200, 1100, 1050, 1000, 902, 826, 726, 646, 578, 500, 461, 422, 382, 342, 282, 222, 191, 160]
 

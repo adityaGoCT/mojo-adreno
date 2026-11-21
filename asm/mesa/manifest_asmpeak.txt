@@ -18,3 +18,6 @@ asmpeak_f32_pall shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=419430
 asmpeak_f16_pall shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=8388608
 asmpeak_f32_pnone shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=4194304
 asmpeak_f16_pnone shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=8388608
+asmpeak_f32_par_m2d0 shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=4194304
+asmpeak_f32_par_m2d2 shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=4194304
+asmpeak_f32_par_m0d2 shape/peak 64 1 spv/peak_f32_w2_c16.spv 8192 1 1 # flops=4194304

@@ -1,0 +1,14 @@
+{
+ "peak_f16_w4_c16_rr": {
+  "tflops": 7.173975634813464,
+  "ok": true,
+  "err": -1.0,
+  "loop_conflicts": 0,
+  "loop_mads": 64,
+  "hash": "9b7ae7fb8bb797fc0b6fec71f5b0b2ac667874d20523ecfe1f39b05a0042741c",
+  "stats": [
+   "; CL prog 23/1: 0 last-baryf, 0 last-helper, 0 half, 11 full, 8 constlen",
+   "; CL prog 23/1: 16 max_waves, 0 double_threadsize"
+  ]
+ }
+}

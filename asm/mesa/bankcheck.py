@@ -1,13 +1,16 @@
 """Count register-bank conflicts in ir3 mad instructions.
 
-Measured rule on the Adreno 840 (asm peak loops, README): a cat3 mad whose three sources are all registers in the
-same component (x/y/z/w, of the register as named, also for half registers) runs 3x slower; any two matching is
-free; const and immediate sources do not count. (rptN) is expanded: sources marked (r) advance one component per
-repeat.
+Measured rule on the Adreno 840 (asm peak loops and the fp16 placement sweep, README): a cat3 mad whose three
+sources are registers whose scalar indices all have the same parity runs ~3x slower: for full registers all in
+{x,z} or all in {y,w}; for half registers all in the low (.x/.z) or all in the high (.y/.w) 16-bit halves. Any
+mix is free; const and immediate sources do not count. (rptN) is expanded: sources marked (r) advance one
+component per repeat. --comp counts the older, narrower same-component rule instead.
 
   python3 bankcheck.py file.asm [...]      # per file: mads, conflicting mads, inside the main loop / total
 """
 import re, sys
+
+COMP = "--comp" in sys.argv
 
 REG = re.compile(r"^(h?)r(\d+)\.([xyzw])$")
 
@@ -20,7 +23,7 @@ def comps(src, k):
     if not m:
         return None
     i = int(m.group(2)) * 4 + "xyzw".index(m.group(3)) + (k if rep else 0)
-    return "xyzw"[i % 4]
+    return i % (4 if COMP else 2)
 
 
 def scan(lines):
@@ -43,7 +46,7 @@ def scan(lines):
 
 
 def main():
-    for f in sys.argv[1:]:
+    for f in [a for a in sys.argv[1:] if not a.startswith("--")]:
         L = open(f).read().split("\n")
         loop = L
         for j in range(len(L) - 1, -1, -1):

@@ -53,6 +53,10 @@ def variants():
                                      for i in range(32)], 32)
         v[f"f16_{tag}"] = (SETUP16, [f"mad.f16 {acc16(i)}, hr18.{C[(i + om) % 4]}, hr20.{C[(i + od) % 4]}, {acc16(i)}"
                                      for i in range(64)], 64)
+    # fp32: three sources with the same component parity but not the same letter (acc c, m c+2, d c / c+2)
+    for tag, om, od in (("par_m2d0", 2, 0), ("par_m2d2", 2, 2), ("par_m0d2", 0, 2)):
+        v[f"f32_{tag}"] = (SETUP32, [f"mad.f32 {acc32(i)}, r9.{C[(i + om) % 4]}, r11.{C[(i + od) % 4]}, {acc32(i)}"
+                                     for i in range(32)], 32)
     return v
 
 
