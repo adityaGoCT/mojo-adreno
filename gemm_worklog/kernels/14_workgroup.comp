@@ -1,0 +1,38 @@
+// Kernel 14: several subgroups per workgroup. Kernel 13 with WM x WN subgroups in one workgroup, each still one
+// 64 x 64 tile: a workgroup covers a (64 WM) x (64 WN) block of C, so the WN subgroups in a row read the same A
+// panel and the WM in a column the same B panel at about the same time, from the same core's cache.
+// WM_ and WN_ are swept.
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#ifndef WM_
+#define WM_ 2
+#define WN_ 2
+#define NT_ 256
+#endif
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K, WM = WM_, WN = WN_;
+layout(local_size_x = NT_) in;   // 64 * WM * WN
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+#define RM gl_CooperativeMatrixLayoutRowMajor
+#define CM gl_CooperativeMatrixLayoutColumnMajor
+
+void main() {
+  uint sg = gl_SubgroupID;
+  uint row0 = gl_WorkGroupID.y * (64u * WM) + (sg / WN) * 64u, col0 = gl_WorkGroupID.x * (64u * WN) + (sg % WN) * 64u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc =
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0.0);
+  uint pa = (row0 / 64u) * (K / 16u) * 1024u, pb = (col0 / 64u) * (K / 16u) * 1024u;
+  for (uint k = 0u; k < K; k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> mb;
+    coopMatLoad(ma, a, pa + (k / 16u) * 1024u, 64, CM);
+    coopMatLoad(mb, b, pb + (k / 16u) * 1024u, 64, RM);
+    acc = coopMatMulAdd(ma, mb, acc);
+  }
+  coopMatStore(acc, c, row0 * N + col0, N, RM);
+}

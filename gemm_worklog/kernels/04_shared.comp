@@ -1,0 +1,32 @@
+// Kernel 4: shared-memory tiles. A 32 x 32 workgroup computes a 32 x 32 block of C. Per 32-wide K step it copies
+// a 32 x 32 tile of A and of B into shared memory (one element per thread, coalesced), then every thread reads
+// its row of the A tile and its column of the B tile from there. Each global element is now loaded once per
+// workgroup instead of once per thread: 32x less global traffic.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+#ifndef T_
+#define T_ 32
+#endif
+const uint T = T_;
+layout(local_size_x = T_, local_size_y = T_) in;
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+shared float16_t As[T][T], Bs[T][T];
+
+void main() {
+  uint tx = gl_LocalInvocationID.x, ty = gl_LocalInvocationID.y;
+  uint row = gl_WorkGroupID.y * T + ty, col = gl_WorkGroupID.x * T + tx;
+  float acc = 0.0;
+  for (uint k0 = 0u; k0 < K; k0 += T) {
+    As[ty][tx] = a[row * K + k0 + tx];
+    Bs[ty][tx] = b[(k0 + ty) * N + col];
+    memoryBarrierShared();
+    barrier();
+    for (uint k = 0u; k < T; ++k) acc += float(As[ty][k]) * float(Bs[k][tx]);
+    barrier();
+  }
+  c[row * N + col] = float16_t(acc);
+}

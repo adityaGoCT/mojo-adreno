@@ -1,0 +1,38 @@
+// Kernel 6: 2D register tiling. A 128 x 128 block of C per workgroup of 256 threads; each thread computes an
+// 8 x 8 sub-block. Per K step it loads 8 A values and 8 B values from shared memory into registers and does
+// 64 multiply-adds with them: 4 per shared-memory load instead of ~1.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+const uint BM = 128u, BN = 128u, BK = 8u, TM = 8u, TN = 8u, NT = (BM / TM) * (BN / TN);
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+shared float16_t As[BM * BK], Bs[BK * BN];
+
+void main() {
+  uint t = gl_LocalInvocationID.x;
+  uint tr = t / (BN / TN), tc = t % (BN / TN);
+  uint brow = gl_WorkGroupID.y * BM, bcol = gl_WorkGroupID.x * BN;
+  float acc[TM * TN], ra[TM], rb[TN];
+  [[unroll]] for (uint i = 0u; i < TM * TN; ++i) acc[i] = 0.0;
+  for (uint k0 = 0u; k0 < K; k0 += BK) {
+    [[unroll]] for (uint i = t; i < BM * BK; i += NT) As[i] = a[(brow + i / BK) * K + k0 + i % BK];
+    [[unroll]] for (uint i = t; i < BK * BN; i += NT) Bs[i] = b[(k0 + i / BN) * N + bcol + i % BN];
+    memoryBarrierShared();
+    barrier();
+    [[unroll]] for (uint k = 0u; k < BK; ++k) {
+      [[unroll]] for (uint i = 0u; i < TM; ++i) ra[i] = float(As[(tr * TM + i) * BK + k]);
+      [[unroll]] for (uint j = 0u; j < TN; ++j) rb[j] = float(Bs[k * BN + tc * TN + j]);
+      [[unroll]] for (uint i = 0u; i < TM; ++i)
+        [[unroll]] for (uint j = 0u; j < TN; ++j) acc[i * TN + j] += ra[i] * rb[j];
+    }
+    barrier();
+  }
+  [[unroll]] for (uint i = 0u; i < TM; ++i)
+    [[unroll]] for (uint j = 0u; j < TN; ++j)
+      c[(brow + tr * TM + i) * N + bcol + tc * TN + j] = float16_t(acc[i * TN + j]);
+}

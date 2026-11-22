@@ -25,10 +25,17 @@ Vulkan SPIR-V target, KHR cooperative matrices from Mojo, and Llama 3.2 1B on a 
 (Adreno 840): a 431-token prompt in 0.63 s on the matrix units instead of 17.7 s, decode at 42 ms/token, and
 with 4-bit weights 13-15 ms/token.
 
-Part 5: **[AdrenoBLAS: fp16 GEMM at 97% of a Phone GPU's Matrix Peak](BLOG-ABLAS.md)**: a cuBLAS-style GEMM
-library for the Adreno 850's matrix units ([`ablas/`](ablas/)): 17.0 TFLOP/s at 4096 x 4096 x 8192 (97%) and 16.4 at
-4096³ against a measured 17.5 peak, what assembly can and can't do on the 850 and the 840 ([`asm/`](asm/)), and seven driver bugs
-with estimated gains if fixed ([`urgent_matter.md`](urgent_matter.md)).
+Part 5: **[AdrenoBLAS: fp16 GEMM at 97% of a Phone GPU's Matrix Peak, and Llama 3.2 3B Prefill at 2,600 Tokens/s](BLOG-ABLAS.md)**:
+a cuBLAS-style GEMM library for the Adreno 850's matrix units ([`ablas/`](ablas/)): 17.0 TFLOP/s at 4096 x 4096 x 8192
+(97%) and 16.4 at 4096³ against a measured 17.5 peak, Q4_0 GEMM at up to 17.7 and fused epilogues; Llama 3.2 3B prefill
+([`ablas/llama3b/`](ablas/llama3b/)) at 2,602 tokens/s (Q4_0) and 2,318 (fp16) for 512 tokens, 5.7x llama.cpp's OpenCL
+backend on the same phone; what assembly can and can't do on the 850 and the 840 ([`asm/`](asm/)), and eleven driver
+bugs with estimated gains if fixed ([`urgent_matter.md`](urgent_matter.md)).
+
+Companion: **[How to Optimize a GEMM for a Phone GPU: an Adreno 850 Worklog](BLOG-GEMM-WORKLOG.md)**: fifteen kernels for one
+fp16 GEMM in the style of Simon Boehm's CUDA worklog ([`gemm_worklog/`](gemm_worklog/)), from a naive kernel at 0.028
+TFLOP/s through coalescing, shared memory, register tiles and fp16 math on the ALUs (4.4) to the matrix units at
+16.7 TFLOP/s at 4096³, each step measured and explained with the driver's own statistics.
 
 **[Bonsai 2 2B (ternary weights) on the Adreno 840](bonsai/README.md)**: the Mojo kernels of
 [mav3ri3k/modular](https://github.com/mav3ri3k/modular)'s Android OpenCL port, unchanged, compiled by
@@ -660,7 +667,8 @@ ref/               hand-written Vulkan IR, reference OpenCL kernel
 scripts/setup.sh   host tools and the Mojo venv
 BLOG.md            the write-up (Part 3: the retargeters, Llama on the Adreno 710)
 BLOG-COOPMAT.md    Part 4: the native target, cooperative matrices, Llama prefill on the Adreno 840
-BLOG-ABLAS.md      Part 5: AdrenoBLAS, fp16 GEMM on the Adreno 850's matrix units; asm/ peak and assembly probes
+BLOG-ABLAS.md      Part 5: AdrenoBLAS, fp16/Q4_0 GEMM on the Adreno 850's matrix units, Llama 3.2 3B prefill; asm/ probes
+BLOG-GEMM-WORKLOG.md  companion: fifteen GEMM kernels on the Adreno 850, naive to matrix units (gemm_worklog/)
 urgent_matter.md   the Adreno driver bugs behind the remaining GEMM gap, with estimated gains if fixed
 ```
 

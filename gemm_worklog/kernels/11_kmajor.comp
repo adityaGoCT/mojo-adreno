@@ -1,0 +1,28 @@
+// Kernel 11: A stored K-major, as [K, M]. Kernel 10's A tile was 64 rows of 32 bytes, each row in a different
+// cache line; read as a column-major view of [K, M] the same 64 x 16 tile is 16 rows of 128 contiguous bytes.
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };   // [K, M]: A transposed
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };   // [K, N] row-major
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+#define RM gl_CooperativeMatrixLayoutRowMajor
+#define CM gl_CooperativeMatrixLayoutColumnMajor
+
+void main() {
+  uint row0 = gl_WorkGroupID.y * 64u, col0 = gl_WorkGroupID.x * 32u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator> acc =
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator>(0.0);
+  for (uint k = 0u; k < K; k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> mb;
+    coopMatLoad(ma, a, k * M + row0, M, CM);   // 16 runs of 128 bytes
+    coopMatLoad(mb, b, k * N + col0, N, RM);
+    acc = coopMatMulAdd(ma, mb, acc);
+  }
+  coopMatStore(acc, c, row0 * N + col0, N, RM);
+}

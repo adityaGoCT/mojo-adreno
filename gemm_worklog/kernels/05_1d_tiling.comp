@@ -1,0 +1,34 @@
+// Kernel 5: 1D register tiling. A 64 x 64 block of C per workgroup of 512 threads; each thread computes TM = 8
+// outputs down one column. Per K step a thread reads one B value from shared memory and reuses it for 8 A values
+// (8 multiply-adds per B load instead of 1).
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+const uint BM = 64u, BN = 64u, BK = 8u, TM = 8u;
+layout(local_size_x = 512) in;   // (BM / TM) x BN threads
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+shared float16_t As[BM * BK], Bs[BK * BN];
+
+void main() {
+  uint t = gl_LocalInvocationID.x;
+  uint tcol = t % BN, trow = t / BN;   // this thread: rows trow * TM .. + TM - 1 of the block, column tcol
+  uint brow = gl_WorkGroupID.y * BM, bcol = gl_WorkGroupID.x * BN;
+  float acc[TM];
+  [[unroll]] for (uint i = 0u; i < TM; ++i) acc[i] = 0.0;
+  for (uint k0 = 0u; k0 < K; k0 += BK) {
+    As[t] = a[(brow + t / BK) * K + k0 + t % BK];   // BM x BK tile, one element per thread
+    Bs[t] = b[(k0 + t / BN) * N + bcol + t % BN];   // BK x BN tile
+    memoryBarrierShared();
+    barrier();
+    [[unroll]] for (uint k = 0u; k < BK; ++k) {
+      float bv = float(Bs[k * BN + tcol]);
+      [[unroll]] for (uint i = 0u; i < TM; ++i) acc[i] += float(As[(trow * TM + i) * BK + k]) * bv;
+    }
+    barrier();
+  }
+  [[unroll]] for (uint i = 0u; i < TM; ++i) c[(brow + trow * TM + i) * N + bcol + tcol] = float16_t(acc[i]);
+}

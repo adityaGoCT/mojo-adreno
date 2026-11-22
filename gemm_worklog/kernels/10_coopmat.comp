@@ -1,0 +1,29 @@
+// Kernel 10: the matrix units. One subgroup (64 lanes) per workgroup computes a 64 x 32 block of C with
+// cooperative matrices: per 16-wide K step it loads a 64 x 16 tile of A and a 16 x 32 tile of B straight from the
+// row-major matrices and does one 64 x 32 x 16 multiply-add on the matrix unit. fp16 accumulator: the unit keeps
+// more precision internally (and this driver's fp32-to-fp16 accumulator conversion is broken).
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };   // [M, K] row-major
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };   // [K, N] row-major
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+#define RM gl_CooperativeMatrixLayoutRowMajor
+
+void main() {
+  uint row0 = gl_WorkGroupID.y * 64u, col0 = gl_WorkGroupID.x * 32u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator> acc =
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator>(0.0);
+  for (uint k = 0u; k < K; k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> mb;
+    coopMatLoad(ma, a, row0 * K + k, K, RM);   // 64 rows of 16 halves (32 bytes), K apart
+    coopMatLoad(mb, b, k * N + col0, N, RM);   // 16 rows of 32 halves (64 bytes), N apart
+    acc = coopMatMulAdd(ma, mb, acc);
+  }
+  coopMatStore(acc, c, row0 * N + col0, N, RM);
+}

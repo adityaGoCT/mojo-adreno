@@ -1,0 +1,59 @@
+// Kernel 7: 128-bit memory access. Kernel 6's 128 x 128 block and 8 x 8 per thread, with every global load a
+// uvec4 (8 halves), the A tile stored TRANSPOSED in shared memory (As[k][m]) so that a thread's 8 rows of A are
+// adjacent like its 8 columns of B, shared memory read as f16vec4 (64-bit) and C written as uvec4.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+const uint BM = 128u, BN = 128u, BK = 16u, TM = 8u, TN = 8u, NT = (BM / TM) * (BN / TN);
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly restrict buffer A { uvec4 a4[]; };   // 8 halves per element
+layout(std430, binding = 1) readonly restrict buffer B { uvec4 b4[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { uvec4 c4[]; };
+shared f16vec4 As[BK * BM / 4u];   // As[k][m]: transposed
+shared f16vec4 Bs[BK * BN / 4u];   // Bs[k][n]
+
+f16vec4 lo(uvec4 v) { return f16vec4(unpackFloat2x16(v.x), unpackFloat2x16(v.y)); }
+f16vec4 hi(uvec4 v) { return f16vec4(unpackFloat2x16(v.z), unpackFloat2x16(v.w)); }
+
+void main() {
+  uint t = gl_LocalInvocationID.x;
+  uint tr = t / (BN / TN), tc = t % (BN / TN);
+  uint brow = gl_WorkGroupID.y * BM, bcol = gl_WorkGroupID.x * BN;
+  vec4 acc[TM][TN / 4u];
+  [[unroll]] for (uint i = 0u; i < TM; ++i) [[unroll]] for (uint j = 0u; j < TN / 4u; ++j) acc[i][j] = vec4(0.0);
+  for (uint k0 = 0u; k0 < K; k0 += BK) {
+    [[unroll]] for (uint i = t; i < BM * BK / 8u; i += NT) {   // A tile: 8 K values of one row per load
+      uint r = i / (BK / 8u), kc = (i % (BK / 8u)) * 8u;
+      uvec4 v = a4[((brow + r) * K + k0 + kc) / 8u];
+      f16vec4 x = lo(v), y = hi(v);
+      [[unroll]] for (uint e = 0u; e < 4u; ++e) {
+        As[(kc + e) * (BM / 4u) + r / 4u][r % 4u] = x[e];
+        As[(kc + 4u + e) * (BM / 4u) + r / 4u][r % 4u] = y[e];
+      }
+    }
+    [[unroll]] for (uint i = t; i < BK * BN / 8u; i += NT) {   // B tile: 8 columns of one K row per load
+      uint r = i / (BN / 8u), c8 = (i % (BN / 8u)) * 8u;
+      uvec4 v = b4[((k0 + r) * N + bcol + c8) / 8u];
+      Bs[r * (BN / 4u) + c8 / 4u] = lo(v);
+      Bs[r * (BN / 4u) + c8 / 4u + 1u] = hi(v);
+    }
+    memoryBarrierShared();
+    barrier();
+    [[unroll]] for (uint k = 0u; k < BK; ++k) {
+      vec4 ra[TM / 4u], rb[TN / 4u];
+      [[unroll]] for (uint i = 0u; i < TM / 4u; ++i) ra[i] = vec4(As[k * (BM / 4u) + tr * (TM / 4u) + i]);
+      [[unroll]] for (uint j = 0u; j < TN / 4u; ++j) rb[j] = vec4(Bs[k * (BN / 4u) + tc * (TN / 4u) + j]);
+      [[unroll]] for (uint i = 0u; i < TM; ++i)
+        [[unroll]] for (uint j = 0u; j < TN / 4u; ++j) acc[i][j] += ra[i / 4u][i % 4u] * rb[j];
+    }
+    barrier();
+  }
+  [[unroll]] for (uint i = 0u; i < TM; ++i)
+    [[unroll]] for (uint j = 0u; j < TN / 8u; ++j) {
+      f16vec4 p = f16vec4(acc[i][2u * j]), q = f16vec4(acc[i][2u * j + 1u]);
+      c4[((brow + tr * TM + i) * N + bcol + tc * TN + 8u * j) / 8u] =
+          uvec4(packFloat2x16(p.xy), packFloat2x16(p.zw), packFloat2x16(q.xy), packFloat2x16(q.zw));
+    }
+}

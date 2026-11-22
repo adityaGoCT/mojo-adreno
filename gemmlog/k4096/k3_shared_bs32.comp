@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#define M 4096u
+#define N 4096u
+#define K 4096u
+layout(std430, binding = 0) readonly buffer A_ { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer B_ { float16_t b[]; };
+layout(std430, binding = 2) writeonly buffer C_ { float16_t c[]; };
+#define BS 32u
+layout(local_size_x = 32, local_size_y = 32) in;
+shared float As[BS * BS];
+shared float Bs[BS * BS];
+void main() {
+  uint tx = gl_LocalInvocationID.x, ty = gl_LocalInvocationID.y;
+  uint row = gl_WorkGroupID.y * BS + ty, col = gl_WorkGroupID.x * BS + tx;
+  float acc = 0.0;
+  for (uint k0 = 0u; k0 < K; k0 += BS) {
+    As[ty * BS + tx] = float(a[row * K + k0 + tx]);
+    Bs[ty * BS + tx] = float(b[(k0 + ty) * N + col]);
+    barrier();
+    [[unroll]] for (uint k = 0u; k < BS; ++k) acc += As[ty * BS + k] * Bs[k * BS + tx];
+    barrier();
+  }
+  c[row * N + col] = float16_t(acc);
+}

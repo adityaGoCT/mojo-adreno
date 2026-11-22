@@ -1,0 +1,39 @@
+// Kernel 15: K contiguous inside each tile. On the 850 each lane of the matrix unit holds one ROW of A and one
+// COLUMN of B along K (16 halves each). Kernel 14's tiles store K outside (A column-major, B row-major), so a lane's
+// 16 halves sit 128 bytes apart and the compiler issues 8 texture reads per K step. Storing A tiles row-major and B
+// tiles column-major puts each lane's 32 bytes side by side: 2 reads per step. Only the strides and the layout
+// flags change. With WM = WN = 2 this is AdrenoBLAS's tuned kernel for 4096^3.
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#ifndef WM_
+#define WM_ 2
+#define WN_ 2
+#define NT_ 256
+#endif
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K, WM = WM_, WN = WN_;
+layout(local_size_x = NT_) in;   // 64 * WM * WN
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+#define RM gl_CooperativeMatrixLayoutRowMajor
+#define CM gl_CooperativeMatrixLayoutColumnMajor
+
+void main() {
+  uint sg = gl_SubgroupID;
+  uint row0 = gl_WorkGroupID.y * (64u * WM) + (sg / WN) * 64u, col0 = gl_WorkGroupID.x * (64u * WN) + (sg % WN) * 64u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc =
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0.0);
+  uint pa = (row0 / 64u) * (K / 16u) * 1024u, pb = (col0 / 64u) * (K / 16u) * 1024u;
+  for (uint k = 0u; k < K; k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> mb;
+    coopMatLoad(ma, a, pa + (k / 16u) * 1024u, 16, RM);   // row r of the tile: 16 adjacent halves
+    coopMatLoad(mb, b, pb + (k / 16u) * 1024u, 16, CM);   // column n: 16 adjacent halves
+    acc = coopMatMulAdd(ma, mb, acc);
+  }
+  coopMatStore(acc, c, row0 * N + col0, N, RM);
+}

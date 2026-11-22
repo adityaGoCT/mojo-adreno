@@ -1,0 +1,17 @@
+// Kernel 1: naive. One thread per output, fp32 accumulation.
+// gl_GlobalInvocationID.x walks M, so the 64 lanes of a subgroup take 64 consecutive ROWS of C in one column.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+layout(local_size_x = 64, local_size_y = 4) in;
+layout(std430, binding = 0) buffer A { float16_t a[]; };   // [M, K] row-major
+layout(std430, binding = 1) buffer B { float16_t b[]; };   // [K, N] row-major
+layout(std430, binding = 2) buffer C { float16_t c[]; };   // [M, N] row-major
+
+void main() {
+  uint row = gl_GlobalInvocationID.x, col = gl_GlobalInvocationID.y;
+  float acc = 0.0;
+  for (uint k = 0u; k < K; ++k) acc += float(a[row * K + k]) * float(b[k * N + col]);
+  c[row * N + col] = float16_t(acc);
+}

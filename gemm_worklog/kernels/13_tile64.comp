@@ -1,0 +1,30 @@
+// Kernel 13: one 64 x 64 tile per subgroup. B panels become 64 wide ([N/64][K/16] tiles of 16 x 64, 2 KB), so
+// each K step is one 2 KB load of A, one 2 KB load of B and one 64 x 64 x 16 multiply-add: twice the work per
+// load of kernel 12. (Two 64-wide accumulators per subgroup hang this driver; one is fine.)
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+const uint M = SIZE_M, N = SIZE_N, K = SIZE_K;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly restrict buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly restrict buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly restrict buffer C { float16_t c[]; };
+#define RM gl_CooperativeMatrixLayoutRowMajor
+#define CM gl_CooperativeMatrixLayoutColumnMajor
+
+void main() {
+  uint row0 = gl_WorkGroupID.y * 64u, col0 = gl_WorkGroupID.x * 64u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc =
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0.0);
+  uint pa = (row0 / 64u) * (K / 16u) * 1024u, pb = (col0 / 64u) * (K / 16u) * 1024u;
+  for (uint k = 0u; k < K; k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> mb;
+    coopMatLoad(ma, a, pa + (k / 16u) * 1024u, 64, CM);
+    coopMatLoad(mb, b, pb + (k / 16u) * 1024u, 64, RM);
+    acc = coopMatMulAdd(ma, mb, acc);
+  }
+  coopMatStore(acc, c, row0 * N + col0, N, RM);
+}

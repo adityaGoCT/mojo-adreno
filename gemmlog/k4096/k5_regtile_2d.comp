@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#define M 4096u
+#define N 4096u
+#define K 4096u
+layout(std430, binding = 0) readonly buffer A_ { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer B_ { float16_t b[]; };
+layout(std430, binding = 2) writeonly buffer C_ { float16_t c[]; };
+#define BM 128u
+#define BN 128u
+#define BK 8u
+#define TM 8u
+#define TN 8u
+layout(local_size_x = 256) in;
+shared float As[BM * BK];
+shared float Bs[BK * BN];
+void main() {
+  uint t = gl_LocalInvocationID.x;
+  uint m0 = gl_WorkGroupID.y * BM, n0 = gl_WorkGroupID.x * BN;
+  uint tcol = t % (BN / TN), trow = t / (BN / TN);
+  float acc[TM * TN], rm[TM], rn[TN];
+  [[unroll]] for (uint i = 0u; i < TM * TN; ++i) acc[i] = 0.0;
+  for (uint k0 = 0u; k0 < K; k0 += BK) {
+    [[unroll]] for (uint l = 0u; l < 4u; ++l) {       // A tile 128 x 8 and B tile 8 x 128: 4 elements each
+      uint i = t + l * 256u;
+      As[i] = float(a[(m0 + i / BK) * K + k0 + i % BK]);
+      Bs[i] = float(b[(k0 + i / BN) * N + n0 + i % BN]);
+    }
+    barrier();
+    [[unroll]] for (uint d = 0u; d < BK; ++d) {
+      [[unroll]] for (uint i = 0u; i < TM; ++i) rm[i] = As[(trow * TM + i) * BK + d];
+      [[unroll]] for (uint j = 0u; j < TN; ++j) rn[j] = Bs[d * BN + tcol * TN + j];
+      [[unroll]] for (uint i = 0u; i < TM; ++i)
+        [[unroll]] for (uint j = 0u; j < TN; ++j) acc[i * TN + j] += rm[i] * rn[j];
+    }
+    barrier();
+  }
+  [[unroll]] for (uint i = 0u; i < TM; ++i)
+    [[unroll]] for (uint j = 0u; j < TN; ++j) c[(m0 + trow * TM + i) * N + n0 + tcol * TN + j] = float16_t(acc[i * TN + j]);
+}
