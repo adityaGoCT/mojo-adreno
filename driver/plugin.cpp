@@ -48,7 +48,8 @@ const char *env(const char *name) {
 
 const char *opNames[] = {"", "info", "alloc", "free", "write", "read", "fill", "copy", "load", "launch", "sync",
                          "file", "gather", "record", "replay", "npu_open", "npu_rope", "npu_prefix", "npu_time",
-                         "npug_open", "npug_run", "npug_time"};
+                         "npug_open", "npug_run", "npug_time", "graph_begin", "graph_end", "graph_launch",
+                         "graph_free"};
 
 // VK_DRIVER_PROFILE: per request type, how many, how long the plugin waited, and bytes sent and
 // received, printed at exit.
@@ -1149,6 +1150,45 @@ __attribute__((visibility("default"))) int M_driver_remote_npug_time(double *ms)
     return -1;
   memcpy(ms, out.data(), 8);
   return 0;
+}
+
+// Recorded command buffers (driver/executor.c, OP_GRAPH_*), for work that repeats, such as a decode step:
+// - M_driver_vulkan_graph_begin(): waits for the work so far, then keeps the launches, device copies and fills that
+//   follow in Vulkan command buffers (they still run as they come). Synchronize the DeviceContext first.
+// - M_driver_vulkan_graph_end(): stops; returns the graph's id (> 0), or -1 (an error in it, or nothing recorded).
+// - M_driver_vulkan_graph_launch(id, count): submits its command buffers again `count` times, after the work before
+//   it and before the work after it, without encoding a launch. Returns 0, or -1; GPU errors come at the next
+//   synchronize.
+// - M_driver_vulkan_graph_free(id): waits for the GPU, then releases it.
+// Refused while recording: copies to or from the host, file reads, frees and kernel loads. A launch's scalar
+// arguments are baked in: what changes between replays (a position, a token) must be in device memory, written
+// between them. Freeing a buffer a graph uses, or loading its kernel again, makes the graph's launch fail.
+// Mojo: OwnedDLHandle(path).call["M_driver_vulkan_graph_begin", Int32]().
+__attribute__((visibility("default"))) int M_driver_vulkan_graph_begin() {
+  return call(OP_GRAPH_BEGIN, nullptr, 0) ? 0 : -1;
+}
+
+__attribute__((visibility("default"))) int M_driver_vulkan_graph_end() {
+  std::string out;
+  if (!call(OP_GRAPH_END, nullptr, 0, nullptr, 0, &out) || out.size() != 4)
+    return -1;
+  uint32_t id;
+  memcpy(&id, out.data(), 4);
+  return static_cast<int>(id);
+}
+
+__attribute__((visibility("default"))) int M_driver_vulkan_graph_launch(int id, int count) {
+  if (id <= 0 || count < 0)
+    return -1;
+  uint32_t v[2] = {static_cast<uint32_t>(id), static_cast<uint32_t>(count)};
+  return call(OP_GRAPH_LAUNCH, v, 8) ? 0 : -1;
+}
+
+__attribute__((visibility("default"))) int M_driver_vulkan_graph_free(int id) {
+  if (id <= 0)
+    return -1;
+  uint32_t v = static_cast<uint32_t>(id);
+  return call(OP_GRAPH_FREE, &v, 4) ? 0 : -1;
 }
 
 }  // extern "C"

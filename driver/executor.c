@@ -51,7 +51,7 @@
   X(vkQueueWaitIdle) X(vkGetPhysicalDeviceFeatures2) X(vkDestroyBuffer) X(vkFreeMemory)          \
   X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdFillBuffer) X(vkDestroyShaderModule)         \
   X(vkDestroyPipeline) X(vkDestroyPipelineLayout) X(vkDestroyDescriptorSetLayout)                 \
-  X(vkCreatePipelineCache) X(vkGetPipelineCacheData)
+  X(vkCreatePipelineCache) X(vkGetPipelineCacheData) X(vkFreeCommandBuffers) X(vkDestroyDescriptorPool)
 
 #define DECL(f) static PFN_##f f;
 VK_FUNCS(DECL)
@@ -70,9 +70,11 @@ static VkPhysicalDeviceProperties props;
 static uint32_t subgroup;      // the required subgroup size, or 0
 static int full_subgroups;     // computeFullSubgroups
 static VkDescriptorPool pool;
+static VkCommandPool cpool;
 static VkCommandBuffer cmds[MAX_SUBMITS];
 static VkCommandBuffer cmd;    // the one being recorded, or NULL
 static int submit_every = 1;
+static int graph_every;        // commands a command buffer while recording a graph (VK_GRAPH_EVERY; default submit_every)
 static int in_cmd;             // commands in `cmd`
 static int nsubmitted;         // command buffers submitted since the last wait
 static int pending;            // commands since the last wait
@@ -177,6 +179,103 @@ static int in_range(buffer_t* b, uint64_t offset, uint64_t size) {
   return b && offset <= b->size && size <= b->size - offset;
 }
 
+// --- recorded graphs -------------------------------------------------------------------------
+//
+// Between GRAPH_BEGIN and GRAPH_END the launches, device-side copies and fills go into command buffers that are kept
+// (VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT), with descriptor sets and params of their own, and still run as
+// they come. GRAPH_LAUNCH submits those command buffers again, `count` times, behind the work before it: no
+// descriptor set, params copy or command is encoded, so a decode step's hundreds of launches cost a few submissions.
+// The command buffers are cut where the batch cuts them (`submit_every` commands, VK_GRAPH_EVERY to choose otherwise;
+// a big launch alone), and each is its own batch of the replay's one vkQueueSubmit, so a replay never outlasts the
+// watchdog where the first run didn't.
+// What a graph cannot hold is refused while recording: host access to memory (WRITE, FILE, GATHER, a fill the host
+// does) and FREE or LOAD. A FREE or LOAD of something a graph uses makes it stale (its launch is refused). A launch's
+// params are baked in: anything that changes between replays (a decode position) must live in a buffer that the
+// host writes between them.
+typedef struct {
+  VkCommandBuffer* cbs;  // in submission order
+  int ncb;
+  VkDescriptorPool* pools;  // its descriptor sets
+  int npools;
+  buffer_t* arenas;  // its params
+  int narenas;
+  uint64_t arena_used;
+  uint64_t *bufs, *mods;  // the buffers and modules it uses
+  int nbufs, nmods;
+  int commands, used, stale;
+} graph_t;
+
+#define GRAPH_POOL_SETS 512
+#define GRAPH_POOL_DESCRIPTORS (GRAPH_POOL_SETS * 16)
+
+static graph_t* graphs;
+static int ngraphs;
+static graph_t* rec;          // the graph being recorded, or NULL
+static int graph_submitted;   // graph command buffers submitted since the last wait
+
+static void graph_note(uint64_t** list, int* n, uint64_t id) {
+  for (int i = 0; i < *n; ++i)
+    if ((*list)[i] == id) return;
+  *list = realloc(*list, (*n + 1) * sizeof **list);
+  (*list)[(*n)++] = id;
+}
+
+// A descriptor set for the graph being recorded, from its own pools (never reset).
+static VkDescriptorSet graph_set(VkDescriptorSetLayout dsl) {
+  VkDescriptorSet ds = VK_NULL_HANDLE;
+  VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, VK_NULL_HANDLE, 1, &dsl};
+  if (rec->npools) {
+    dai.descriptorPool = rec->pools[rec->npools - 1];
+    if (vkAllocateDescriptorSets(dev, &dai, &ds) == VK_SUCCESS) return ds;
+  }
+  VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, GRAPH_POOL_DESCRIPTORS};
+  VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, GRAPH_POOL_SETS, 1, &ps};
+  VkDescriptorPool p;
+  if (vkCreateDescriptorPool(dev, &dpi, NULL, &p) != VK_SUCCESS) return VK_NULL_HANDLE;
+  rec->pools = realloc(rec->pools, (rec->npools + 1) * sizeof *rec->pools);
+  rec->pools[rec->npools++] = p;
+  dai.descriptorPool = p;
+  return vkAllocateDescriptorSets(dev, &dai, &ds) == VK_SUCCESS ? ds : VK_NULL_HANDLE;
+}
+
+// n bytes of params for the graph being recorded: its arena, and the offset in *at.
+static buffer_t* graph_params(uint64_t n, uint64_t* at) {
+  uint64_t align = props.limits.minStorageBufferOffsetAlignment;
+  uint64_t a = (rec->arena_used + align - 1) / align * align;
+  if (!rec->narenas || a + n > PARAMS_ARENA) {
+    rec->arenas = realloc(rec->arenas, (rec->narenas + 1) * sizeof *rec->arenas);
+    if (make_buffer(&rec->arenas[rec->narenas], PARAMS_ARENA)) return NULL;
+    rec->narenas++;
+    a = 0;
+  }
+  rec->arena_used = a + n;
+  *at = a;
+  return &rec->arenas[rec->narenas - 1];
+}
+
+// Releases a graph's command buffers, descriptor pools and params (the GPU is done with them).
+static void graph_release(graph_t* g) {
+  if (g->ncb) vkFreeCommandBuffers(dev, cpool, (uint32_t)g->ncb, g->cbs);
+  for (int i = 0; i < g->npools; ++i) vkDestroyDescriptorPool(dev, g->pools[i], NULL);
+  for (int i = 0; i < g->narenas; ++i) {
+    vkDestroyBuffer(dev, g->arenas[i].buf, NULL);
+    vkFreeMemory(dev, g->arenas[i].mem, NULL);
+  }
+  free(g->cbs), free(g->pools), free(g->arenas), free(g->bufs), free(g->mods);
+  memset(g, 0, sizeof *g);
+}
+
+// Graphs that use buffer (or module) `id` become stale: it is gone, or its pipelines are.
+static void graphs_drop(int module, uint64_t id) {
+  for (int i = 0; i < ngraphs; ++i) {
+    graph_t* g = &graphs[i];
+    uint64_t* list = module ? g->mods : g->bufs;
+    int n = module ? g->nmods : g->nbufs;
+    for (int k = 0; k < n; ++k)
+      if (list[k] == id) g->stale = 1;
+  }
+}
+
 // --- the batch -------------------------------------------------------------------------------
 
 static double batch_start;
@@ -203,13 +302,32 @@ static void submit(void) {
   si.pCommandBuffers = &cmd;
   VkResult r = vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
   if (r != VK_SUCCESS) fail("submit failed: VkResult %d", (int)r);
-  ++nsubmitted;
+  if (rec) ++graph_submitted;  // a graph's command buffer: kept, not one of `cmds`
+  else ++nsubmitted;
   cmd = VK_NULL_HANDLE;
   in_cmd = 0;
 }
 
-// Starts recording the next command, after a barrier on the ones before it.
-static void begin_command(void) {
+// Starts recording the next command, after a barrier on the ones before it. Returns -1 (and fails) if there is no
+// command buffer to record it into.
+static int begin_command(void) {
+  if (rec) {  // into a new command buffer of the graph, kept for its replays
+    if (!cmd) {
+      VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, cpool,
+                                         VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+      VkCommandBuffer c;
+      if (vkAllocateCommandBuffers(dev, &cai, &c) != VK_SUCCESS)
+        return fail("cannot allocate a command buffer for the graph"), -1;
+      rec->cbs = realloc(rec->cbs, (rec->ncb + 1) * sizeof *rec->cbs);
+      rec->cbs[rec->ncb++] = c;
+      cmd = c;
+      VkCommandBufferBeginInfo bbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+      bbi.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;  // a replay of n submits it n times at once
+      vkBeginCommandBuffer(cmd, &bbi);
+    }
+    record_barrier();
+    return 0;
+  }
   if (pending == MAX_PENDING) flush();
   if (!cmd) {
     if (nsubmitted == MAX_SUBMITS) flush();
@@ -221,24 +339,27 @@ static void begin_command(void) {
     vkBeginCommandBuffer(cmd, &bbi);
   }
   record_barrier();
+  return 0;
 }
 
 static void end_command(void) {
-  ++pending;
-  if (++in_cmd >= submit_every) submit();
+  if (rec) ++rec->commands;
+  else ++pending;
+  if (++in_cmd >= (rec ? graph_every : submit_every)) submit();
 }
 
 // Waits for the commands in flight: before the host touches memory, and at SYNC.
 static void flush(void) {
   submit();
-  if (!nsubmitted) return;
+  if (!nsubmitted && !graph_submitted) return;
   double t0 = now_ms();
   VkResult r = vkQueueWaitIdle(queue);
   if (profile)
-    fprintf(stderr, "%d commands in %d submissions: recorded over %.1f ms, then waited %.1f ms\n", pending,
-            nsubmitted, t0 - batch_start, now_ms() - t0);
+    fprintf(stderr, "%d commands in %d submissions (+%d of graphs): recorded over %.1f ms, then waited %.1f ms\n",
+            pending, nsubmitted, graph_submitted, t0 - batch_start, now_ms() - t0);
   if (r != VK_SUCCESS) fail("%d commands failed: VkResult %d", pending, (int)r);
   nsubmitted = 0;
+  graph_submitted = 0;
   pending = 0;
   params_used = 0;
   vkResetDescriptorPool(dev, pool, 0);
@@ -259,6 +380,11 @@ static void drop_module(module_t* m) {
 // Frees what a client created: the next one names its buffers and modules from 1 again.
 void vkx_reset(void) {
   flush();
+  rec = NULL;
+  for (int i = 0; i < ngraphs; ++i) graph_release(&graphs[i]);
+  free(graphs);
+  graphs = NULL;
+  ngraphs = 0;
   for (uint64_t i = 0; i < nbuffers; ++i)
     if (buffers[i].buf) {
       vkDestroyBuffer(dev, buffers[i].buf, NULL);
@@ -379,13 +505,23 @@ static void launch(const char* p, uint32_t n) {
                 l->block[0], l->block[1], l->block[2]);
   uint64_t align = props.limits.minStorageBufferOffsetAlignment;
   uint64_t params_at = (params_used + align - 1) / align * align;
-  if (pending == MAX_PENDING || params_at + l->params_len > PARAMS_ARENA) flush(), params_at = 0;
-  VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, pool, 1, &dsl};
+  buffer_t* arena = &params;
   VkDescriptorSet ds;
-  if (vkAllocateDescriptorSets(dev, &dai, &ds) != VK_SUCCESS) {  // the pool is full: a new batch
-    flush();
-    params_at = 0;
-    if (vkAllocateDescriptorSets(dev, &dai, &ds) != VK_SUCCESS) return fail("cannot allocate a descriptor set");
+  if (rec) {  // a graph's: its own descriptor set and params, kept for its replays
+    ds = graph_set(dsl);
+    if (!ds) return fail("cannot allocate a descriptor set for the graph");
+    if (l->params_len && !(arena = graph_params(l->params_len, &params_at)))
+      return fail("cannot allocate params for the graph");
+    graph_note(&rec->mods, &rec->nmods, l->module);
+    for (uint32_t i = 0; i < l->nbind; ++i) graph_note(&rec->bufs, &rec->nbufs, binds[i].buffer);
+  } else {
+    if (pending == MAX_PENDING || params_at + l->params_len > PARAMS_ARENA) flush(), params_at = 0;
+    VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, pool, 1, &dsl};
+    if (vkAllocateDescriptorSets(dev, &dai, &ds) != VK_SUCCESS) {  // the pool is full: a new batch
+      flush();
+      params_at = 0;
+      if (vkAllocateDescriptorSets(dev, &dai, &ds) != VK_SUCCESS) return fail("cannot allocate a descriptor set");
+    }
   }
   VkDescriptorBufferInfo infos[MAX_BINDINGS + 1];
   VkWriteDescriptorSet writes[MAX_BINDINGS + 1];
@@ -398,16 +534,16 @@ static void launch(const char* p, uint32_t n) {
         return fail("binding %u: offset %llu is not a multiple of %llu", i, (unsigned long long)binds[i].offset,
                     (unsigned long long)align);
       infos[i] = (VkDescriptorBufferInfo){b->buf, binds[i].offset, VK_WHOLE_SIZE};
-    } else {  // the params, in the arena
-      memcpy(params.map + params_at, args, l->params_len);
-      infos[i] = (VkDescriptorBufferInfo){params.buf, params_at, l->params_len};
-      params_used = params_at + l->params_len;
+    } else {  // the params, in the arena (the graph's while recording)
+      memcpy(arena->map + params_at, args, l->params_len);
+      infos[i] = (VkDescriptorBufferInfo){arena->buf, params_at, l->params_len};
+      if (!rec) params_used = params_at + l->params_len;
     }
     writes[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, i, 0, 1,
                                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &infos[i], NULL};
   }
   vkUpdateDescriptorSets(dev, nbind, writes, 0, NULL);
-  begin_command();
+  if (begin_command()) return;
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
   vkCmdDispatch(cmd, l->groups[0], l->groups[1], l->groups[2]);
@@ -443,6 +579,9 @@ static FILE* open_file(const char* p, uint32_t n) {
 void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64_t ntail, vkx_answer_fn answer,
                 void* ctx) {
   const uint64_t* w = (const uint64_t*)p;
+  if (rec && (op == OP_FREE || op == OP_WRITE || op == OP_LOAD || op == OP_FILE || op == OP_GATHER ||
+              op == OP_GRAPH_BEGIN || op == OP_GRAPH_LAUNCH || op == OP_GRAPH_FREE))
+    return fail("request %u cannot be recorded into a graph (do it before GRAPH_BEGIN or between launches)", op);
   switch (op) {
   case OP_INFO: {
     char info[512];
@@ -472,6 +611,7 @@ void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64
     vkDestroyBuffer(dev, b->buf, NULL);
     vkFreeMemory(dev, b->mem, NULL);
     b->buf = VK_NULL_HANDLE;
+    graphs_drop(0, w[0]);
     return;
   }
   case OP_WRITE: {  // id, offset, bytes
@@ -501,11 +641,13 @@ void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64
     int on_gpu = w[1] % 4 == 0 && w[2] % 4 == 0 && w[4] <= 4 && 4 % w[4] == 0;
     for (uint64_t i = 0; on_gpu && i < 4; i += w[4]) memcpy((char*)&word + i, &w[3], w[4]);
     if (on_gpu && w[2]) {
-      begin_command();
+      if (begin_command()) return;
+      if (rec) graph_note(&rec->bufs, &rec->nbufs, w[0]);
       vkCmdFillBuffer(cmd, b->buf, w[1], w[2], word);
       end_command();
       return;
     }
+    if (rec) return fail("a fill done by the host cannot be recorded into a graph");
     flush();
     for (uint64_t i = 0; i < w[2]; i += w[4]) memcpy(b->map + w[1] + i, &w[3], w[2] - i < w[4] ? w[2] - i : w[4]);
     return;
@@ -514,7 +656,8 @@ void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64
     buffer_t *d = n == 40 ? buffer(w[0]) : NULL, *s = n == 40 ? buffer(w[2]) : NULL;
     if (!in_range(d, w[1], w[4]) || !in_range(s, w[3], w[4])) return fail("copy out of range");
     if (!w[4]) return;
-    begin_command();
+    if (begin_command()) return;
+    if (rec) graph_note(&rec->bufs, &rec->nbufs, w[0]), graph_note(&rec->bufs, &rec->nbufs, w[2]);
     VkBufferCopy region = {w[3], w[1], w[4]};
     vkCmdCopyBuffer(cmd, s->buf, d->buf, 1, &region);
     end_command();
@@ -531,6 +674,7 @@ void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64
     }
     flush();
     drop_module(&modules[w[0] - 1]);  // a name used again: never its old pipelines
+    graphs_drop(1, w[0]);
     VkShaderModuleCreateInfo smi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, size, (const uint32_t*)code};
     if (vkCreateShaderModule(dev, &smi, NULL, &modules[w[0] - 1].module) != VK_SUCCESS)
       return fail("bad SPIR-V module %llu", (unsigned long long)w[0]);
@@ -565,6 +709,64 @@ void vkx_handle(uint32_t op, const char* p, uint32_t n, const char* tail, uint64
       return fail("cannot gather row %d", (int)t);
     return;
   }
+  case OP_GRAPH_BEGIN: {
+    flush();  // the graph starts with the next command
+    graphs = realloc(graphs, (ngraphs + 1) * sizeof *graphs);
+    memset(&graphs[ngraphs], 0, sizeof *graphs);
+    rec = &graphs[ngraphs++];
+    rec->used = 1;
+    return;
+  }
+  case OP_GRAPH_END: {
+    if (!rec) {
+      fail("GRAPH_END without GRAPH_BEGIN");
+      return reply(answer, ctx, NULL, 0);
+    }
+    submit();  // its last command buffer, run like the others
+    graph_t* g = rec;
+    rec = NULL;
+    uint32_t id = (uint32_t)(g - graphs) + 1;
+    if (error[0] || !g->ncb) {  // something in it failed, or it is empty: no graph
+      if (!error[0]) fail("the graph recorded no commands");
+      flush();
+      graph_release(g);
+      return reply(answer, ctx, NULL, 0);
+    }
+    if (profile)
+      fprintf(stderr, "graph %u: %d commands in %d command buffers, %d buffers, %d modules\n", id, g->commands, g->ncb,
+              g->nbufs, g->nmods);
+    return reply(answer, ctx, &id, 4);
+  }
+  case OP_GRAPH_LAUNCH: {  // id, count
+    const uint32_t* v = (const uint32_t*)p;
+    graph_t* g = n == 8 && v[0] && v[0] <= (uint32_t)ngraphs && graphs[v[0] - 1].used ? &graphs[v[0] - 1] : NULL;
+    if (!g) return fail("bad graph %u", n >= 4 ? v[0] : 0);
+    if (g->stale) return fail("graph %u uses a buffer or module that was freed or loaded again", v[0]);
+    if (!v[1]) return;
+    submit();  // the work before it goes first
+    // One vkQueueSubmit: each command buffer its own batch, `count` times over.
+    uint32_t nsi = v[1] * (uint32_t)g->ncb;
+    VkSubmitInfo* si = calloc(nsi, sizeof *si);
+    for (uint32_t k = 0; k < nsi; ++k) {
+      si[k].sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      si[k].commandBufferCount = 1;
+      si[k].pCommandBuffers = &g->cbs[k % (uint32_t)g->ncb];
+    }
+    double t0 = now_ms();
+    VkResult r = vkQueueSubmit(queue, nsi, si, VK_NULL_HANDLE);
+    free(si);
+    if (r != VK_SUCCESS) return fail("graph %u: submit failed: VkResult %d", v[0], (int)r);
+    graph_submitted += (int)nsi;
+    if (profile) fprintf(stderr, "graph %u x%u: %u batches submitted in %.3f ms\n", v[0], v[1], nsi, now_ms() - t0);
+    return;
+  }
+  case OP_GRAPH_FREE: {  // id
+    uint32_t id = n == 4 ? *(const uint32_t*)p : 0;
+    if (!id || id > (uint32_t)ngraphs || !graphs[id - 1].used) return fail("bad graph %u to free", id);
+    flush();  // its replays may still run
+    graph_release(&graphs[id - 1]);
+    return;
+  }
   default:
     return fail("unknown request %u", op);
   }
@@ -590,7 +792,13 @@ int vkx_init(int submit_every_default) {
   if (env && atol(env) > 0) big_launch = atol(env);
   env = getenv("VK_SUBMIT_EVERY");
   submit_every = env && atoi(env) > 0 ? atoi(env) : submit_every_default > 0 ? submit_every_default : 1;
+  env = getenv("VK_GRAPH_EVERY");  // a graph's command buffers: as the batch cuts them unless asked otherwise
+  graph_every = env && atoi(env) > 0 ? atoi(env) : submit_every;
+#ifdef __APPLE__  // host testing through MoltenVK (a portability driver: listed only when asked for)
+  void* lib = dlopen("libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+#else
   void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+#endif
   if (!lib) return fail("dlopen libvulkan.so: %s", dlerror()), -1;
   PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
   if (!gipa) return fail("libvulkan.so has no vkGetInstanceProcAddr"), -1;
@@ -598,6 +806,12 @@ int vkx_init(int submit_every_default) {
   VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "mojo-vulkan", 1, NULL, 0, VK_API_VERSION_1_3};
   VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   ici.pApplicationInfo = &app;
+#ifdef __APPLE__
+  const char* portability = "VK_KHR_portability_enumeration";
+  ici.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+  ici.enabledExtensionCount = 1;
+  ici.ppEnabledExtensionNames = &portability;
+#endif
   VkInstance inst;
   if (vkCreateInstance(&ici, NULL, &inst) != VK_SUCCESS) return fail("no Vulkan 1.3 instance"), -1;
 #define LOAD(f) f = (PFN_##f)gipa(inst, #f);
@@ -656,12 +870,15 @@ int vkx_init(int submit_every_default) {
   en.features.shaderInt16 = f2.features.shaderInt16;
   float prio = 1.0f;
   VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, qfam, 1, &prio};
-  const char* cm_ext = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+  const char* exts[2];
+  uint32_t nexts = 0;
+  if (coopmat) exts[nexts++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+  if (has_extension(pd, "VK_KHR_portability_subset")) exts[nexts++] = "VK_KHR_portability_subset";  // MoltenVK
   VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &en};
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = coopmat ? 1 : 0;
-  dci.ppEnabledExtensionNames = &cm_ext;
+  dci.enabledExtensionCount = nexts;
+  dci.ppEnabledExtensionNames = exts;
   if (vkCreateDevice(pd, &dci, NULL, &dev) != VK_SUCCESS) return fail("cannot create the Vulkan device"), -1;
   vkGetDeviceQueue(dev, qfam, 0, &queue);
 
@@ -679,7 +896,6 @@ int vkx_init(int submit_every_default) {
   vkCreateDescriptorPool(dev, &dpi, NULL, &pool);
   VkCommandPoolCreateInfo cpo = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL,
                                  VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, qfam};
-  VkCommandPool cpool;
   vkCreateCommandPool(dev, &cpo, NULL, &cpool);
   VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, cpool,
                                      VK_COMMAND_BUFFER_LEVEL_PRIMARY, MAX_SUBMITS};

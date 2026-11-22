@@ -34,6 +34,7 @@ struct Api {
 #undef M_DRIVER_HAL_SYMBOL
 
 M_driver_driver_t driver;
+void *plugin;  // the plugin's handle, for its functions beyond MAX's (M_driver_vulkan_graph_*)
 M_driver_context_t context;
 M_driver_queue_t queue;
 int failures;
@@ -314,6 +315,73 @@ void testResidual(const std::string &dir, int count) {
          enqueued * 1e3 / count, ms, ms * 1e3 / count);
 }
 
+// Recorded command buffers (M_driver_vulkan_graph_*): the same `count` residual launches recorded once, then
+// replayed. x ends at x0 + (1 + replays) * count * y (the recording runs too). Times one replay at a time and
+// `replays` in one call, against the launches enqueued one by one (testResidual).
+void testGraph(const std::string &dir, int count, int replays) {
+  std::string file = dir + "/residual.spv";
+  using Begin = int (*)();
+  using End = int (*)();
+  using Launch = int (*)(int, int);
+  using Free = int (*)(int);
+  auto begin = reinterpret_cast<Begin>(dlsym(plugin, "M_driver_vulkan_graph_begin"));
+  auto end = reinterpret_cast<End>(dlsym(plugin, "M_driver_vulkan_graph_end"));
+  auto replay = reinterpret_cast<Launch>(dlsym(plugin, "M_driver_vulkan_graph_launch"));
+  auto release = reinterpret_cast<Free>(dlsym(plugin, "M_driver_vulkan_graph_free"));
+  if (readFile(file).empty() || !begin || !end || !replay || !release)
+    return (void)printf("%-48s skipped: no %s or no graph functions\n", "graph", file.c_str());
+  const int n = 2048;
+  std::vector<float> x(n), y(n);
+  for (int i = 0; i < n; ++i)
+    x[i] = static_cast<float>(i % 7), y[i] = static_cast<float>(i % 3);
+  Buffer bx = upload(x), by = upload(y);
+  Kernel kernel = load(file);
+  auto args = pack(kernel.description, {static_cast<int64_t>(bx.address), static_cast<int64_t>(by.address)});
+  check(api.queue_synchronize(queue), "queue_synchronize");
+  auto start = std::chrono::steady_clock::now();
+  if (begin())
+    return report("graph: begin", false, 0, 0);
+  for (int i = 0; i < count; ++i)
+    launch(kernel, args, {n / 64, 1, 1}, {64, 1, 1});
+  int id = end();
+  check(api.queue_synchronize(queue), "queue_synchronize");
+  double recorded = msSince(start);
+  if (id <= 0)
+    return report("graph: record", false, 0, recorded);
+  // One replay at a time, each waited for: its latency.
+  double one = 1e30;
+  int runs = 1;
+  for (int k = 0; k < 5; ++k, ++runs) {
+    start = std::chrono::steady_clock::now();
+    if (replay(id, 1))
+      return report("graph: launch", false, 0, 0);
+    check(api.queue_synchronize(queue), "queue_synchronize");
+    one = std::min(one, msSince(start));
+  }
+  // `replays` in one call.
+  start = std::chrono::steady_clock::now();
+  if (replay(id, replays))
+    return report("graph: launch", false, 0, 0);
+  double submitted = msSince(start);
+  check(api.queue_synchronize(queue), "queue_synchronize");
+  double many = msSince(start);
+  runs += replays;
+  std::vector<float> out = download<float>(bx);
+  double error = 0;
+  for (int i = 0; i < n; ++i)
+    error = std::max(error, static_cast<double>(std::fabs(out[i] - (x[i] + static_cast<float>(runs) * count * y[i]))));
+  report("graph: residual x" + std::to_string(count) + ", replayed", error == 0, error, many);
+  printf("  recorded (and ran) in %.2f ms; one replay %.2f ms (%.2f us a launch); %d replays in one call: submitted in "
+         "%.2f ms, done in %.2f ms (%.2f ms a replay, %.2f us a launch)\n",
+         recorded, one, one * 1e3 / count, replays, submitted, many, many / replays, many * 1e3 / replays / count);
+  // A freed buffer makes the graph's launch fail; then the graph is released.
+  check(api.memory_free_sync(context, by.memory), "memory_free_sync");
+  bool refused = replay(id, 1) != 0;
+  check(api.queue_synchronize(queue), "queue_synchronize");
+  report("graph: refused after a buffer it uses is freed", refused, 0, 0);
+  report("graph: released", release(id) == 0, 0, 0);
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -322,6 +390,7 @@ int main(int argc, char **argv) {
     return 2;
   }
   void *lib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+  plugin = lib;
   if (!lib) {
     fprintf(stderr, "dlopen %s: %s\n", argv[1], dlerror());
     return 1;
@@ -362,6 +431,7 @@ int main(int argc, char **argv) {
   testCoopmat(dir);
   testResidual(dir, 721);
   testResidual(dir, 721);  // again, with its pipeline made
+  testGraph(dir, 721, 20);
   printf("\n%s\n", failures ? "FAILED" : "all passed");
   check(api.queue_destroy(context, queue), "queue_destroy");
   check(api.context_destroy(context), "context_destroy");

@@ -71,6 +71,64 @@ driver), 721 launches in a row, as in one Bonsai token, take:
 `bonsai_vk.c` records a token's 721 dispatches once and resubmits them, at 12.4 ms a token. Through
 the plugin, each launch is encoded as it comes, and that work overlaps the GPU's.
 
+**Recorded command buffers (replay).** MAX's `DeviceGraph` (CUDA graphs) is CUDA and HIP only, and `M_driver_*` has
+no call for it, so the plugin exports its own. Programs use them as they use `M_driver_remote_file`:
+
+```mojo
+var lib = OwnedDLHandle("libM_driver_vulkan.so")
+ctx.synchronize()                                        # the graph starts with the next launch
+_ = lib.call["M_driver_vulkan_graph_begin", Int32]()
+model.decode_step(ctx)                                   # launches, device copies, fills: recorded and run
+var g = lib.call["M_driver_vulkan_graph_end", Int32]()   # graph id > 0, or -1
+for _ in range(steps):
+    ctx.enqueue_copy(pos_buf, pos_host)                  # what changes goes through device memory
+    _ = lib.call["M_driver_vulkan_graph_launch", Int32](g, Int32(1))   # no launch encoded
+    ...
+_ = lib.call["M_driver_vulkan_graph_free", Int32](g)
+```
+
+- Between `_begin` and `_end`, the executor puts the launches, device copies and fills into command buffers that it
+  keeps, with descriptor sets and params of their own, and runs them as usual. `_launch(id, count)` submits those
+  command buffers again `count` times, in order with the work around it, in one `vkQueueSubmit`. Nothing is encoded:
+  no descriptor set, no params copy, no command.
+- The command buffers are cut like the batch's: `VK_SUBMIT_EVERY` commands, or `VK_GRAPH_EVERY` for graphs only,
+  with a big launch alone. Each is its own batch of the submission, so a replay outlasts the watchdog only where
+  the first run would have.
+- Refused while recording: copies from or to the host, file reads, frees and kernel loads.
+- Baked in: each launch's scalar arguments. Whatever changes between replays (a position, a token) has to live in
+  device memory, written between them.
+- Freeing a buffer the graph uses, or loading one of its kernels again, makes its `_launch` fail.
+- `test_plugin` checks it: 721 residual launches recorded, replayed one at a time and 20 at once, results exact; then
+  the launch refused after a free.
+
+Measured with `test_plugin` on a Qualcomm Device Cloud QRD (SM8850, Adreno 840, stock driver), 2026-11-22: 721
+dependent launches of Bonsai's residual kernel (one token's worth), ms for all 721, best / median of 3 runs:
+
+| commands a command buffer | enqueued one by one (batched) | one replay | 20 replays in one call, each |
+|---|---|---|---|
+| 64 (default) | 2.67 / 3.30 | **1.26 / 1.31** | 1.37 / 1.48 |
+| 721 (`VK_GRAPH_EVERY=721`) | | 1.30 / 1.32 | **1.10 / 1.11** |
+| 1 (`VK_SUBMIT_EVERY=1`) | 135.5 / 135.6 | 118.9 / 120.3 | 119.4 / 120.4 |
+| 1, graphs 64 (`VK_SUBMIT_EVERY=1 VK_GRAPH_EVERY=64`) | 136.7 / 136.9 | 2.15 / 2.19 | 2.00 / 2.03 |
+
+- A replay takes 2.1-2.5x less time than enqueueing the same launches. What is left, ~1.5-1.8 µs a launch, is
+  the GPU's: a barrier and a tiny dispatch per launch. Only fusing kernels removes that.
+- Each submitted batch costs ~165 µs on this driver, even as one of many batches in a single `vkQueueSubmit`. So
+  replays need large command buffers: replaying one-command buffers saves little (120 vs 136 ms).
+- `vkQueueSubmit` with many batches returns only once most of them have run (20 replays: submitted in ~30 ms of
+  ~30 ms). The driver's queue fills up, so a long replay doesn't free the host thread early.
+
+**Host testing.** On a Mac, `executor.c` asks the Vulkan loader for portability drivers, so the plugin and
+`test_plugin` also build for macOS and run on MoltenVK. That checks behaviour, not Adreno timing:
+
+```bash
+clang -O2 -c -o build/driver-mac/executor.o driver/executor.c -I/opt/homebrew/include
+clang++ -std=c++17 -O2 -shared -I../modular/SDK/include -o build/driver-mac/libM_driver_vulkan.dylib \
+    driver/plugin.cpp driver/local.cpp build/driver-mac/executor.o
+clang++ -std=c++17 -O2 -I../modular/SDK/include -o build/driver-mac/test_plugin driver/test_plugin.cpp
+DYLD_LIBRARY_PATH=/opt/homebrew/lib build/driver-mac/test_plugin build/driver-mac/libM_driver_vulkan.dylib <kernels>
+```
+
 **The device.** Pipelines require 64-lane subgroups where the driver allows it (`VK_SUBGROUP_SIZE`;
 0 leaves it to the driver). A Mojo warp is 64 lanes, and cooperative matrices on the Adreno 840 need
 64. Full subgroups are required where a block's rows fill them. The device enables what it has of

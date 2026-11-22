@@ -46,7 +46,14 @@ enum {
                   // when the GPU is done, the graph on its inputs (fp32 or int32 in the GPU's memory), its fp32 outputs
                   // written there. Not answered: the launches after it queue behind it; errors come with the next answer
   OP_NPUG_TIME,   // -> f64: the last run's ms on the server's clock
-  OP_LAST = OP_NPUG_TIME,
+  // Recorded command buffers (driver/executor.c): the launches, device copies and fills between GRAPH_BEGIN and
+  // GRAPH_END stay in command buffers, with their descriptor sets and params, and GRAPH_LAUNCH submits them again
+  // without encoding anything.
+  OP_GRAPH_BEGIN,   // -: waits for the work before it, then keeps the commands that follow (they still run)
+  OP_GRAPH_END,     // - -> u32 graph id (> 0)
+  OP_GRAPH_LAUNCH,  // u32 graph id, u32 count: its command buffers submitted `count` times, behind the work before it
+  OP_GRAPH_FREE,    // u32 graph id: waits for the GPU, then releases the graph
+  OP_LAST = OP_GRAPH_FREE,
 };
 
 // A kernel launch: storage buffers at bindings 0..nbind-1, then the params buffer (if any).
