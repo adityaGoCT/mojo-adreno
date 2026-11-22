@@ -8,8 +8,8 @@
 
 #include "ablaslt_kernels.h"
 
-#define NBIND 4
-#define PC_BYTES 32
+#define NBIND 6
+#define PC_BYTES 64
 #define SETS_PER_POOL 1024u
 
 struct ablasLt_ctx {
@@ -202,10 +202,68 @@ size_t ablasLtMatmulWorkspaceSize(const ablasLtMatmulDesc* desc, const ablasLtLa
   return a_pack_bytes(a) + scratch_bytes(desc, a, w);
 }
 
-static ablas_status gemm(ablasLtHandle h, VkCommandBuffer cmd, int q4, uint32_t M, uint32_t N, uint32_t K, ablas_buf A,
-                         ablas_buf W, ablas_buf C, ablas_buf ws, ablas_epilogue ep) {
+static ablas_status gemm1(ablasLtHandle h, VkCommandBuffer cmd, int q4, uint32_t M, uint32_t N, uint32_t K,
+                          ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf ws, ablas_epilogue ep) {
   return q4 ? ablas_hgemm_q4_0_ex(h->ab, cmd, ABLAS_OP_P, M, N, K, A, W, C, ws, ep)
             : ablas_hgemm_ex(h->ab, cmd, ABLAS_OP_P, ABLAS_OP_P, M, N, K, A, W, C, ws, ep);
+}
+
+// Bytes per output row of each epilogue's C (and of its row statistics, RESIDUAL_RMS's workspace)
+static VkDeviceSize c_row_bytes(ablas_epilogue ep, uint32_t N) {
+  switch (ep) {
+  case ABLAS_EPI_RESIDUAL_RMS: case ABLAS_EPI_RESIDUAL_BIAS: return (VkDeviceSize)N * 4;
+  case ABLAS_EPI_SWIGLU: case ABLAS_EPI_GEGLU: return (VkDeviceSize)N;  // N/2 fp16 columns
+  default: return (VkDeviceSize)N * 2;                                   // fp16 rows or tiles
+  }
+}
+
+// A GEMM whose M is not a multiple of 256 (more than 256 rows) and whose N is at most 4096 runs as two: the rows up
+// to the last multiple of 256, where AdrenoBLAS's 256 x 128 tiles fit, then the rest (64 or more rows). One call on
+// all M rows gets only the tiles that divide M. Measured in π0's prefix (832 rows, ../pi0/README.md): the down
+// projection (N 2048, K 16384) 6.7 -> 4.0 ms a layer and o proj (N 2048) 1.06 -> 0.69 ms split, while gate|up (N
+// 32768) went 6.4 -> 8.0 ms: with that many columns the 64-row tiles already fill the GPU. Every output format is
+// row-separable: A tiles, C rows or tiles and the row statistics are offset by the first part's rows.
+// ABLASLT_NO_ROW_SPLIT=1 turns it off (for comparisons).
+static ablas_status gemm(ablasLtHandle h, VkCommandBuffer cmd, int q4, uint32_t M, uint32_t N, uint32_t K, ablas_buf A,
+                         ablas_buf W, ablas_buf C, ablas_buf ws, ablas_epilogue ep) {
+  uint32_t M0 = M / 256 * 256;
+  if (M < 256 || M == M0 || N > 4096 || getenv("ABLASLT_NO_ROW_SPLIT"))
+    return gemm1(h, cmd, q4, M, N, K, A, W, C, ws, ep);
+  ablas_status st = gemm1(h, cmd, q4, M0, N, K, A, W, C, ws, ep);
+  if (st) return st;
+  ablas_buf A1 = sub(A, (VkDeviceSize)M0 * K * 2, 0), C1 = sub(C, (VkDeviceSize)M0 * c_row_bytes(ep, N), 0), ws1 = ws;
+  if (ep == ABLAS_EPI_RESIDUAL_RMS) ws1 = sub(ws, (VkDeviceSize)M0 * (N / 64) * 4, 0);  // else the bias, or unused
+  return gemm1(h, cmd, q4, M - M0, N, K, A1, W, C1, ws1, ep);
+}
+
+// ROPE_QKV's general form: the qkv GEMM into fp16 tiles (the packed epilogue, so the next kernels read 2 KB tiles
+// whole: from row-major fp16 the split took longer than SigLIP's GEMM), then qksplit (Q, K: bias, RoPE, padding,
+// cache rows) and vsplit (V^T: bias, padding, cache keys).
+static ablas_status qkv_general(ablasLtHandle h, VkCommandBuffer cmd, const ablasLtMatmulDesc* desc, uint32_t M,
+                                uint32_t N, uint32_t K, int q4, ablas_buf Ap, ablas_buf W, ablas_buf scratch) {
+  uint32_t nh = desc->n_heads, nkv = desc->n_kv_heads, hd = desc->head_dim ? desc->head_dim : 128;
+  uint32_t hdv = desc->head_dim_valid ? desc->head_dim_valid : hd, krows = desc->kv_rows ? desc->kv_rows : M;
+  uint32_t koff = desc->kv_offset;
+  if (!nh || !nkv || (hd != 128 && hd != 256) || hdv > hd || hdv % 8 || N != (nh + 2 * nkv) * hdv || M % 64 ||
+      koff % 64 || koff + M > krows || krows % 64 || (desc->rope.buffer && hdv != hd) || !scratch.buffer ||
+      !desc->q.buffer || !desc->k.buffer || !desc->vt.buffer)
+    return ABLAS_BAD_SHAPE;
+  ablas_buf qkv = sub(scratch, 0, (VkDeviceSize)M * N * 2);
+  ablas_buf none = {0};
+  ablas_status st = gemm(h, cmd, q4, M, N, K, Ap, W, qkv, none, ABLAS_EPI_PACKED);
+  if (st) return st;
+  snprintf(h->last, sizeof h->last, "%s + qksplit + vsplit", ablas_last_kernel(h->ab));
+  ablasLtBarrier(h, cmd);
+  uint32_t flags = (desc->rope.buffer ? 1u : 0u) | (desc->bias.buffer ? 2u : 0u);
+  ablas_buf bias = desc->bias.buffer ? desc->bias : qkv, rope = desc->rope.buffer ? desc->rope : qkv;
+  struct { uint32_t M, ncols, nh, hdv, HD, qrows, krows, koff, flags; } pq = {M, N, nh, hdv, hd, M, krows, koff, flags};
+  ablas_buf qb[5] = {qkv, rope, desc->q, desc->k, bias};
+  if ((st = dispatch(h, cmd, LT_QKSPLIT, qb, 5, &pq, sizeof pq, nh + nkv, M / 64, hd / 128))) return st;
+  struct { uint32_t M, ncols, vcol0, hdv, HD, krows, koff, flags; } pv = {M, N, (nh + nkv) * hdv, hdv, hd, krows, koff, flags};
+  ablas_buf vb[3] = {qkv, desc->vt, bias};
+  if ((st = dispatch(h, cmd, LT_VSPLIT, vb, 3, &pv, sizeof pv, M / 16, nkv, 1))) return st;
+  done(h, cmd);
+  return ABLAS_OK;
 }
 
 ablas_status ablasLtMatmul(ablasLtHandle h, VkCommandBuffer cmd, const ablasLtMatmulDesc* desc, ablas_buf A,
@@ -222,7 +280,8 @@ ablas_status ablasLtMatmul(ablasLtHandle h, VkCommandBuffer cmd, const ablasLtMa
     return ABLAS_BAD_SHAPE;
   const int q4 = w->type == ABLASLT_Q4_0;
   const ablasLtEpilogue ep = desc->epilogue;
-  if ((ep == ABLASLT_EPILOGUE_SWIGLU) != (w->use == ABLASLT_WEIGHT_GATE_UP)) return ABLAS_BAD_SHAPE;
+  if ((ep == ABLASLT_EPILOGUE_SWIGLU || ep == ABLASLT_EPILOGUE_GEGLU) != (w->use == ABLASLT_WEIGHT_GATE_UP))
+    return ABLAS_BAD_SHAPE;
   // fp32 rows out is the only form that writes just M rows; every other one writes all Mp
   int f32_rows_out = ep == ABLASLT_EPILOGUE_DEFAULT && d && d->type == ABLASLT_F32 && d->order == ABLASLT_ORDER_ROW;
   if (Mp != M && !f32_rows_out) return ABLAS_BAD_SHAPE;
@@ -262,12 +321,28 @@ ablas_status ablasLtMatmul(ablasLtHandle h, VkCommandBuffer cmd, const ablasLtMa
     st = gemm(h, cmd, q4, M, N, K, Ap, W, D, desc->aux.buffer ? desc->aux : scratch, ABLAS_EPI_RESIDUAL_RMS);
     break;
   case ABLASLT_EPILOGUE_SWIGLU:
+  case ABLASLT_EPILOGUE_GEGLU:
     if (!d || d->type != ABLASLT_F16 || d->order != ABLASLT_ORDER_TILED || d->rows != M || d->cols * 2 != N || N % 128)
       return ABLAS_BAD_SHAPE;
-    st = gemm(h, cmd, q4, M, N, K, Ap, W, D, none, ABLAS_EPI_SWIGLU);
+    st = gemm(h, cmd, q4, M, N, K, Ap, W, D, none, ep == ABLASLT_EPILOGUE_GEGLU ? ABLAS_EPI_GEGLU : ABLAS_EPI_SWIGLU);
+    break;
+  case ABLASLT_EPILOGUE_BIAS_GELU:
+    if (!d || d->type != ABLASLT_F16 || d->order != ABLASLT_ORDER_TILED || d->rows != M || d->cols != N ||
+        !desc->bias.buffer)
+      return ABLAS_BAD_SHAPE;
+    st = gemm(h, cmd, q4, M, N, K, Ap, W, D, desc->bias, ABLAS_EPI_BIAS_GELU);
+    break;
+  case ABLASLT_EPILOGUE_RESIDUAL_BIAS:
+    if (!d || d->type != ABLASLT_F32 || d->order != ABLASLT_ORDER_ROW || d->rows != M || d->cols != N ||
+        !desc->bias.buffer)
+      return ABLAS_BAD_SHAPE;
+    st = gemm(h, cmd, q4, M, N, K, Ap, W, D, desc->bias, ABLAS_EPI_RESIDUAL_BIAS);
     break;
   case ABLASLT_EPILOGUE_ROPE_QKV: {
     uint32_t nh = desc->n_heads, nkv = desc->n_kv_heads;
+    if (desc->head_dim || desc->head_dim_valid || desc->bias.buffer || desc->kv_rows || desc->kv_offset ||
+        !desc->rope.buffer)
+      return qkv_general(h, cmd, desc, M, N, K, q4, Ap, W, scratch);
     if (!nh || !nkv || N != (nh + 2 * nkv) * 128 || !ws.buffer || !desc->rope.buffer || !desc->q.buffer ||
         !desc->k.buffer || !desc->vt.buffer)
       return ABLAS_BAD_SHAPE;
@@ -353,6 +428,87 @@ ablas_status ablasLtAttention(ablasLtHandle h, VkCommandBuffer cmd, uint32_t M, 
   ablas_status st = dispatch(h, cmd, LT_FA3, b, 4, &pa, sizeof pa, M / 64, n_heads, 1);
   if (st) return st;
   snprintf(h->last, sizeof h->last, "fa3");
+  done(h, cmd);
+  return ABLAS_OK;
+}
+
+// The key splits for a masked attention: 1 when its query workgroups (M / 64 x heads x batches) already number 64,
+// else enough for about 64 workgroups, each split visiting at least 2 key blocks (one per subgroup and pass).
+static uint32_t key_splits(const ablasLtAttentionDesc* d, uint32_t nkb) {
+  uint32_t nb = d->batches ? d->batches : 1, wgs = d->M / 64 * d->n_heads * nb, n = d->key_splits;
+  if (!n) {
+    const char* e = getenv("ABLASLT_ATTN_SPLITS");
+    n = e ? (uint32_t)atoi(e) : wgs >= 64 ? 1 : (64 + wgs - 1) / wgs;
+  }
+  uint32_t most = (nkb + 1) / 2;
+  n = n < 1 ? 1 : n > 16 ? 16 : n;
+  return n > most ? most : n;
+}
+
+static void attn_dims(const ablasLtAttentionDesc* d, uint32_t* nb, uint32_t* hdv, uint32_t* kvb, uint32_t* krows,
+                      uint32_t* keys, uint32_t* outw) {
+  *nb = d->batches ? d->batches : 1, *hdv = d->head_dim_valid ? d->head_dim_valid : d->head_dim;
+  *kvb = d->kv_batch ? d->kv_batch : d->M, *krows = d->kv_rows ? d->kv_rows : *nb * d->M;
+  *keys = d->keys ? d->keys : *kvb, *outw = d->out_cols ? d->out_cols : d->n_heads * *hdv;
+}
+
+size_t ablasLtAttentionWorkspaceSize(const ablasLtAttentionDesc* d) {
+  uint32_t nb, hdv, kvb, krows, keys, outw;
+  attn_dims(d, &nb, &hdv, &kvb, &krows, &keys, &outw);
+  uint32_t ns = key_splits(d, (keys + 63) / 64);
+  if (ns == 1) return 0;
+  return up256((size_t)ns * d->n_heads * nb * d->M * d->head_dim * 2) + up256((size_t)ns * d->n_heads * nb * d->M * 8);
+}
+
+ablas_status ablasLtAttentionMasked(ablasLtHandle h, VkCommandBuffer cmd, const ablasLtAttentionDesc* d, ablas_buf q,
+                                    ablas_buf k, ablas_buf vt, ablas_buf out) {
+  uint32_t nb, hdv, kvb, krows, keys, outw, hd = d->head_dim;
+  attn_dims(d, &nb, &hdv, &kvb, &krows, &keys, &outw);
+  uint32_t kvalid = d->key_valid ? d->key_valid : keys, nkb = (keys + 63) / 64;
+  if (!d->M || d->M % 64 || !d->n_heads || !d->n_kv_heads || d->n_heads % d->n_kv_heads || (hd != 128 && hd != 256) ||
+      hdv > hd || hdv % 8 || outw % 16 || krows % 64 || kvb % 16 || (nb - 1) * kvb + keys > krows || !keys)
+    return ABLAS_BAD_SHAPE;
+  uint32_t ns = d->workspace.buffer ? key_splits(d, nkb) : 1, bps = (nkb + ns - 1) / ns;
+  ns = (nkb + bps - 1) / bps;
+  uint32_t qrows = nb * d->M;
+  ablas_buf part = out, st = out;  // with splits: partial outputs and their (max, sum) in the workspace
+  if (ns > 1) {
+    VkDeviceSize pbytes = up256((size_t)ns * d->n_heads * qrows * hd * 2);
+    part = sub(d->workspace, 0, pbytes), st = sub(d->workspace, pbytes, (VkDeviceSize)ns * d->n_heads * qrows * 8);
+  }
+  struct { uint32_t nq, qrows, krows, kbatch, nkb, kvalid, sbase, scount, scausal; float scale; uint32_t group, outw, hdv, nsplit, bps; } pa =
+      {d->M, qrows, krows, kvb, nkb, kvalid, d->suffix_base, d->suffix_count, d->suffix_causal, d->scale,
+       d->n_heads / d->n_kv_heads, outw, hdv, ns, bps};
+  ablas_buf b[5] = {q, k, vt, part, st};
+  int kern = (hd == 256 ? LT_FAMASK256 : LT_FAMASK128) + (ns == 1 ? 0 : bps <= 2 ? 2 : 1);  // "", "s", "s1"
+  ablas_status s = dispatch(h, cmd, kern, b, 5, &pa, sizeof pa, d->M / 64, d->n_heads, nb * ns);
+  if (s) return s;
+  if (ns > 1) {
+    ablasLtBarrier(h, cmd);
+    struct { uint32_t nsplit, qrows, outw, hdv, HD; } pc = {ns, qrows, outw, hdv, hd};
+    ablas_buf cb[3] = {part, st, out};
+    if ((s = dispatch(h, cmd, LT_FACOMBINE, cb, 3, &pc, sizeof pc, qrows / 64, d->n_heads, 1))) return s;
+  }
+  snprintf(h->last, sizeof h->last, ns > 1 ? "famask%u%s x %u key splits + facombine" : "famask%u", hd,
+           bps <= 2 ? "s1" : "s", ns);
+  done(h, cmd);
+  return ABLAS_OK;
+}
+
+size_t ablasLtLayerNormWorkspaceSize(uint32_t M) { return up256((size_t)up64(M) * 8); }
+
+ablas_status ablasLtLayerNorm(ablasLtHandle h, VkCommandBuffer cmd, uint32_t M, uint32_t D, ablas_buf x,
+                              ablas_buf weight, ablas_buf bias, float eps, ablas_buf out, ablas_buf ws) {
+  if (!M || M % 64 || !D || D % 64 || !ws.buffer) return ABLAS_BAD_SHAPE;
+  ablas_buf st = sub(ws, 0, (VkDeviceSize)M * 8);
+  struct { uint32_t D; float eps; } ps = {D, eps};
+  ablas_buf sb[2] = {x, st};
+  ablas_status s;
+  if ((s = dispatch(h, cmd, LT_LNSTATS, sb, 2, &ps, sizeof ps, M / 4, 1, 1))) return s;
+  ablasLtBarrier(h, cmd);
+  ablas_buf nb[5] = {x, st, weight, bias, out};
+  if ((s = dispatch(h, cmd, LT_LNTILES, nb, 5, &D, 4, D / 64, M / 64, 1))) return s;
+  snprintf(h->last, sizeof h->last, "lnstats + lntiles");
   done(h, cmd);
   return ABLAS_OK;
 }

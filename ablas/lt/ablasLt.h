@@ -56,7 +56,19 @@ typedef enum {
   // W = q_proj ; k_proj ; v_proj rows ([(nh + 2 nkv) * 128, K]). RoPE (rotate_half pairs d, d + 64, head dim 128)
   // on Q and K, then the attention operands: q = Q tiles [nh][M, 128], k = K tiles [nkv][M, 128], vt = V^T tiles
   // [nkv][128, M] (ablasLtAttention's inputs). D unused. rope: fp32 [M][128], cos[64] | sin[64] per position.
+  //
+  // The general form (any of head_dim, head_dim_valid, bias, kv_rows, kv_offset set, or no rope): heads of head_dim
+  // (128 or 256; 0 = 128), of which W has head_dim_valid columns each (0 = all; fewer: SigLIP's heads of 72, written
+  // zero-padded to 128), bias (fp32 [N]) added to q, k and v, RoPE over head_dim when rope is given (cos[hd/2] |
+  // sin[hd/2] per row) and none when it is not, and K / V^T written into a cache of kv_rows keys per KV head at
+  // key offset kv_offset (multiple of 64; 0 = M keys at 0). q: [nh][M, head_dim] tiles.
   ABLASLT_EPILOGUE_ROPE_QKV = 3,
+  // W packed with ABLASLT_WEIGHT_GATE_UP; D (fp16 TILED [M, F]) = gelu_tanh(gate) * up (Gemma). A must be TILED.
+  ABLASLT_EPILOGUE_GEGLU = 4,
+  // D (fp16 TILED [M, N]) = gelu_tanh(A W^T + bias), bias fp32 [N] (a ViT's fc1). A must be TILED.
+  ABLASLT_EPILOGUE_BIAS_GELU = 5,
+  // D (fp32 row-major [M, N]) += A W^T + bias, bias fp32 [N] (a ViT's projections into its residual stream). A TILED.
+  ABLASLT_EPILOGUE_RESIDUAL_BIAS = 6,
 } ablasLtEpilogue;
 
 typedef struct {
@@ -64,6 +76,8 @@ typedef struct {
   ablas_buf aux;                   // RESIDUAL: row sums of squares (optional)
   uint32_t n_heads, n_kv_heads;    // ROPE_QKV
   ablas_buf rope, q, k, vt;        // ROPE_QKV
+  ablas_buf bias;                  // BIAS_GELU, RESIDUAL_BIAS, ROPE_QKV (optional)
+  uint32_t head_dim, head_dim_valid, kv_rows, kv_offset;  // ROPE_QKV, general form
 } ablasLtMatmulDesc;
 
 // flags for ablasLtCreate
@@ -131,6 +145,37 @@ size_t ablasLtRmsNormWorkspaceSize(uint32_t M);
 ablas_status ablasLtAttention(ablasLtHandle lt, VkCommandBuffer cmd, uint32_t M, uint32_t n_heads,
                               uint32_t n_kv_heads, float scale, ablas_buf q, ablas_buf k, ablas_buf vt,
                               ablas_buf out);
+
+// Masked attention, non-causal (prefix-LM, encoders, a policy's action expert), heads of 128 or 256, over
+// independent batches (a ViT's images). Inputs in ROPE_QKV's formats: q [n_heads][batches * M, head_dim] tiles,
+// k [n_kv_heads][kv_rows, head_dim] tiles, vt V^T tiles [n_kv_heads][head_dim, kv_rows]. Query row r of batch b
+// (r < M) sees key j of that batch (keys at b * kv_batch) when j < key_valid, or when suffix_base <= j <
+// suffix_base + suffix_count and (r >= suffix_causal or j - suffix_base <= r) (π0's block-causal action suffix:
+// suffix_causal = 1, the state row sees only itself). Keys [0, keys) are visited. out: fp16 TILED
+// [batches * M, out_cols], head z's first head_dim_valid dims at columns z * head_dim_valid.
+typedef struct {
+  uint32_t M, batches;                 // query rows per batch (multiple of 64); batches (0 = 1)
+  uint32_t n_heads, n_kv_heads, head_dim, head_dim_valid;  // head_dim 128 or 256; head_dim_valid 0 = head_dim
+  uint32_t kv_rows, kv_batch, keys;    // 0 = batches * M, M, kv_batch
+  uint32_t key_valid;                  // 0 = keys
+  uint32_t suffix_base, suffix_count, suffix_causal;
+  float scale;
+  uint32_t out_cols;                   // 0 = n_heads * head_dim_valid
+  // Key splits, for few query rows against many keys (an action expert's 64 rows): the keys are divided among
+  // workgroups and their partial results merged. Only with a workspace (ablasLtAttentionWorkspaceSize bytes);
+  // key_splits 0 = chosen here (none when there are enough query workgroups), else at most 16.
+  uint32_t key_splits;
+  ablas_buf workspace;
+} ablasLtAttentionDesc;
+ablas_status ablasLtAttentionMasked(ablasLtHandle lt, VkCommandBuffer cmd, const ablasLtAttentionDesc* desc,
+                                    ablas_buf q, ablas_buf k, ablas_buf vt, ablas_buf out);
+size_t ablasLtAttentionWorkspaceSize(const ablasLtAttentionDesc* desc);
+
+// out (fp16 TILED [M, D]) = (x - mean) / sqrt(var + eps) * weight + bias per row of x (fp32 row-major [M, D]);
+// M multiple of 64, D of 64. weight, bias fp32 [D].
+ablas_status ablasLtLayerNorm(ablasLtHandle lt, VkCommandBuffer cmd, uint32_t M, uint32_t D, ablas_buf x,
+                              ablas_buf weight, ablas_buf bias, float eps, ablas_buf out, ablas_buf workspace);
+size_t ablasLtLayerNormWorkspaceSize(uint32_t M);
 
 // The compute barrier the auto mode puts after each call (for hosts that turn it off).
 void ablasLtBarrier(ablasLtHandle lt, VkCommandBuffer cmd);

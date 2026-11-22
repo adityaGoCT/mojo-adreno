@@ -210,6 +210,240 @@ static void test_swiglu(uint32_t M, uint32_t F, uint32_t K) {
   free(we);
 }
 
+static double gelu_t(double x) { return 0.5 * x * (1 + tanh(0.7978845608 * (x + 0.044715 * x * x * x))); }
+
+static void test_geglu(uint32_t M, uint32_t F, uint32_t K) {
+  float *a = rmat(M, K, 1.0f), *w = rmat(2 * F, K, 0.1f), *we;
+  vbuf_t A = tiles_of(a, M, K), W = weight(ABLASLT_F16, ABLASLT_WEIGHT_GATE_UP, w, 2 * F, K, &we),
+         O = vk_buffer(&v, (size_t)M * F * 2);
+  mm_t m = {{ABLASLT_EPILOGUE_GEGLU}, B(&A), B(&W), B(&O), {0}, {ABLASLT_F16, ABLASLT_ORDER_TILED, M, K},
+            {ABLASLT_F16, ABLASLT_ORDER_WEIGHT, 2 * F, K, ABLASLT_WEIGHT_GATE_UP}, {ABLASLT_F16, ABLASLT_ORDER_TILED, M, F}};
+  run(rec_mm, &m);
+  double err = 0, mx = 0;
+  for (uint32_t r = 0; r < M; ++r)
+    for (uint32_t f = 0; f < F; ++f) {
+      double g = dot(a + (size_t)r * K, w + (size_t)f * K, K), u = dot(a + (size_t)r * K, w + (size_t)(F + f) * K, K);
+      double ref = gelu_t(g) * u;
+      err = fmax(err, fabs(tile_at(&O, r, f, F) - ref)), mx = fmax(mx, fabs(ref));
+    }
+  report("matmul GEGLU (gelu_tanh(gate) * up, tiles out)", !m.st && err / mx < 2e-2, err / mx);
+  free(we);
+}
+
+static void test_bias_epilogues(uint32_t M, uint32_t N, uint32_t K) {
+  float *a = rmat(M, K, 1.0f), *w = rmat(N, K, 0.1f), *we, *bias = rmat(1, N, 1.0f), *x0 = rmat(M, N, 1.0f);
+  vbuf_t A = tiles_of(a, M, K), W = weight(ABLASLT_F16, ABLASLT_WEIGHT_PLAIN, w, N, K, &we),
+         O = vk_buffer(&v, (size_t)M * N * 2), X = vk_buffer(&v, (size_t)M * N * 4), Bi = vk_buffer(&v, (size_t)N * 4);
+  memcpy(Bi.map, bias, (size_t)N * 4), memcpy(X.map, x0, (size_t)M * N * 4);
+  mm_t m = {{ABLASLT_EPILOGUE_BIAS_GELU, .bias = B(&Bi)}, B(&A), B(&W), B(&O), {0},
+            {ABLASLT_F16, ABLASLT_ORDER_TILED, M, K}, {ABLASLT_F16, ABLASLT_ORDER_WEIGHT, N, K},
+            {ABLASLT_F16, ABLASLT_ORDER_TILED, M, N}};
+  run(rec_mm, &m);
+  mm_t m2 = {{ABLASLT_EPILOGUE_RESIDUAL_BIAS, .bias = B(&Bi)}, B(&A), B(&W), B(&X), {0},
+             {ABLASLT_F16, ABLASLT_ORDER_TILED, M, K}, {ABLASLT_F16, ABLASLT_ORDER_WEIGHT, N, K},
+             {ABLASLT_F32, ABLASLT_ORDER_ROW, M, N}};
+  run(rec_mm, &m2);
+  double e1 = 0, m1 = 0, e2 = 0, mx2 = 0;
+  for (uint32_t r = 0; r < M; ++r)
+    for (uint32_t n = 0; n < N; ++n) {
+      double y = dot(a + (size_t)r * K, we + (size_t)n * K, K) + bias[n];
+      e1 = fmax(e1, fabs(tile_at(&O, r, n, N) - gelu_t(y))), m1 = fmax(m1, fabs(gelu_t(y)));
+      double ref = x0[(size_t)r * N + n] + y;
+      e2 = fmax(e2, fabs(((float*)X.map)[(size_t)r * N + n] - ref)), mx2 = fmax(mx2, fabs(ref));
+    }
+  report("matmul BIAS_GELU (gelu_tanh(A W^T + b), tiles out)", !m.st && e1 / m1 < 2e-2, e1 / m1);
+  report("matmul RESIDUAL_BIAS (x += A W^T + b)", !m2.st && e2 / mx2 < 2e-2, e2 / mx2);
+  free(we);
+}
+
+typedef struct { ablasLtAttentionDesc d; vbuf_t *q, *k, *vt, *O; ablas_status st; } am_t;
+static void rec_am(VkCommandBuffer c, void* p) {
+  am_t* a = p;
+  a->st = ablasLtAttentionMasked(lt, c, &a->d, B(a->q), B(a->k), B(a->vt), B(a->O));
+}
+static float hget(const vbuf_t* b, size_t i) { return (float)((_Float16*)b->map)[i]; }
+
+// The reference for ablasLtAttentionMasked from the GPU's own Q / K / V^T tiles; max error relative to max |out|.
+static double ref_masked(const am_t* a) {
+  const ablasLtAttentionDesc* d = &a->d;
+  uint32_t nb = d->batches ? d->batches : 1, hd = d->head_dim, hdv = d->head_dim_valid ? d->head_dim_valid : hd;
+  uint32_t kvb = d->kv_batch ? d->kv_batch : d->M, krows = d->kv_rows ? d->kv_rows : nb * d->M;
+  uint32_t keys = d->keys ? d->keys : kvb, kvalid = d->key_valid ? d->key_valid : keys;
+  uint32_t outw = d->out_cols ? d->out_cols : d->n_heads * hdv, qrows = nb * d->M, grp = d->n_heads / d->n_kv_heads;
+  double err = 0, mx = 0, *s = malloc(keys * sizeof *s);
+  for (uint32_t b = 0; b < nb; ++b)
+    for (uint32_t z = 0; z < d->n_heads; ++z)
+      for (uint32_t r = 0; r < d->M; ++r) {
+        uint32_t g = z / grp, qrow = b * d->M + r;
+        double m = -1e300, sum = 0;
+        for (uint32_t j = 0; j < keys; ++j) {
+          int vis = j < kvalid || (j >= d->suffix_base && j < d->suffix_base + d->suffix_count &&
+                                   (r >= d->suffix_causal || j - d->suffix_base <= r));
+          s[j] = -1e300;
+          if (!vis) continue;
+          double acc = 0;
+          for (uint32_t e = 0; e < hd; ++e)
+            acc += (double)hget(a->q, (size_t)z * qrows * hd + tidx(qrow, e, hd)) *
+                   hget(a->k, (size_t)g * krows * hd + tidx(b * kvb + j, e, hd));
+          s[j] = acc * d->scale, m = fmax(m, s[j]);
+        }
+        for (uint32_t j = 0; j < keys; ++j) sum += s[j] > -1e299 ? (s[j] = exp(s[j] - m)) : (s[j] = 0);
+        for (uint32_t e = 0; e < hdv; ++e) {
+          double o = 0;
+          for (uint32_t j = 0; j < keys; ++j)
+            if (s[j] > 0) o += s[j] / sum * hget(a->vt, (size_t)g * hd * krows + tidx(e, b * kvb + j, krows));
+          float got = tile_at(a->O, qrow, z * hdv + e, outw);
+          err = fmax(err, fabs(got - o)), mx = fmax(mx, fabs(o));
+        }
+      }
+  free(s);
+  return err / mx;
+}
+
+// ROPE_QKV's general form, as π0's Gemma uses it: heads of 256, one KV head, RoPE, K/V into a cache. A prefix of
+// P rows goes to cache rows [0, P), a suffix of 64 rows to [P, P + 64); then the prefix's bidirectional attention
+// (keys [0, valid)) and the suffix's (prefix keys plus the block-causal suffix, as π0's action expert).
+static void test_gemma_qkv_attention(uint32_t P, uint32_t valid, uint32_t K) {
+  const uint32_t nh = 8, nkv = 1, hd = 256, N = (nh + 2 * nkv) * hd, S = 64, KR = P + S;
+  float *a = rmat(KR, K, 1.0f), *w = rmat(N, K, 0.08f), *we;
+  vbuf_t A = tiles_of(a, KR, K), W = weight(ABLASLT_F16, ABLASLT_WEIGHT_PLAIN, w, N, K, &we);
+  vbuf_t cs = vk_buffer(&v, (size_t)KR * hd * 4), qp = vk_buffer(&v, (size_t)nh * P * hd * 2),
+         qs = vk_buffer(&v, (size_t)nh * S * hd * 2), k = vk_buffer(&v, (size_t)KR * hd * 2),
+         vt = vk_buffer(&v, (size_t)hd * KR * 2), Op = vk_buffer(&v, (size_t)P * nh * hd * 2),
+         Os = vk_buffer(&v, (size_t)S * nh * hd * 2);
+  for (uint32_t p = 0; p < KR; ++p)
+    for (uint32_t i = 0; i < hd / 2; ++i) {
+      float ang = p * powf(10000.0f, -2.0f * i / hd);
+      ((float*)cs.map)[p * hd + i] = cosf(ang), ((float*)cs.map)[p * hd + hd / 2 + i] = sinf(ang);
+    }
+  double err = 0, mx = 0;
+  for (int part = 0; part < 2; ++part) {
+    uint32_t M = part ? S : P, r0 = part ? P : 0;
+    ablas_buf Ab = {A.buf, (VkDeviceSize)r0 * K * 2, 0}, csb = {cs.buf, (VkDeviceSize)r0 * hd * 4, 0};
+    mm_t m = {{ABLASLT_EPILOGUE_ROPE_QKV, .n_heads = nh, .n_kv_heads = nkv, .rope = csb, .q = B(part ? &qs : &qp),
+               .k = B(&k), .vt = B(&vt), .head_dim = hd, .kv_rows = KR, .kv_offset = r0},
+              Ab, B(&W), {0}, {0}, {ABLASLT_F16, ABLASLT_ORDER_TILED, M, K}, {ABLASLT_F16, ABLASLT_ORDER_WEIGHT, N, K}, {0}};
+    vbuf_t ws = vk_buffer(&v, ablasLtMatmulWorkspaceSize(&m.desc, &m.a, &m.w, NULL));
+    m.ws = B(&ws);
+    run(rec_mm, &m);
+    if (m.st) { report("matmul ROPE_QKV general (heads of 256, KV cache)", 0, 0); return; }
+    vbuf_t* qb = part ? &qs : &qp;
+    for (uint32_t r = 0; r < M; ++r) {
+      float x[2560];
+      for (uint32_t n = 0; n < N; ++n) x[n] = h16((float)dot(a + (size_t)(r0 + r) * K, we + (size_t)n * K, K));
+      const float* c = (float*)cs.map + (size_t)(r0 + r) * hd;
+      for (uint32_t h = 0; h < nh + nkv; ++h)
+        for (uint32_t d = 0; d < hd; ++d) {
+          const float* xh = x + h * hd;
+          float ref = d < hd / 2 ? xh[d] * c[d] - xh[d + hd / 2] * c[hd / 2 + d]
+                                 : xh[d] * c[d - hd / 2] + xh[d - hd / 2] * c[d];
+          float got = h < nh ? hget(qb, (size_t)h * M * hd + tidx(r, d, hd)) : hget(&k, tidx(r0 + r, d, hd));
+          err = fmax(err, fabs(got - ref)), mx = fmax(mx, fabs(ref));
+        }
+      for (uint32_t d = 0; d < hd; ++d)
+        err = fmax(err, fabs(hget(&vt, tidx(d, r0 + r, KR)) - x[(nh + nkv) * hd + d]));
+    }
+  }
+  report("matmul ROPE_QKV general (heads of 256, RoPE, KV cache rows)", err / mx < 2e-2, err / mx);
+  am_t pre = {{.M = P, .n_heads = nh, .n_kv_heads = nkv, .head_dim = hd, .kv_rows = KR, .kv_batch = KR, .keys = P,
+               .key_valid = valid, .scale = 1.0f / 16}, &qp, &k, &vt, &Op};
+  run(rec_am, &pre);
+  double e = ref_masked(&pre);
+  report("attention masked (prefix: bidirectional, key mask, MQA 8:1)", !pre.st && e < 2e-2, e);
+  am_t suf = {{.M = S, .n_heads = nh, .n_kv_heads = nkv, .head_dim = hd, .kv_rows = KR, .kv_batch = KR, .keys = KR,
+               .key_valid = valid, .suffix_base = P, .suffix_count = 51, .suffix_causal = 1, .scale = 1.0f / 16},
+              &qs, &k, &vt, &Os};
+  run(rec_am, &suf);
+  e = ref_masked(&suf);
+  report("attention masked (suffix: prefix keys + block-causal suffix)", !suf.st && e < 2e-2, e);
+  // the same with the keys split among workgroups (partial results merged)
+  suf.d.key_splits = 3;
+  vbuf_t aws = vk_buffer(&v, ablasLtAttentionWorkspaceSize(&suf.d) + 256);
+  suf.d.key_splits = 0;
+  suf.d.workspace = B(&aws);
+  memset(Os.map, 0, (size_t)S * nh * hd * 2);
+  run(rec_am, &suf);
+  e = ref_masked(&suf);
+  char nm[96];
+  snprintf(nm, sizeof nm, "attention masked (suffix, %s)", ablasLtLastKernel(lt));
+  report(nm, !suf.st && e < 2e-2 && strstr(ablasLtLastKernel(lt), "split"), e);
+  suf.d.key_splits = 2;  // 3 blocks a split: the general split kernel
+  memset(Os.map, 0, (size_t)S * nh * hd * 2);
+  run(rec_am, &suf);
+  e = ref_masked(&suf);
+  snprintf(nm, sizeof nm, "attention masked (suffix, %s)", ablasLtLastKernel(lt));
+  report(nm, !suf.st && e < 2e-2 && strstr(ablasLtLastKernel(lt), "s x 2"), e);
+  free(we);
+}
+
+// SigLIP's attention: heads of 72 (padded to 128), q/k/v bias, no RoPE, images as independent batches.
+static void test_vit_qkv_attention(uint32_t nb, uint32_t T, uint32_t nh, uint32_t K) {
+  const uint32_t hdv = 72, hd = 128, N = 3 * nh * hdv, M = nb * T;
+  float *a = rmat(M, K, 1.0f), *w = rmat(N, K, 0.1f), *we, *bias = rmat(1, N, 0.5f);
+  vbuf_t A = tiles_of(a, M, K), W = weight(ABLASLT_F16, ABLASLT_WEIGHT_PLAIN, w, N, K, &we),
+         Bi = vk_buffer(&v, (size_t)N * 4), q = vk_buffer(&v, (size_t)nh * M * hd * 2),
+         k = vk_buffer(&v, (size_t)nh * M * hd * 2), vt = vk_buffer(&v, (size_t)nh * hd * M * 2),
+         O = vk_buffer(&v, (size_t)M * nh * hdv * 2);
+  memcpy(Bi.map, bias, (size_t)N * 4);
+  mm_t m = {{ABLASLT_EPILOGUE_ROPE_QKV, .n_heads = nh, .n_kv_heads = nh, .q = B(&q), .k = B(&k), .vt = B(&vt),
+             .bias = B(&Bi), .head_dim = hd, .head_dim_valid = hdv},
+            B(&A), B(&W), {0}, {0}, {ABLASLT_F16, ABLASLT_ORDER_TILED, M, K}, {ABLASLT_F16, ABLASLT_ORDER_WEIGHT, N, K}, {0}};
+  vbuf_t ws = vk_buffer(&v, ablasLtMatmulWorkspaceSize(&m.desc, &m.a, &m.w, NULL));
+  m.ws = B(&ws);
+  run(rec_mm, &m);
+  double err = 0, mx = 0;
+  for (uint32_t r = 0; r < M; ++r) {
+    float* x = malloc(N * 4);
+    for (uint32_t n = 0; n < N; ++n) x[n] = h16((float)dot(a + (size_t)r * K, we + (size_t)n * K, K)) + bias[n];
+    for (uint32_t h = 0; h < nh; ++h)
+      for (uint32_t d = 0; d < hd; ++d) {
+        float rq = d < hdv ? x[h * hdv + d] : 0, rk = d < hdv ? x[(nh + h) * hdv + d] : 0,
+              rv = d < hdv ? x[(2 * nh + h) * hdv + d] : 0;
+        err = fmax(err, fabs(hget(&q, (size_t)h * M * hd + tidx(r, d, hd)) - rq));
+        err = fmax(err, fabs(hget(&k, (size_t)h * M * hd + tidx(r, d, hd)) - rk));
+        err = fmax(err, fabs(hget(&vt, (size_t)h * hd * M + tidx(d, r, M)) - rv));
+        mx = fmax(mx, fmax(fabs(rq), fmax(fabs(rk), fabs(rv))));
+      }
+    free(x);
+  }
+  report("matmul ROPE_QKV general (heads of 72 padded, bias, no RoPE)", !m.st && err / mx < 2e-2, err / mx);
+  am_t at = {{.M = T, .batches = nb, .n_heads = nh, .n_kv_heads = nh, .head_dim = hd, .head_dim_valid = hdv,
+              .scale = 1.0f / sqrtf(72.0f)}, &q, &k, &vt, &O};
+  run(rec_am, &at);
+  double e = ref_masked(&at);
+  report("attention masked (ViT: per-image batches, heads of 72)", !at.st && e < 2e-2, e);
+  free(we);
+}
+
+typedef struct { uint32_t M, D; vbuf_t *x, *w, *b, *o, *ws; ablas_status st; } ln_t;
+static void rec_ln(VkCommandBuffer c, void* p) {
+  ln_t* n = p;
+  n->st = ablasLtLayerNorm(lt, c, n->M, n->D, B(n->x), B(n->w), B(n->b), 1e-6f, B(n->o), B(n->ws));
+}
+static void test_layernorm(uint32_t M, uint32_t D) {
+  float *x = rmat(M, D, 2.0f), *w = rmat(1, D, 1.0f), *b = rmat(1, D, 0.5f);
+  for (uint32_t r = 0; r < M; ++r)
+    for (uint32_t k = 0; k < D; ++k) x[(size_t)r * D + k] += 3.0f * (r % 7);  // rows with large means
+  vbuf_t X = vk_buffer(&v, (size_t)M * D * 4), W = vk_buffer(&v, (size_t)D * 4), Bb = vk_buffer(&v, (size_t)D * 4),
+         O = vk_buffer(&v, (size_t)M * D * 2), ws = vk_buffer(&v, ablasLtLayerNormWorkspaceSize(M));
+  memcpy(X.map, x, (size_t)M * D * 4), memcpy(W.map, w, (size_t)D * 4), memcpy(Bb.map, b, (size_t)D * 4);
+  ln_t n = {M, D, &X, &W, &Bb, &O, &ws};
+  run(rec_ln, &n);
+  double err = 0;
+  for (uint32_t r = 0; r < M; ++r) {
+    double mean = 0, var = 0;
+    for (uint32_t k = 0; k < D; ++k) mean += x[(size_t)r * D + k];
+    mean /= D;
+    for (uint32_t k = 0; k < D; ++k) var += (x[(size_t)r * D + k] - mean) * (x[(size_t)r * D + k] - mean);
+    double rs = 1 / sqrt(var / D + 1e-6);
+    for (uint32_t k = 0; k < D; ++k) {
+      double ref = (x[(size_t)r * D + k] - mean) * rs * w[k] + b[k];
+      err = fmax(err, fabs(tile_at(&O, r, k, D) - ref) / (fabs(ref) + 1e-2));
+    }
+  }
+  report("layernorm (D = 1152, into tiles)", !n.st && err < 1e-2, err);
+}
+
 typedef struct { uint32_t M, nh, nkv; vbuf_t *q, *k, *vt, *O; ablas_status st; } at_t;
 static void rec_at(VkCommandBuffer c, void* p) {
   at_t* a = p;
@@ -341,6 +575,14 @@ int main(int argc, char** argv) {
   test_swiglu(128, 256, 256);
   test_rope_attention(128, 6, 2, 256);         // 3 query heads per KV head, as Llama 3.2 3B
   test_rmsnorm(128, 512);
+  // π0's operations (../pi0)
+  test_geglu(128, 256, 256);
+  test_geglu(320, 256, 256);                   // M = 256 + 64: run as two row ranges
+  test_residual(320, 512, 256);                // the same, Q4_0 weights, with the row statistics
+  test_bias_epilogues(128, 320, 192);
+  test_gemma_qkv_attention(320, 250, 256);
+  test_vit_qkv_attention(3, 64, 8, 192);
+  test_layernorm(128, 1152);
   printf("\n%s\n", failures ? "FAILED" : "all passed");
   return failures != 0;
 }

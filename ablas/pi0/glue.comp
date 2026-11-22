@@ -1,0 +1,28 @@
+#version 450
+// π0's small element-wise steps around the matmuls (pi0_lt.c), fp32 rows, one thread per element:
+//   0 act_in:    dst[r][c] = r < 50 ? swish(dst[r][c] + a[step][c] + b[c]) : 0      (the action-time MLP's first layer)
+//   1 suffix_in: dst[r][c] = r == 0 ? a[c] : r <= 50 ? src[r-1][c] + b[c] : 0        (state row, 50 action rows)
+//   2 euler:     dst[r][c] += dt * (src[r+1][c] + b[c]) for r < 50, c < 32         (x_t += dt v_t)
+//   3 copy:      dst[r0 + r][c] = srows ? src[r % srows][c] : 0                    (row copies and zero fills)
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint mode, rows, cols, srows, step, r0; float dt; } pc;
+layout(std430, binding = 0) readonly buffer S { float src[]; };
+layout(std430, binding = 1) buffer D { float dst[]; };
+layout(std430, binding = 2) readonly buffer A { float a[]; };
+layout(std430, binding = 3) readonly buffer B { float b[]; };
+void main() {
+  uint i = gl_GlobalInvocationID.x, C = pc.cols;
+  if (i >= pc.rows * C) return;
+  uint r = i / C, c = i % C;
+  if (pc.mode == 0u) {
+    float x = dst[i] + a[pc.step * C + c] + b[c];
+    dst[i] = r < 50u ? x / (1.0 + exp(-x)) : 0.0;
+  } else if (pc.mode == 1u) {
+    dst[i] = r == 0u ? a[c] : r <= 50u ? src[(r - 1u) * C + c] + b[c] : 0.0;
+  } else if (pc.mode == 2u) {
+    if (r < 50u && c < 32u) dst[i] += pc.dt * (src[(r + 1u) * C + c] + b[c]);
+  } else {
+    dst[(pc.r0 + r) * C + c] = pc.srows != 0u ? src[(r % pc.srows) * C + c] : 0.0;
+  }
+}

@@ -3,7 +3,12 @@ run through ONNX Runtime's QNN execution provider by npu/pi0_prefix.cpp. pi0/mod
 PI0Pytorch compute the same thing on the GPU and in PyTorch.
 
   PYTHONPATH=build/npu/pydeps python3 npu/export_pi0.py [--checkpoint build/vla/hf/pi0_base/model.safetensors]
-      [--out build/npu/pi0] [--rows 832] [--parts 6] [--fp32]
+      [--out build/npu/pi0] [--rows 832] [--parts 6] [--fp32] [--random]
+
+--random needs no checkpoint: the same graphs with random weights (recipe.txt's `rand` lines make pi0_f16 write a
+random gemma.bin; RMSNorm scales random around 1), and prefix.f32 / rope.f32 / lang_mask.i32 inputs for
+pi0npu_tool in the same shapes as pi0/reference.py's: for timing the architecture (../ablas/pi0 compares it with
+the GPU).
 
 The graphs carry no matrices. Each one points into gemma.bin, an fp16 copy of Gemma's 18 layers that npu/pi0_f16.c
 writes from the checkpoint (fp32, but bf16-exact) by recipe.txt; the phone converts its own copy of the checkpoint, so
@@ -77,6 +82,28 @@ class Checkpoint:
             return np.frombuffer(f.read(4 * int(np.prod(shape))), np.float32).reshape(shape)
 
 
+class RandomCheckpoint:
+    """Stands in for Checkpoint (--random): the shapes of Gemma's tensors, random norm weights."""
+
+    SHAPES = {"self_attn.q_proj": [H * HD, D], "self_attn.k_proj": [HD, D], "self_attn.v_proj": [HD, D],
+              "self_attn.o_proj": [D, H * HD], "mlp.gate_proj": [F, D], "mlp.up_proj": [F, D],
+              "mlp.down_proj": [D, F], "input_layernorm": [D], "post_attention_layernorm": [D]}
+
+    def __init__(self):
+        self.rng = np.random.default_rng(0)
+        self.next = 0
+
+    def offset(self, name):
+        rest = name[len(GP):].split(".", 1)[1].rsplit(".", 1)[0]  # e.g. self_attn.q_proj
+        shape = self.SHAPES[rest]
+        self.next += 4 * int(np.prod(shape))
+        return self.next, shape
+
+    def read(self, name):
+        rest = name[len(GP):].split(".", 1)[1].rsplit(".", 1)[0]
+        return self.rng.uniform(-0.5, 0.5, self.SHAPES[rest]).astype(np.float32)
+
+
 def layout(ck):
     """gemma.bin's tensors: (name, [out, in], [(checkpoint tensor, offset, elements)...]), each fused matrix the
     concatenation of its sources' rows, so one fp16 [out, in] block."""
@@ -106,7 +133,10 @@ def write_recipe(ck, out):
         for s in srcs:
             off, shape = ck.offset(s)
             n = int(np.prod(shape))
-            recipe.append(f"conv {pos} {off} {n}")
+            if isinstance(ck, RandomCheckpoint):  # uniform with standard deviation 1 / sqrt(fan-in)
+                recipe.append(f"rand {pos} {n} {(3.0 / shape[1]) ** 0.5:.6g}")
+            else:
+                recipe.append(f"conv {pos} {off} {n}")
             pos += 2 * n
         assert pos - start == 2 * int(np.prod(dims)), name
         manifest[name] = (start, pos - start)
@@ -208,9 +238,10 @@ def main():
     ap.add_argument("--rows", type=int, default=832, help="prefix rows a part runs (816, zero-padded)")
     ap.add_argument("--parts", type=int, default=6, help="graphs, each a contiguous range of layers")
     ap.add_argument("--fp32", action="store_true", help="fp32 math, for checking on the Mac's CPU")
+    ap.add_argument("--random", action="store_true", help="no checkpoint: random weights and inputs (timing)")
     a = ap.parse_args()
     assert a.rows >= 816
-    ck = Checkpoint(a.checkpoint)
+    ck = RandomCheckpoint() if a.random else Checkpoint(a.checkpoint)
     a.out.mkdir(parents=True, exist_ok=True)
     man, size = write_recipe(ck, a.out)
     print(f"gemma.bin: {size / 1e9:.2f} GB fp16 ({len(man)} tensors); recipe.txt for npu/pi0_f16.c")
@@ -222,6 +253,16 @@ def main():
               f"{(a.out / f'part{i}.onnx').stat().st_size / 1e3:.0f} KB")
     (a.out / "npu.txt").write_text(f"pi0-prefix rows {a.rows} parts {a.parts} layers "
                                    + " ".join(map(str, bounds)) + (" fp32\n" if a.fp32 else "\n"))
+    if a.random:  # pi0npu_tool's inputs, as pi0/reference.py writes them: 816 embeddings, RoPE table, 48-row mask
+        rng = np.random.default_rng(1)
+        ref = a.out / "ref"
+        ref.mkdir(exist_ok=True)
+        rng.uniform(-1, 1, (816, D)).astype(np.float32).tofile(ref / "prefix.f32")
+        inv = 10000.0 ** (-np.arange(HD // 2) * 2.0 / HD)
+        ang = np.arange(1024)[:, None] * inv[None, :]
+        np.concatenate([np.cos(ang), np.sin(ang)]).astype(np.float32).tofile(ref / "rope.f32")
+        (np.arange(48) < 15).astype(np.int32).tofile(ref / "lang_mask.i32")  # 15 language tokens: 783 valid rows
+        print(f"random inputs in {ref}")
 
 
 if __name__ == "__main__":

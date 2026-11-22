@@ -233,6 +233,11 @@ shared memory (reading accumulator elements directly costs ~20 clocks each) and 
 - `ABLAS_EPI_SWIGLU`: B's rows interleaved 32 gate / 32 up per 64; writes silu(gate) * up, packed.
 - `ABLAS_EPI_RESIDUAL_RMS`: C is an fp32 residual stream, C += A B, and the workspace receives per-row sums of
   squares per 64 columns for the next RMSNorm.
+- For π0 ([pi0/](pi0)), as variants of the same kernels (the catalogue's older kernels are byte-identical):
+  - `ABLAS_EPI_GEGLU`: as SWIGLU, with gelu_tanh(gate) * up (Gemma's MLP).
+  - `ABLAS_EPI_BIAS_GELU`: as PACKED, with gelu_tanh(C + bias) (SigLIP's fc1).
+  - `ABLAS_EPI_RESIDUAL_BIAS`: C += A B + bias, fp32 (SigLIP's attention output and fc2).
+  - The workspace argument carries the bias.
 
 **Tuning for LLM shapes** (`sweep_llm.py`): every one-tile-per-subgroup configuration of both families, with and
 without each epilogue, at Llama 3.2 3B's projection shapes for M = 512 / 1024 / 2048 and the LM head

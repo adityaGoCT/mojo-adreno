@@ -94,7 +94,13 @@ ablas_status ablas_hgemm_q4_0(ablas_handle h, VkCommandBuffer cmd, ablas_op opA,
 //                     must then be given as P).
 // The epilogue kernels exist for the packed path (operands are packed first if not given as P) and the Q4_0
 // kernels. ABLAS_UNSUPPORTED on the Adreno 840 backend.
-typedef enum { ABLAS_EPI_NONE = 0, ABLAS_EPI_PACKED = 1, ABLAS_EPI_SWIGLU = 2, ABLAS_EPI_RESIDUAL_RMS = 3, ABLAS_EPI_F32 = 4 } ablas_epilogue;
+//   ABLAS_EPI_GEGLU   as SWIGLU, with gelu_tanh(gate) * up (Gemma's MLP).
+//   ABLAS_EPI_BIAS_GELU  as PACKED, with gelu_tanh(C + bias) (a ViT's fc1). The workspace is the bias: fp32 [N].
+//   ABLAS_EPI_RESIDUAL_BIAS  C (fp32 row-major [M, N]) += op(A) op(B) + bias (a ViT's projections into its residual
+//                     stream). The workspace is the bias: fp32 [N].
+// The bias epilogues and RESIDUAL_RMS take the operands as P (the workspace argument is their output or bias).
+typedef enum { ABLAS_EPI_NONE = 0, ABLAS_EPI_PACKED = 1, ABLAS_EPI_SWIGLU = 2, ABLAS_EPI_RESIDUAL_RMS = 3, ABLAS_EPI_F32 = 4,
+               ABLAS_EPI_GEGLU = 5, ABLAS_EPI_BIAS_GELU = 6, ABLAS_EPI_RESIDUAL_BIAS = 7 } ablas_epilogue;
 ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                             uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf workspace, ablas_epilogue ep);
 ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t N, uint32_t K,

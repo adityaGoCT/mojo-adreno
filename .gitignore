@@ -21,3 +21,4 @@ ablas/llama3b/kernels/qkv_rope_*
 ablas/llama3b/out*/
 ablas/lt/build/
 ablas/lt/kernels/fa3.comp
+ablas/lt/kernels/famask*.comp

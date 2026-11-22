@@ -274,7 +274,7 @@ if __name__ == "__main__":
 def parse(n):
     """Inverse of name(): config dict from a kernel name."""
     ep = None
-    if (e := re.search(r"_e([pgaf])$", n)):
+    if (e := re.search(r"_e([pgaflbr])$", n)):
         ep, n = e.group(1), n[:e.start()]
     m = re.match(r"g([NTPR])([NTPQC])_w(\d+)x(\d+)_t(\d+)x(\d+)_n(\d+)_(f16|f32)_k(\d+)(.*)$", n)
     la, lb, wm, wn, tm, tn, nt, acc, ku, rest = m.groups()

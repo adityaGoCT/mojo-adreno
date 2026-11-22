@@ -265,6 +265,9 @@ static VkPipeline get_pipeline(ablas_handle h, uint32_t kernel, uint32_t m, uint
 
 // Kernel for a layout and shape: the tuned entry nearest in log-space whose tile divides the shape;
 // otherwise the smallest-tile kernel of that layout that divides it.
+// Epilogues whose workspace argument is bound at binding 3 (their output or a bias)
+#define EPI_WS(ep) ((ep) == ABLAS_EPI_RESIDUAL_RMS || (ep) == ABLAS_EPI_BIAS_GELU || (ep) == ABLAS_EPI_RESIDUAL_BIAS)
+
 static int select_kernel_ep(char la, char lb, uint32_t M, uint32_t N, uint32_t K, char ep) {
   int best = -1;
   double bestd = 1e30;
@@ -458,7 +461,7 @@ ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, a
   if (h->a840) return ep ? ABLAS_UNSUPPORTED : hgemm_840(h, cmd, opA, opB, M, N, K, A, B, C, ws);
   if (M % 64 || N % 32 || K % 32 || !M || !N || !K) return ABLAS_BAD_SHAPE;
   if (ep && (N % 64 || K % 64)) return ABLAS_BAD_SHAPE;
-  if (ep == ABLAS_EPI_RESIDUAL_RMS && (opA != ABLAS_OP_P || opB != ABLAS_OP_P || !ws.buffer)) return ABLAS_BAD_SHAPE;
+  if (EPI_WS(ep) && (opA != ABLAS_OP_P || opB != ABLAS_OP_P || !ws.buffer)) return ABLAS_BAD_SHAPE;
   // Packed tiles (K-minor 64 x 16 / 16 x 64, one 64 x 64 tile per subgroup): 16.5 TFLOP/s at 4096^3 and 14.8 at
   // 2048^3 (TN: 9.4 / 10.8). Used for operands given as P, for NT at any size (PyTorch's X @ W^T: both operands
   // are K-minor, so packing is a plain re-tiling copy), and for everything else from 2^35 multiply-adds, where
@@ -504,10 +507,10 @@ ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, a
   }
   char la = "NTR"[opA], lb = "NTC"[opB];  // packed: K-minor tiles, A 'R' (64 x 16 row-major), B 'C' (16 x 64 col-major)
   // with an epilogue: a kernel tuned for it at the nearest shape, else the epilogue variant of the plain choice
-  int kernel = ep ? select_kernel_ep(la, lb, M, N, K, "_pgaf"[ep]) : -1;
+  int kernel = ep ? select_kernel_ep(la, lb, M, N, K, "_pgaflbr"[ep]) : -1;
   if (kernel < 0) {
     kernel = select_kernel(la, lb, M, N, K);
-    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_kernels[kernel].name, "_pgaf"[ep], M, N, 0);
+    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_kernels[kernel].name, "_pgaflbr"[ep], M, N, 0);
   }
   const char* force = getenv(ep ? "ABLAS_KERNEL_EP" : "ABLAS_KERNEL");  // benchmarking aid: kernel by name
   if (force)
@@ -520,7 +523,7 @@ ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, a
   VkPipeline p = get_pipeline(h, (uint32_t)kernel, M, N, K);
   if (!p) return ABLAS_VK_ERROR;
   h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
-  push4(h, cmd, A, B, C, ep == ABLAS_EPI_RESIDUAL_RMS ? ws : (ablas_buf){0});
+  push4(h, cmd, A, B, C, EPI_WS(ep) ? ws : (ablas_buf){0});
   h->CmdDispatch(cmd, N / kk->bn, M / kk->bm, 1);
   h->last = kk->name;
   return ABLAS_OK;
@@ -583,7 +586,7 @@ ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op o
                                  ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf ws, ablas_epilogue ep) {
   if (h->a840) return ABLAS_UNSUPPORTED;
   if (!M || !N || !K || M % 64 || N % 64 || K % 32 || opA == ABLAS_OP_T) return ABLAS_BAD_SHAPE;
-  if (ep == ABLAS_EPI_RESIDUAL_RMS && (opA != ABLAS_OP_P || !ws.buffer)) return ABLAS_BAD_SHAPE;
+  if (EPI_WS(ep) && (opA != ABLAS_OP_P || !ws.buffer)) return ABLAS_BAD_SHAPE;
   if (opA == ABLAS_OP_N) {
     ablas_status st;
     if (!ws.buffer) return ABLAS_BAD_SHAPE;
@@ -591,10 +594,10 @@ ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op o
     A = ws;
     compute_barrier(h, cmd);
   }
-  int kernel = ep ? select_q4(M, N, K, "_pgaf"[ep]) : -1;
+  int kernel = ep ? select_q4(M, N, K, "_pgaflbr"[ep]) : -1;
   if (kernel < 0) {
     kernel = select_q4(M, N, K, 0);
-    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_q4_kernels[kernel].name, "_pgaf"[ep], M, N, 1);
+    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_q4_kernels[kernel].name, "_pgaflbr"[ep], M, N, 1);
   }
   const char* force = getenv(ep ? "ABLAS_KERNEL_EP" : "ABLAS_KERNEL");
   if (force)
@@ -606,7 +609,7 @@ ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op o
   VkPipeline p = get_pipeline(h, Q4_BASE + (uint32_t)kernel, M, N, K);
   if (!p) return ABLAS_VK_ERROR;
   h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
-  push4(h, cmd, A, W, C, ep == ABLAS_EPI_RESIDUAL_RMS ? ws : (ablas_buf){0});
+  push4(h, cmd, A, W, C, EPI_WS(ep) ? ws : (ablas_buf){0});
   h->CmdDispatch(cmd, N / kk->bn, M / kk->bm, 1);
   h->last = kk->name;
   return ABLAS_OK;

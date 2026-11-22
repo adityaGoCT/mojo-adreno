@@ -14,6 +14,16 @@ It keeps only what LLM inference needs, plus the two non-GEMM operations every t
 | `ablasLtRmsNorm` | RMSNorm of the fp32 residual into tiles, from the epilogue's sums or computed | `kernels/rowss`, `kernels/normtiles` |
 | `ablasLtAttention` | causal flash attention, grouped KV heads, head dim 128 | `fa3` from `../llama3b/gen_attn.py`, group ratio as a parameter |
 | `ablasLtWeightPack` / `Row` | weights from fp32/fp16 rows, ggml Q4_0 blocks or packed files, laid out for their epilogue (gate/up interleave); row decode for embeddings | host code |
+| `EPILOGUE_GEGLU`, `BIAS_GELU`, `RESIDUAL_BIAS` | gelu_tanh(gate) * up; gelu_tanh(A W^T + b) into tiles; x += A W^T + b | `ABLAS_EPI_GEGLU`, `_BIAS_GELU`, `_RESIDUAL_BIAS` |
+| `ROPE_QKV`, general form | heads of 256 or 128, heads of 72 zero-padded to 128, q/k/v bias, no RoPE, K/V into a longer cache at a row offset | GEMM (packed tiles out) + `kernels/qksplit`, `kernels/vsplit` |
+| `ablasLtAttentionMasked` | non-causal attention with a key mask, a block-causal suffix (π0's action expert), independent batches (a ViT's images), heads of 128 or 256, key splits for few query rows | `famask*` from `gen_kernels.py`, `kernels/facombine` |
+| `ablasLtLayerNorm` | LayerNorm (weight and bias) of the fp32 residual into tiles, D any multiple of 64 | `kernels/lnstats`, `kernels/lntiles` |
+
+The last four rows came with π0 ([`../pi0`](../pi0)). Two more things changed under every caller:
+- **Row split.** A GEMM with M not a multiple of 256 (and N at most 4096) runs as two row ranges, so the 256-row
+  tiles fit the first. π0's 832-row prefix: its down projection 6.7 -> 4.0 ms a layer.
+- **Heads of 256 use one accumulator per subgroup.** Two long-lived 64 x 64 accumulators per subgroup hang the 850
+  (driver bug #4), so P V runs once per 128 output dims.
 
 Every call records into the caller's command buffer and, unless `ABLASLT_NO_AUTO_BARRIER` is set, ends with a
 barrier. `ABLASLT_DESCRIPTOR_SETS` switches AdrenoBLAS and this layer to ordinary descriptor sets, for hosts that

@@ -2,6 +2,8 @@
 // fp32 model.safetensors, on the phone (or the Mac), following export_pi0.py's recipe.txt:
 //   size <bytes>                      the output size (gaps stay zero: alignment padding)
 //   conv <out offset> <src offset> <n>  n fp32 values at src -> fp16 at out (round to nearest even)
+//   rand <out offset> <n> <amplitude>   n random fp16 values, uniform in [-amplitude, amplitude] (export_pi0.py
+//                                       --random: the architecture without a checkpoint; model.safetensors is "-")
 //
 //   pi0_f16 <model.safetensors> <recipe.txt> <gemma.bin>
 #include <fcntl.h>
@@ -39,7 +41,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "usage: pi0_f16 model.safetensors recipe.txt gemma.bin\n");
     return 2;
   }
-  int in = open(argv[1], O_RDONLY), out = open(argv[3], O_RDWR | O_CREAT | O_TRUNC, 0644);
+  int in = strcmp(argv[1], "-") ? open(argv[1], O_RDONLY) : 0, out = open(argv[3], O_RDWR | O_CREAT | O_TRUNC, 0644);
   FILE* r = fopen(argv[2], "r");
   if (in < 0 || out < 0 || !r) {
     perror("open");
@@ -68,6 +70,22 @@ int main(int argc, char** argv) {
           dst[j] = (__fp16)src[j];
           float h = dst[j];
           inf += !(h >= -65504.0f && h <= 65504.0f);  // inf or nan
+        }
+        if (pwrite(out, dst, m * 2, a + i * 2) != m * 2) {
+          perror("write");
+          return 2;
+        }
+      }
+      done += n;
+    } else if (!strcmp(kind, "rand")) {
+      double amp;
+      if (fscanf(r, "%lld %lld %lf", &a, &n, &amp) != 3) return 2;
+      unsigned s = (unsigned)(a / 2 + 12345);
+      for (long long i = 0; i < n; i += CH) {
+        long long m = n - i < CH ? n - i : CH;
+        for (long long j = 0; j < m; ++j) {
+          s ^= s << 13, s ^= s >> 17, s ^= s << 5;
+          dst[j] = (__fp16)((float)amp * ((float)(s >> 8) * (2.0f / 16777216.0f) - 1.0f));
         }
         if (pwrite(out, dst, m * 2, a + i * 2) != m * 2) {
           perror("write");

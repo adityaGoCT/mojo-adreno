@@ -13,6 +13,11 @@ then lane l works on row l. Two subgroups stage at a time (2 x 8.7 KB), in round
        tile, e.g. for a llama.cpp matmul with a few tokens).
   'a'  residual + RMS statistics: C is an fp32 row-major [M, N] residual stream, C += A B; the workspace (binding 3)
        receives each row's sum of squares of the updated C per 64-column tile, ws[r * (N/64) + col0/64].
+  'l'  GeGLU: as 'g', with gelu_tanh(gate) * up (Gemma's MLP), written as gate * sigmoid(1.5957691 (gate + 0.044715
+       gate^3)), the same function in a form that cannot overflow.
+  'b'  bias + GELU: as 'p', with gelu_tanh(C + bias) (a ViT's fc1); bias fp32 [N] at binding 3.
+  'r'  residual + bias: C (fp32 row-major [M, N]) += A B + bias (a ViT's attention output and fc2); bias fp32 [N] at
+       binding 3.
 """
 ST = 17  # padded row stride of the staging tile, in f16vec4
 
@@ -24,6 +29,12 @@ def decls(nsg, ep=None):
     if ep == "a":
         d += ["layout(std430, binding = 2) buffer CF { vec4 cf[]; };",
               "layout(std430, binding = 3) writeonly buffer WS { float wsf[]; };"]
+    if ep == "r":
+        d += ["layout(std430, binding = 2) buffer CF { vec4 cf[]; };"]
+    if ep in "br":
+        d += ["layout(std430, binding = 3) readonly buffer BI { vec4 bias4[]; };"]
+    if ep in "lb":
+        d += ["vec4 gelu_t(vec4 x) { return x / (1.0 + exp(-1.5957691 * x * (1.0 + 0.044715 * x * x))); }"]
     return d
 
 def body(ep, nsg, N, acc="acc", out="c4"):
@@ -41,14 +52,23 @@ def body(ep, nsg, N, acc="acc", out="c4"):
                   "        f16vec4 x = ep_sh[sr + c * 4u + h * 2u], y = ep_sh[sr + c * 4u + h * 2u + 1u];",
                   f"        {out}[ob + c * 128u + h] = uvec4(packFloat2x16(x.xy), packFloat2x16(x.zw), packFloat2x16(y.xy), packFloat2x16(y.zw));",
                   "      }"]
-        elif ep == "g":
+        elif ep == "b":
+            L += [f"    uint ob = (((r / 64u) * ({N} / 16u) + col0 / 16u) * 1024u + el * 16u) / 8u;",
+                  "    for (uint c = 0u; c < 4u; ++c)",
+                  "      for (uint h = 0u; h < 2u; ++h) {",
+                  "        uint bi = (col0 + c * 16u + h * 8u) / 4u;",
+                  "        vec4 x = gelu_t(vec4(ep_sh[sr + c * 4u + h * 2u]) + bias4[bi]);",
+                  "        vec4 y = gelu_t(vec4(ep_sh[sr + c * 4u + h * 2u + 1u]) + bias4[bi + 1u]);",
+                  f"        {out}[ob + c * 128u + h] = uvec4(packFloat2x16(f16vec2(x.xy)), packFloat2x16(f16vec2(x.zw)), packFloat2x16(f16vec2(y.xy)), packFloat2x16(f16vec2(y.zw)));",
+                  "      }"]
+        elif ep in "gl":
             L += [f"    uint ob = (((r / 64u) * ({N} / 32u) + col0 / 32u) * 1024u + el * 16u) / 8u;",
                   "    for (uint c = 0u; c < 2u; ++c)",
                   "      for (uint h = 0u; h < 2u; ++h) {",
                   "        uvec2 w[2];",
                   "        for (uint i = 0u; i < 2u; ++i) {",
                   "          vec4 gg = vec4(ep_sh[sr + c * 4u + h * 2u + i]), uu = vec4(ep_sh[sr + 8u + c * 4u + h * 2u + i]);",
-                  "          vec4 a = gg / (1.0 + exp(-gg)) * uu;",
+                  "          vec4 a = gg / (1.0 + exp(-gg)) * uu;" if ep == "g" else "          vec4 a = gelu_t(gg) * uu;",
                   "          w[i] = uvec2(packFloat2x16(f16vec2(a.xy)), packFloat2x16(f16vec2(a.zw)));",
                   "        }",
                   f"        {out}[ob + c * 128u + h] = uvec4(w[0], w[1]);",
@@ -67,6 +87,9 @@ def body(ep, nsg, N, acc="acc", out="c4"):
                   "      ss += dot(xv, xv);",
                   "    }",
                   f"    wsf[r * ({N} / 64u) + col0 / 64u] = ss;"]
+        elif ep == "r":
+            L += [f"    uint xi = (r * {N} + col0) / 4u;",
+                  "    for (uint j = 0u; j < 16u; ++j) cf[xi + j] += vec4(ep_sh[sr + j]) + bias4[col0 / 4u + j];"]
         else:
             raise ValueError(ep)
         L.append("  }")

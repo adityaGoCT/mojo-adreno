@@ -106,7 +106,7 @@ def glsl(c, M, N, K, spec=False):
     return "\n".join(L) + "\n"
 
 def parse(n):
-    m = re.match(r"q4_w(\d+)x(\d+)_k(\d+)(_p1)?(_dq0)?(_e[pgaf])?$", n)
+    m = re.match(r"q4_w(\d+)x(\d+)_k(\d+)(_p1)?(_dq0)?(_e[pgaflbr])?$", n)
     c = dict(wm=int(m[1]), wn=int(m[2]), ks=int(m[3]), pf=int(bool(m[4])), dq=0 if m[5] else 1)
     if m[6]:
         c["ep"] = m[6][2]
