@@ -46,3 +46,17 @@ vk_stock | llama 3B F16                   |   5.98 GiB |     3.21 B | Vulkan    
 ## Other settings, Q4_0, AdrenoBLAS build
 pp2048 -ub 1024: 917.92 ± 3.75; pp2048 -ub 2048 -b 2048: 916.22 ± 4.30 (micro-batch size does not matter: attention does)
 -fa 0: segmentation fault, in the stock build too (not the patch)
+
+## 2026-11-22: the patch on AdrenoBLASLt (../lt) with the gate/up/SwiGLU fusion. Another QDC SM8975 QRD (Adreno 850,
+## same driver), vkbench.sh as above. Q4_0 = --pure. "fusion off" = GGML_VK_ABLAS_SWIGLU=0 (the matmul path alone).
+vk_ablas (fused)      pp512 |      1663.19 ± 35.47 |   [waited 0s, start 41500mC]
+vk_ablas (fused)     pp1024 |       1469.63 ± 2.60 |   [waited 2s, start 41200mC]
+vk_ablas (fused)     pp2048 |       1019.69 ± 6.05 |   [waited 2s, start 42800mC]
+vk_ablas (fused)       tg32 |         29.88 ± 1.03 |   [waited 4s, start 41500mC]
+vk_ablas (fusion off) pp512 |      1483.73 ± 10.87 |   [waited 0s, start 45900mC]
+vk_ablas (fusion off) pp1024 |      1323.14 ± 6.53 |   [waited 2s, start 43700mC]
+vk_ablas (fusion off) pp2048 |       945.83 ± 3.58 |   [waited 4s, start 41500mC]
+vk_stock              pp512 |        417.90 ± 0.74 |   [waited 2s, start 43700mC]
+vk_stock             pp1024 |        404.69 ± 1.04 |   [waited 4s, start 42100mC]
+vk_stock             pp2048 |        361.42 ± 3.92 |   [waited 4s, start 42500mC]
+vk_stock               tg32 |         29.88 ± 0.92 |   [waited 4s, start 45000mC]

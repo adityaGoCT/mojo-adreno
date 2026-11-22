@@ -18,3 +18,6 @@ ablas/llama3b/kernels/qk_w*.comp
 ablas/llama3b/kernels/pv_w*.comp
 ablas/llama3b/kernels/fa*.comp
 ablas/llama3b/kernels/qkv_rope_*
+ablas/llama3b/out*/
+ablas/lt/build/
+ablas/lt/kernels/fa3.comp

@@ -30,3 +30,15 @@ F16, M = 1, 2, 6, layer 0: rel 1.7e-3 to 5.6e-3
 
 ## Greedy text (llama-completion --temp 0, -c 2048)
 'The capital of France is' + 40 tokens, and long_prompt.txt (~900 tokens) + 32 tokens: identical to stock for Q4_0 and F16.
+
+## 2026-11-22: the patch on AdrenoBLASLt with the gate/up/SwiGLU fusion (Q4_0 --pure), another QDC SM8975 QRD
+# GGML_VK_ABLAS_DEBUG=1, 1 chunk of 512: "ablas: blk.N.ffn_gate.weight + blk.N.ffn_up.weight + SwiGLU as one GEMM" for all 28
+# layers; PPL [1] 19.4483 (stock's)
+# llama-perplexity -c 512 -b 512 --chunks 8 --kl-divergence against stock's logits on this phone:
+Mean PPL(Q)                   :  31.310923 ±   2.241650
+Mean PPL(base)                :  31.311555 ±   2.241703
+Mean    KLD:  -0.000019 ±   0.000000
+Maximum KLD:   0.000002
+RMS Δp    :  0.000 ± 0.000 %
+Same top p: 100.000 ± 0.000 %
+# llama-completion -f long_prompt.txt (~900 tokens) -n 32 --temp 0: output identical to stock (cmp)

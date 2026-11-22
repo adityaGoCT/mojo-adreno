@@ -1,0 +1,27 @@
+#version 450
+// qkv fp16 [M, 5120] row-major (q 24 x 128 | k 8 x 128 | v 8 x 128) -> RoPE'd Q as R tiles [24][M, 128] and K as
+// tiles [8][M, 128] (the B operand of S = Q K^T, same element order). HF rotate_half: dims d and d + 64 pair up.
+// cs: fp32 [M][128] = cos[64] | sin[64] per position. One workgroup per token: lanes 0-95 Q (head t/4, dims 16*(t%4)
+// and + 64), 96-127 K.
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 128) in;
+layout(push_constant) uniform P { uint M; } pc;
+layout(std430, binding = 0) readonly buffer QKV { f16vec4 qkv[]; };
+layout(std430, binding = 1) readonly buffer CS { vec4 cs[]; };
+layout(std430, binding = 2) writeonly buffer Q { f16vec4 q[]; };
+layout(std430, binding = 3) writeonly buffer K { f16vec4 k[]; };
+void main() {
+  uint r = gl_WorkGroupID.x, t = gl_LocalInvocationID.x, c = t % 4u;
+  bool isq = t < 96u;
+  uint head = isq ? t / 4u : (t - 96u) / 4u;
+  uint col = (isq ? 0u : 3072u) + head * 128u + c * 16u;
+  uint base = head * pc.M * 128u;
+  uint o1 = (base + rtile(r, c * 16u, 128u)) / 4u, o2 = (base + rtile(r, c * 16u + 64u, 128u)) / 4u;
+  for (uint i = 0u; i < 4u; ++i) {
+    vec4 x1 = vec4(qkv[(r * 5120u + col) / 4u + i]), x2 = vec4(qkv[(r * 5120u + col + 64u) / 4u + i]);
+    vec4 co = cs[(r * 128u + c * 16u) / 4u + i], si = cs[(r * 128u + 64u + c * 16u) / 4u + i];
+    f16vec4 y1 = f16vec4(x1 * co - x2 * si), y2 = f16vec4(x2 * co + x1 * si);
+    if (isq) { q[o1 + i] = y1; q[o2 + i] = y2; } else { k[o1 + i] = y1; k[o2 + i] = y2; }
+  }
+}

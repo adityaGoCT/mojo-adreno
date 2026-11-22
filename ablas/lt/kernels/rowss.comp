@@ -1,0 +1,19 @@
+#version 450
+// Row sums of squares: ss[r] = sum(x[r]^2), x fp32 [M, D] row-major (D multiple of 256). One 64-lane subgroup per
+// row, coalesced (lane l reads vec4s l, l + 64, ...). Grid (M / 4). Feeds normtiles.comp (nparts = stride = 1).
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint D; } pc;
+layout(std430, binding = 0) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 1) writeonly buffer SS { float ss[]; };
+void main() {
+  uint r = gl_WorkGroupID.x * 4u + gl_SubgroupID, l = gl_SubgroupInvocationID;
+  float s = 0.0;
+  for (uint j = 0u; j < pc.D / 256u; ++j) {
+    vec4 v = x[r * (pc.D / 4u) + j * 64u + l];
+    s += dot(v, v);
+  }
+  s = subgroupAdd(s);
+  if (l == 0u) ss[r] = s;
+}

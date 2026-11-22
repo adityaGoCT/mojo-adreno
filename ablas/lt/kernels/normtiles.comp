@@ -1,0 +1,31 @@
+#version 450
+// RMSNorm into activation tiles (the packed A format of [M, D]: element (r, k) at
+// ((r/64)*(D/16) + k/16)*1024 + (r%64)*16 + k%16):
+//   out[r, k] = w[k] * x[r, k] * rsqrt(sum_i ssp[r*stride + i] / D + eps),  i < nparts
+// ssp: the RESIDUAL epilogue's per-64-column sums (nparts = stride = D/64) or rowss.comp's totals (1, 1).
+// One subgroup per 64 rows x 64 columns (four 2 KB tiles, lane = row). Grid (D / 256, M / 64), 4 subgroups.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint D; float eps; uint nparts; uint stride; } pc;
+layout(std430, binding = 0) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 1) readonly buffer SS { float ssp[]; };
+layout(std430, binding = 2) readonly buffer W { vec4 w[]; };
+layout(std430, binding = 3) writeonly buffer O { uvec4 o[]; };
+uint h2(vec2 v) { return packFloat2x16(f16vec2(v)); }
+void main() {
+  uint D = pc.D, p = gl_WorkGroupID.y, l = gl_SubgroupInvocationID, r = p * 64u + l;
+  float ss = 0.0;
+  for (uint i = 0u; i < pc.nparts; ++i) ss += ssp[r * pc.stride + i];
+  float sc = inversesqrt(ss / float(D) + pc.eps);
+  for (uint t = 0u; t < 4u; ++t) {
+    uint c = (gl_WorkGroupID.x * 4u + gl_SubgroupID) * 4u + t;
+    uint xi = (r * D + c * 16u) / 4u;
+    vec4 a0 = w[c * 4u] * (x[xi] * sc), a1 = w[c * 4u + 1u] * (x[xi + 1u] * sc);
+    vec4 a2 = w[c * 4u + 2u] * (x[xi + 2u] * sc), a3 = w[c * 4u + 3u] * (x[xi + 3u] * sc);
+    uint ob = ((p * (D / 16u) + c) * 1024u + l * 16u) / 8u;
+    o[ob] = uvec4(h2(a0.xy), h2(a0.zw), h2(a1.xy), h2(a1.zw));
+    o[ob + 1u] = uvec4(h2(a2.xy), h2(a2.zw), h2(a3.xy), h2(a3.zw));
+  }
+}
