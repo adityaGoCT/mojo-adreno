@@ -33,7 +33,8 @@ QNN = pathlib.Path(os.environ.get("QNN_AAR_DIR", ROOT / "build/npu/dl/qnn/x"))
 NDK = pathlib.Path(os.environ.get("ANDROID_NDK", "/opt/homebrew/share/android-ndk")).resolve()
 CXX = NDK / "toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang++"
 STRIP = NDK / "toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip"
-QNN_LIBS = ["libQnnHtp.so", "libQnnHtpPrepare.so", "libQnnHtpV81Stub.so", "libQnnHtpV81Skel.so", "libQnnSystem.so"]
+QNN_LIBS = ["libQnnHtp.so", "libQnnHtpPrepare.so", "libQnnHtpV81Stub.so", "libQnnHtpV81Skel.so", "libQnnHtpV85Stub.so",
+            "libQnnHtpV85Skel.so", "libQnnSystem.so"]  # V81: SM8850 (Adreno 840 phones); V85: SM8975 (Adreno 850)
 
 
 def sh(*cmd):
