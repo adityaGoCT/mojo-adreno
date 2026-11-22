@@ -70,7 +70,7 @@ def main():
             flops = 2.0 * M * N * K
             reps = max(3, int(0.05 / (flops / 15e12)))
             cmds = [f"echo K {t[0]}; ./vkrun {t[2].name} {N // (64 * t[1]['wn'])} {M // (64 * t[1]['wm'])} 1 -r {reps} -o {DEV} "
-                    f"b0=~{M * K * 2} b1=~{bbytes} b2=@{M * N * 4} b3=@{M * N // 16}" for t in todo]
+                    f"b0=~{M * K * 2} b1=~{bbytes} b2=@{M * N * 4} b3=@{M * N // 16}" + (f" -p {M}" if ep == "f" else "") for t in todo]
             r = adb("shell", f"cd {DEV} && " + " ; ".join(cmds))
             cur = None
             for line in r.stdout.splitlines():

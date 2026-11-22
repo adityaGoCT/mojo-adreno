@@ -1,0 +1,25 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+// bug 12 control: B loaded with coopMatLoad (B[k][n] = w[n * 16 + k]) instead of element writes. Exact. An initialized 16 x 64 B matrix written element by element with constant indices. On this driver lane l holds
+// column l of B and element e holds k = e (verified by coopMatLoad + reading elements). a = 64 x 16 with
+// a[r][k] = (k == r % 16), so c[r][n] = B[r % 16][n] = w[n * 16 + r % 16].
+// Expected: c[r][n] == w[n * 16 + r % 16] for all r, n. Observed: rows with r % 16 == 4 are 0 (the write to element 4 is dropped).
+// dispatch (1,1,1)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+void main() {
+  uint l = gl_SubgroupInvocationID;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+  coopMatLoad(ma, a, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b = coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB>(0.0hf);
+  coopMatLoad(b, w, 0u, 16u, gl_CooperativeMatrixLayoutColumnMajor);   // B[k][n] = w[n * 16 + k]
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0.0hf);
+  acc = coopMatMulAdd(ma, b, acc);
+  coopMatStore(acc, c, 0u, 64u, gl_CooperativeMatrixLayoutRowMajor);
+}

@@ -43,6 +43,7 @@ typedef struct {
   VkDescriptorSetLayout dsl;
   VkPipelineLayout layout;  // NBIND storage buffers (push descriptors) + 64 bytes of push constants
   char name[256];
+  int bda;  // VK_ALL_FEATURES: bufferDeviceAddress on
 } vk_t;
 
 #define NBIND 8
@@ -78,10 +79,27 @@ static void vk_init(vk_t* v, uint32_t nqueries) {
   VkPhysicalDeviceVulkan12Features v12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &cm};
   v12.shaderFloat16 = v12.vulkanMemoryModel = v12.vulkanMemoryModelDeviceScope = VK_TRUE;
   v12.storageBuffer8BitAccess = v12.shaderInt8 = VK_TRUE;
+  VkPhysicalDeviceVulkan13Features v13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+  if (getenv("VK_SUBGROUP_SIZE_CONTROL")) {  // test: what llama.cpp's Vulkan backend enables
+    v13.subgroupSizeControl = v13.computeFullSubgroups = VK_TRUE;
+    cm.pNext = &v13;
+  }
   VkPhysicalDeviceVulkan11Features v11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12};
   v11.storageBuffer16BitAccess = VK_TRUE;
   VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v11};
   f2.features.shaderInt16 = VK_TRUE;
+  if (getenv("VK_ALL_FEATURES")) {  // test: every supported core feature on, as llama.cpp's Vulkan backend does
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR qcm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+    v13 = (VkPhysicalDeviceVulkan13Features){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, &qcm};
+    v12 = (VkPhysicalDeviceVulkan12Features){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &v13};
+    v11 = (VkPhysicalDeviceVulkan11Features){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12};
+    f2 = (VkPhysicalDeviceFeatures2){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v11};
+    ((PFN_vkGetPhysicalDeviceFeatures2)v->gipa(v->inst, "vkGetPhysicalDeviceFeatures2"))(v->pd, &f2);
+    cm = qcm;
+    v->bda = v12.bufferDeviceAddress;
+    fprintf(stderr, "all features: robustBufferAccess %d bufferDeviceAddress %d descriptorIndexing %d\n",
+            f2.features.robustBufferAccess, v12.bufferDeviceAddress, v12.descriptorIndexing);
+  }
   const char* exts[] = {"VK_KHR_push_descriptor", "VK_KHR_cooperative_matrix"};
   VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f2, 0, 1, &q, 0, NULL, 2, exts};
   CK(vkCreateDevice(v->pd, &dci, NULL, &v->dev));

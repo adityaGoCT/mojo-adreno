@@ -7,6 +7,7 @@
 #include "ablas.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,6 +21,8 @@
 #define TRANSPOSE64_KERNEL 0xfffe  // 64x64 tile, 128-bit loads/stores, multiples of 64; optional panel output
 #define TILE_COPY_KERNEL 0xfffd    // K-minor source -> K-minor tiles (no transpose)
 #define COPY840_KERNEL 0xfffc      // Adreno 840: plain 16-byte copy (pack of an operand already in TN layout)
+#define PACKF32_KERNEL 0xfffb      // fp32 [M, K] -> fp16 K-minor tiles, rows padded to 64
+#define Q4GGML_KERNEL 0xfffa       // ggml block_q4_0 rows -> AdrenoBLAS Q4_0 layout
 #define K840_BASE 0x8000           // Adreno 840: ablas840_kernels[kernel - K840_BASE]
 #define Q4_BASE 0x4000             // Q4_0: ablas_q4_kernels[kernel - Q4_BASE]
 
@@ -51,8 +54,21 @@ struct ablas_ctx {
   PFN_vkCmdBindPipeline CmdBindPipeline;
   PFN_vkCmdPushDescriptorSetKHR CmdPushDescriptorSetKHR;
   PFN_vkCmdDispatch CmdDispatch;
+  PFN_vkCmdPushConstants CmdPushConstants;
   PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
+  // Descriptor-set mode (ablas_use_descriptor_sets): ordinary descriptor sets from these pools, reset by the caller
+  int use_sets;
+  VkDescriptorPool* pools;
+  uint32_t npools, cur_pool, used_in_pool;
+  PFN_vkCreateDescriptorPool CreateDescriptorPool;
+  PFN_vkDestroyDescriptorPool DestroyDescriptorPool;
+  PFN_vkResetDescriptorPool ResetDescriptorPool;
+  PFN_vkAllocateDescriptorSets AllocateDescriptorSets;
+  PFN_vkUpdateDescriptorSets UpdateDescriptorSets;
+  PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
 };
+
+#define ABLAS_SETS_PER_POOL 1024u
 
 ablas_status ablas_create(ablas_handle* out, VkPhysicalDevice pd, VkDevice dev, PFN_vkGetInstanceProcAddr gipa,
                           VkInstance inst) {
@@ -77,18 +93,23 @@ ablas_status ablas_create(ablas_handle* out, VkPhysicalDevice pd, VkDevice dev, 
   LOAD(DestroyDescriptorSetLayout); LOAD(CreatePipelineLayout); LOAD(DestroyPipelineLayout);
   LOAD(CreatePipelineCache); LOAD(DestroyPipelineCache); LOAD(CreateComputePipelines); LOAD(DestroyPipeline);
   LOAD(CmdBindPipeline); LOAD(CmdPushDescriptorSetKHR); LOAD(CmdDispatch); LOAD(CmdPipelineBarrier);
+  LOAD(CmdPushConstants); LOAD(CreateDescriptorPool); LOAD(DestroyDescriptorPool); LOAD(ResetDescriptorPool);
+  LOAD(AllocateDescriptorSets); LOAD(UpdateDescriptorSets); LOAD(CmdBindDescriptorSets);
 #undef LOAD
-  if (!h->CmdPushDescriptorSetKHR) { free(h); return ABLAS_UNSUPPORTED; }
+  h->use_sets = !h->CmdPushDescriptorSetKHR;  // no VK_KHR_push_descriptor: ordinary descriptor sets
   VkDescriptorSetLayoutBinding b[4];  // A, B, C, epilogue workspace
   for (uint32_t i = 0; i < 4; ++i)
     b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
   VkDescriptorSetLayoutCreateInfo dli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  dli.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+  dli.flags = h->use_sets ? 0 : VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
   dli.bindingCount = 4;
   dli.pBindings = b;
   VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};  // epilogue parameters (ABLAS_EPI_F32: mrows)
   pli.setLayoutCount = 1;
   pli.pSetLayouts = &h->dsl;
+  pli.pushConstantRangeCount = 1;
+  pli.pPushConstantRanges = &pcr;
   VkPipelineCacheCreateInfo pci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   if (h->CreateDescriptorSetLayout(dev, &dli, NULL, &h->dsl) || h->CreatePipelineLayout(dev, &pli, NULL, &h->layout) ||
       h->CreatePipelineCache(dev, &pci, NULL, &h->cache)) {
@@ -99,8 +120,54 @@ ablas_status ablas_create(ablas_handle* out, VkPhysicalDevice pd, VkDevice dev, 
   return ABLAS_OK;
 }
 
+ablas_status ablas_use_descriptor_sets(ablas_handle h) {
+  if (h->use_sets) return ABLAS_OK;
+  if (h->npipes) return ABLAS_UNSUPPORTED;  // the pipelines were made with the push-descriptor layout
+  h->DestroyPipelineLayout(h->dev, h->layout, NULL);
+  h->DestroyDescriptorSetLayout(h->dev, h->dsl, NULL);
+  h->layout = VK_NULL_HANDLE, h->dsl = VK_NULL_HANDLE;
+  VkDescriptorSetLayoutBinding b[4];
+  for (uint32_t i = 0; i < 4; ++i)
+    b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+  VkDescriptorSetLayoutCreateInfo dli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 4, b};
+  VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+  VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  pli.setLayoutCount = 1, pli.pSetLayouts = &h->dsl, pli.pushConstantRangeCount = 1, pli.pPushConstantRanges = &pcr;
+  if (h->CreateDescriptorSetLayout(h->dev, &dli, NULL, &h->dsl) || h->CreatePipelineLayout(h->dev, &pli, NULL, &h->layout))
+    return ABLAS_VK_ERROR;
+  h->use_sets = 1;
+  return ABLAS_OK;
+}
+
+void ablas_reset_descriptor_sets(ablas_handle h) {
+  for (uint32_t i = 0; i < h->npools && i <= h->cur_pool; ++i) h->ResetDescriptorPool(h->dev, h->pools[i], 0);
+  h->cur_pool = 0, h->used_in_pool = 0;
+}
+
+static VkDescriptorSet alloc_set(ablas_handle h) {
+  if (h->npools && h->used_in_pool == ABLAS_SETS_PER_POOL) ++h->cur_pool, h->used_in_pool = 0;
+  if (h->cur_pool == h->npools) {
+    VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * ABLAS_SETS_PER_POOL};
+    VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, ABLAS_SETS_PER_POOL, 1, &ps};
+    VkDescriptorPool pool;
+    VkResult r = h->CreateDescriptorPool(h->dev, &pi, NULL, &pool);
+    if (r) { fprintf(stderr, "ablas: vkCreateDescriptorPool failed (%d)\n", r); return VK_NULL_HANDLE; }
+    h->pools = realloc(h->pools, (h->npools + 1) * sizeof *h->pools);
+    h->pools[h->npools++] = pool;
+    h->used_in_pool = 0;
+  }
+  VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, h->pools[h->cur_pool], 1, &h->dsl};
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  VkResult r = h->AllocateDescriptorSets(h->dev, &ai, &set);
+  if (r) { fprintf(stderr, "ablas: vkAllocateDescriptorSets failed (%d), pool %u, %u used\n", r, h->cur_pool, h->used_in_pool); return VK_NULL_HANDLE; }
+  ++h->used_in_pool;
+  return set;
+}
+
 void ablas_destroy(ablas_handle h) {
   if (!h) return;
+  for (uint32_t i = 0; i < h->npools; ++i) h->DestroyDescriptorPool(h->dev, h->pools[i], NULL);
+  free(h->pools);
   for (size_t i = 0; i < h->npipes; ++i) h->DestroyPipeline(h->dev, h->pipes[i].pipeline, NULL);
   if (h->cache) h->DestroyPipelineCache(h->dev, h->cache, NULL);
   if (h->layout) h->DestroyPipelineLayout(h->dev, h->layout, NULL);
@@ -152,14 +219,18 @@ static VkPipeline get_pipeline(ablas_handle h, uint32_t kernel, uint32_t m, uint
     if (p->kernel == kernel && p->m == m && p->n == n && p->k == k) return p->pipeline;
   }
   uint32_t vals[3] = {m, n, k};
-  const uint32_t* spv = kernel == TRANSPOSE_KERNEL     ? ablas_transpose_spv
+  const uint32_t* spv = kernel == PACKF32_KERNEL ? ablas_pack_a_f32_spv
+                        : kernel == Q4GGML_KERNEL ? ablas_q4_pack_ggml_spv
+                        : kernel == TRANSPOSE_KERNEL     ? ablas_transpose_spv
                         : kernel == TRANSPOSE64_KERNEL ? ablas_transpose64_spv
                         : kernel == TILE_COPY_KERNEL   ? ablas_tile_copy_spv
                         : kernel == COPY840_KERNEL     ? ablas840_copy_spv
                         : kernel >= K840_BASE          ? ablas840_kernels[kernel - K840_BASE].spv
                         : kernel >= Q4_BASE            ? ablas_q4_kernels[kernel - Q4_BASE].spv
                                                        : ablas_kernels[kernel].spv;
-  size_t words = kernel == TRANSPOSE_KERNEL     ? sizeof(ablas_transpose_spv) / 4
+  size_t words = kernel == PACKF32_KERNEL ? sizeof(ablas_pack_a_f32_spv) / 4
+                 : kernel == Q4GGML_KERNEL ? sizeof(ablas_q4_pack_ggml_spv) / 4
+                 : kernel == TRANSPOSE_KERNEL     ? sizeof(ablas_transpose_spv) / 4
                  : kernel == TRANSPOSE64_KERNEL ? sizeof(ablas_transpose64_spv) / 4
                  : kernel == TILE_COPY_KERNEL   ? sizeof(ablas_tile_copy_spv) / 4
                  : kernel == COPY840_KERNEL     ? sizeof(ablas840_copy_spv) / 4
@@ -219,16 +290,23 @@ static int select_kernel(char la, char lb, uint32_t M, uint32_t N, uint32_t K) {
 }
 
 static void push4(ablas_handle h, VkCommandBuffer cmd, ablas_buf a, ablas_buf b, ablas_buf c, ablas_buf d) {
-  VkDescriptorBufferInfo bi[4] = {{a.buffer, a.offset, VK_WHOLE_SIZE},
-                                  {b.buffer, b.offset, VK_WHOLE_SIZE},
-                                  {c.buffer, c.offset, VK_WHOLE_SIZE},
-                                  {d.buffer, d.offset, VK_WHOLE_SIZE}};
+  VkDescriptorBufferInfo bi[4] = {{a.buffer, a.offset, a.range ? a.range : VK_WHOLE_SIZE},
+                                  {b.buffer, b.offset, b.range ? b.range : VK_WHOLE_SIZE},
+                                  {c.buffer, c.offset, c.range ? c.range : VK_WHOLE_SIZE},
+                                  {d.buffer, d.offset, d.range ? d.range : VK_WHOLE_SIZE}};
   VkWriteDescriptorSet w[4];
   uint32_t n = d.buffer ? 4 : 3;
   for (uint32_t i = 0; i < n; ++i)
     w[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, VK_NULL_HANDLE, i, 0, 1,
                                   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[i], NULL};
-  h->CmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h->layout, 0, n, w);
+  if (h->use_sets) {
+    VkDescriptorSet set = alloc_set(h);
+    for (uint32_t i = 0; i < n; ++i) w[i].dstSet = set;
+    h->UpdateDescriptorSets(h->dev, n, w, 0, NULL);
+    h->CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h->layout, 0, 1, &set, 0, NULL);
+  } else {
+    h->CmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h->layout, 0, n, w);
+  }
 }
 
 static void push(ablas_handle h, VkCommandBuffer cmd, ablas_buf a, ablas_buf b, ablas_buf c) {
@@ -426,10 +504,10 @@ ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, a
   }
   char la = "NTR"[opA], lb = "NTC"[opB];  // packed: K-minor tiles, A 'R' (64 x 16 row-major), B 'C' (16 x 64 col-major)
   // with an epilogue: a kernel tuned for it at the nearest shape, else the epilogue variant of the plain choice
-  int kernel = ep ? select_kernel_ep(la, lb, M, N, K, "_pga"[ep]) : -1;
+  int kernel = ep ? select_kernel_ep(la, lb, M, N, K, "_pgaf"[ep]) : -1;
   if (kernel < 0) {
     kernel = select_kernel(la, lb, M, N, K);
-    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_kernels[kernel].name, "_pga"[ep], M, N, 0);
+    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_kernels[kernel].name, "_pgaf"[ep], M, N, 0);
   }
   const char* force = getenv(ep ? "ABLAS_KERNEL_EP" : "ABLAS_KERNEL");  // benchmarking aid: kernel by name
   if (force)
@@ -513,10 +591,10 @@ ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op o
     A = ws;
     compute_barrier(h, cmd);
   }
-  int kernel = ep ? select_q4(M, N, K, "_pga"[ep]) : -1;
+  int kernel = ep ? select_q4(M, N, K, "_pgaf"[ep]) : -1;
   if (kernel < 0) {
     kernel = select_q4(M, N, K, 0);
-    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_q4_kernels[kernel].name, "_pga"[ep], M, N, 1);
+    if (kernel >= 0 && ep) kernel = with_epilogue(ablas_q4_kernels[kernel].name, "_pgaf"[ep], M, N, 1);
   }
   const char* force = getenv(ep ? "ABLAS_KERNEL_EP" : "ABLAS_KERNEL");
   if (force)
@@ -531,5 +609,75 @@ ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op o
   push4(h, cmd, A, W, C, ep == ABLAS_EPI_RESIDUAL_RMS ? ws : (ablas_buf){0});
   h->CmdDispatch(cmd, N / kk->bn, M / kk->bm, 1);
   h->last = kk->name;
+  return ABLAS_OK;
+}
+
+// ---- fp32 activations (llama.cpp / ggml integration) ----
+
+ablas_status ablas_pack_a_f32(ablas_handle h, VkCommandBuffer cmd, uint32_t M, uint32_t K, ablas_buf A, ablas_buf dst) {
+  if (h->a840) return ABLAS_UNSUPPORTED;
+  if (!M || !K || K % 64) return ABLAS_BAD_SHAPE;
+  uint32_t Mp = (M + 63) / 64 * 64;
+  VkPipeline p = get_pipeline(h, PACKF32_KERNEL, M, 0, K);
+  if (!p) return ABLAS_VK_ERROR;
+  h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+  push(h, cmd, A, A, dst);
+  h->CmdDispatch(cmd, K / 64, Mp / 64, 1);
+  return ABLAS_OK;
+}
+
+ablas_status ablas_q4_0_pack_ggml(ablas_handle h, VkCommandBuffer cmd, uint32_t N, uint32_t K, ablas_buf blocks, ablas_buf dst) {
+  if (h->a840) return ABLAS_UNSUPPORTED;
+  if (!N || !K || N % 64 || K % 32) return ABLAS_BAD_SHAPE;
+  VkPipeline p = get_pipeline(h, Q4GGML_KERNEL, N, 0, K);
+  if (!p) return ABLAS_VK_ERROR;
+  h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+  push(h, cmd, blocks, blocks, dst);
+  h->CmdDispatch(cmd, (uint32_t)(((uint64_t)N * (K / 32) + 63) / 64), 1, 1);
+  return ABLAS_OK;
+}
+
+ablas_status ablas_gemm_f32out(ablas_handle h, VkCommandBuffer cmd, int q4, uint32_t M, uint32_t N, uint32_t K,
+                               ablas_buf A, ablas_buf W, ablas_buf C) {
+  if (h->a840) return ABLAS_UNSUPPORTED;
+  if (!M || !N || !K || N % 64 || K % 64) return ABLAS_BAD_SHAPE;
+  uint32_t Mp = (M + 63) / 64 * 64, kernel, bm, bn;
+  const char* name;
+  if (q4) {
+    int k = select_q4(Mp, N, K, 'f');
+    if (k < 0) {
+      k = select_q4(Mp, N, K, 0);
+      if (k >= 0) k = with_epilogue(ablas_q4_kernels[k].name, 'f', Mp, N, 1);
+    }
+    const char* force = getenv("ABLAS_KERNEL_EP");  // benchmarking aid: kernel by name
+    if (force)
+      for (size_t i = 0; i < sizeof(ablas_q4_kernels) / sizeof(ablas_q4_kernels[0]); ++i)
+        if (!strcmp(ablas_q4_kernels[i].name, force) && Mp % ablas_q4_kernels[i].bm == 0 && N % ablas_q4_kernels[i].bn == 0)
+          k = (int)i;
+    if (k < 0) return ABLAS_BAD_SHAPE;
+    kernel = Q4_BASE + (uint32_t)k, bm = ablas_q4_kernels[k].bm, bn = ablas_q4_kernels[k].bn, name = ablas_q4_kernels[k].name;
+  } else {
+    int k = select_kernel_ep('R', 'C', Mp, N, K, 'f');
+    if (k < 0) {
+      k = select_kernel('R', 'C', Mp, N, K);
+      if (k >= 0) k = with_epilogue(ablas_kernels[k].name, 'f', Mp, N, 0);
+    }
+    const char* force = getenv("ABLAS_KERNEL_EP");
+    if (force)
+      for (size_t i = 0; i < sizeof(ablas_kernels) / sizeof(ablas_kernels[0]); ++i)
+        if (!strcmp(ablas_kernels[i].name, force) && ablas_kernels[i].la == 'R' && ablas_kernels[i].lb == 'C' &&
+            Mp % ablas_kernels[i].bm == 0 && N % ablas_kernels[i].bn == 0)
+          k = (int)i;
+    if (k < 0) return ABLAS_BAD_SHAPE;
+    kernel = (uint32_t)k, bm = ablas_kernels[k].bm, bn = ablas_kernels[k].bn, name = ablas_kernels[k].name;
+  }
+  VkPipeline p = get_pipeline(h, kernel, Mp, N, K);
+  if (!p) return ABLAS_VK_ERROR;
+  h->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+  push(h, cmd, A, W, C);
+  uint32_t pc[4] = {M, 0, 0, 0};
+  h->CmdPushConstants(cmd, h->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+  h->CmdDispatch(cmd, N / bn, Mp / bm, 1);
+  h->last = name;
   return ABLAS_OK;
 }

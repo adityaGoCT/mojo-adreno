@@ -1,0 +1,20 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+// bug 3 control: the same product stored as fp32. Runs correctly. dispatch (1,1,1)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+void main() {
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> mb;
+  coopmat<float, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator> acc = coopmat<float, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator>(0.0);
+  coopMatLoad(ma, a, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+  coopMatLoad(mb, b, 0u, 32u, gl_CooperativeMatrixLayoutRowMajor);
+  acc = coopMatMulAdd(ma, mb, acc);
+  coopMatStore(acc, c, 0u, 32u, gl_CooperativeMatrixLayoutRowMajor);
+}

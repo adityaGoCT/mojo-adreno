@@ -1,0 +1,38 @@
+device: Adreno (TM) 850; driver: Qualcomm Technologies Inc. Adreno Vulkan Driver Driver Build: dbca1a4c11, Ie9dcd0093d, 1787853470
+Date: 08/27/26
+
+RESULT b01_min_two_acc_kunroll2 TIMEOUT (no completion in 120 s; last step: submitting...)
+RESULT b01_min_control_two_acc_ku1 PASS max error 2.77e-03 of max |C|; 501.0 us per dispatch (4.29 TFLOP/s)
+RESULT b01_note_one_acc_kunroll2 PASS max error 2.77e-03 of max |C|; 625.2 us per dispatch (3.43 TFLOP/s)
+RESULT b01_kunroll2_gemm_tn_1024 TIMEOUT (no completion in 120 s; last step: submitting...)
+RESULT b01_control_ku1_gemm_tn_1024 PASS max error 2.13e-03 of max |C|; 211.8 us per dispatch (10.14 TFLOP/s)
+RESULT b02_add_f16 WRONG 510 of 2048 sums wrong
+RESULT b02_control_add_elementwise PASS 0 of 2048 sums wrong
+RESULT b02_add_i8_loop PIPELINE_ERROR vkCreateComputePipelines returned -13
+RESULT b02_control_i8_loop_noadd PASS compiled and ran (compile test; output not checked)
+RESULT b03_f32_to_f16 WRONG max abs error 6.50e+04
+RESULT b03_control_store_f32 PASS max abs error 4.92e-07
+RESULT b04_min_two_acc64 TIMEOUT (no completion in 120 s; last step: submitting...)
+RESULT b04_min_control_one_acc64 PASS max error 4.66e-03 of max |C|; 5410.3 us per dispatch (3.18 TFLOP/s)
+RESULT b04_two_acc64_gemm_tn_2048 TIMEOUT (no completion in 120 s; last step: submitting...)
+RESULT b04_control_one_acc64_gemm_tn_2048 PASS max error 2.37e-03 of max |C|; 1571.5 us per dispatch (10.93 TFLOP/s)
+RESULT b05_shared_uvec4 WRONG 1008 of 1024 values differ from the input (sum|y - x| / sum|x| = 1.35)
+RESULT b05_shared_uint WRONG 1008 of 1024 values differ from the input (sum|y - x| / sum|x| = 1.35)
+RESULT b05_control_shared_f16vec4 PASS 0 of 1024 values differ from the input (sum|y - x| / sum|x| = 0.00)
+RESULT b06_dual_t1x2_gemm_tn_1024 PIPELINE_ERROR vkCreateComputePipelines returned -13
+RESULT b06_control_dual_t1x1_gemm_tn_1024 PASS max error 1.64e-03 of max |C|; 354.4 us per dispatch (6.06 TFLOP/s)
+RESULT b07_nn_2048_specconst PASS max error 4.66e-03 of max |C|; 4113.8 us per dispatch (4.18 TFLOP/s)
+RESULT b07_control_nn_2048_literals PASS max error 4.66e-03 of max |C|; 2106.7 us per dispatch (8.15 TFLOP/s)
+RESULT b07_tn_1024_specconst TIMEOUT (no completion in 120 s; last step: submitting...)
+RESULT b07_control_tn_1024_literals PASS max error 2.13e-03 of max |C|; 212.3 us per dispatch (10.11 TFLOP/s)
+RESULT b08_q4_uninit CRASH (SIGSEGV; last step: creating pipeline (vkCreateComputePipelines)...)
+RESULT b09_q4_elem4_const WRONG 238 of 4096 values wrong; wrong for k % 16 = 4
+RESULT b09_q4_control_runtime_index PASS 0 of 4096 values wrong
+RESULT b10_const_acc_element_read CRASH (SIGSEGV; last step: creating pipeline (vkCreateComputePipelines)...)
+RESULT b10_control_loop_read PASS 0 of 4096 values differ from the input (sum|y - x| / sum|x| = 0.00)
+RESULT b11_branch_mma CRASH (SIGSEGV; last step: creating pipeline (vkCreateComputePipelines)...)
+RESULT b11_control_unconditional PASS compiled and ran (compile test; output not checked)
+RESULT b11_fa3_original CRASH (SIGSEGV; last step: creating pipeline (vkCreateComputePipelines)...)
+RESULT b11_control_fa3_workaround PASS compiled and ran (compile test; output not checked)
+RESULT b12_elem_write_straightline WRONG 4096 of 4096 values wrong; wrong for k = 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+RESULT b12_control_coopmatload PASS 0 of 4096 values wrong

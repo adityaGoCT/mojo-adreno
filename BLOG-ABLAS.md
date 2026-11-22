@@ -1,4 +1,4 @@
-# AdrenoBLAS: fp16 GEMM at 97% of a Phone GPU's Matrix Peak
+# AdrenoBLAS: fp16 GEMM at 97% of a Phone GPU's Matrix Peak, and Llama 3.2 3B Prefill at 2,600 Tokens/s
 
 *Part 5 of [Bringing PyTorch LLMs to a Mid-Range Adreno GPU with IREE](https://github.com/adityaGoCT/iree-adreno-genai-tuner/blob/main/BLOG.md) (Part 4: [A Native GPU Target, and Llama Prefill on the Matrix Units](BLOG-COOPMAT.md)) · November 21, 2026 · Aditya*
 
@@ -10,18 +10,23 @@ The target was an **Adreno 850** on a Qualcomm Device Cloud reference phone (SM8
 
 AdrenoBLAS now runs fp16 GEMM at **17.0 TFLOP/s at 4096 x 4096 x 8192 (97% of the matrix peak)**, 16.4 at 4096³ (93%) and 14.7 at 2048³ with operands in its packed tile format, and at 11.6 and 13.7 for operands as given. LLM prefill shapes run at 12.0 to 14.6 TFLOP/s with the weights packed once (13.9 to 16.2 with both operands packed), and all four operand layouts (NN, NT, TN, TT) are covered. Every call is checked against an fp32 reference on the phone. The library is a kernel generator, an on-device tuner, a catalogue builder and a 300-line C runtime.
 
+Then I put a whole model on it. **Llama 3.2 3B prefills 512 tokens at 2,602 tokens/s with Q4_0 weights and 2,318 with fp16 weights** (2,248 and 2,143 at 2,048 tokens), with every matrix multiply in AdrenoBLAS. That is **5.7 to 6.1x llama.cpp's OpenCL backend** on the same phone with the same Q4_0 weights, and the output matches an fp32 reference (logits cosine 0.99993 or better, same top-1 token). The Q4_0 GEMM dequantizes 4-bit weights in registers straight into the matrix unit and runs at up to **17.7 TFLOP/s**, faster than fp16. That is more than the 17.5 my peak microbenchmark measured, so the true peak is likely about 17.8 (6,144 multiply-adds per clock). The whole Q4_0 prefill averages 15.2 TFLOP/s.
+
 On assembly: on the 850 it can be **read but not written**. The driver's compiled code sits in its pipeline cache and Mesa's disassembler decodes it, except four instruction words that drive the matrix unit. But a checksum rejects any edited code. On an Adreno 840 through Mesa's Turnip driver, hand-written assembly runs and beats both compilers' fp16 GEMM by about 10%; teaching its main trick to Turnip's register allocator recovers 5.0%.
 
-Four lessons carried the most weight:
+Five lessons carried the most weight:
 
 1. **On this GPU, layout is the kernel.** Each cooperative-matrix load wants long contiguous rows. A stored [K, M] beats A stored [M, K] by 1.3x at 2048³, and PyTorch's `Linear` layout runs at 2.4 TFLOP/s against 10.8. At 4096³, packing operands into contiguous tiles took the same kernel from 8.8 to 12.8 TFLOP/s, one 64 x 64 tile per subgroup took it to 15.3, and storing K contiguously inside each tile took it to 16.4.
 2. **Benchmark the benchmark.** My first fp16 peak said 1,000 TFLOP/s, and my first matrix peak said 66. The compiler had deleted one loop and hoisted the other. Only kernels that load fresh data every iteration gave honest numbers.
-3. **Map the driver, then route around it.** Seven stock-driver bugs shaped the design: hangs, compiler crashes, wrong data and a 2x slowdown from Vulkan specialization constants. The generator never emits the bad patterns, and the runtime rewrites the SPIR-V it hands to the driver. One bug turned out narrower than it first looked, and routing around it was worth +28%.
+3. **Map the driver, then route around it.** Eleven stock-driver bugs shaped the design: hangs, compiler crashes, wrong data and a 2x slowdown from Vulkan specialization constants. The generator never emits the bad patterns, and the runtime rewrites the SPIR-V it hands to the driver. One bug turned out narrower than it first looked, and routing around it was worth +28%.
 4. **Read the machine code.** The last big step came from the driver's own statistics and a disassembly of the loop: 16 scalar 4-byte loads per step where 4 vector loads would do. Each matrix-unit lane holds one row of A and one column of B along K, so the tiles have to store K contiguously.
+5. **A model is more than its GEMMs, and the matrix unit has a map.** The first correct Llama spent 40% of its time outside matrix multiplies. On the 850 each lane of the matrix unit owns one row of A, one column of B and one row of the result, so dequantization, softmax and activation work can stay inside a lane. But touching matrix elements directly costs about 20 clocks each; staging a tile through shared memory is the fast way, and fusing that work into each GEMM's epilogue removed most of the rest.
 
-The code companion is [`ablas/`](ablas/) (the library) and [`asm/`](asm/) (the peak and assembly probes) in this repo.
+The code companion is [`ablas/`](ablas/) (the library), [`ablas/llama3b/`](ablas/llama3b/) (the Llama benchmark) and [`asm/`](asm/) (the peak and assembly probes) in this repo.
 
 ![fp16 GEMM on the Adreno 850, step by step](docs/img/ablas-progress.png)
+
+![Llama 3.2 3B prefill on the Adreno 850](docs/img/ablas-llama3b.png)
 
 ## The question: does a phone GPU need assembly to reach peak?
 
@@ -213,7 +218,7 @@ The shared-memory one shows how these were found. Staged kernels returned errors
 
 The fix keeps the 128-bit global loads and writes them into an `f16vec4` array, two bitcasts per load.
 
-Repros for all seven, and an estimate of what each fix is worth, are in [`urgent_matter.md`](urgent_matter.md). The short version: one 64 x 64 tile per subgroup routed around most of the 64-wide hang (Step 8, +28% measured), and the unrolling hang and the two-tile hang are what remain between these kernels and the peak.
+Repros for all seven (eleven, with Step 11's), and an estimate of what each fix is worth, are in [`urgent_matter.md`](urgent_matter.md). The short version: one 64 x 64 tile per subgroup routed around most of the 64-wide hang (Step 8, +28% measured), and the unrolling hang and the two-tile hang are what remain between these kernels and the peak. Four more, all about touching individual matrix elements, turned up later in the Llama work (Step 11).
 
 ## Step 6: From kernels to a library
 
@@ -347,6 +352,98 @@ Efficiency now rises with K: the same kernel runs at 16.35 TFLOP/s at 4096³, **
 
 Persistent workgroups are the usual way to hide that store: each workgroup loops over several output tiles, so one tile's store overlaps the next tile's K loop. On this driver they ran 3x slower, although the disassembly ([`ps2_code.dis`](asm/isa/dump/ps2_code.dis)) shows the same 17-instruction inner loop as the fast kernel. That one stays open.
 
+## Step 11: A whole model: Llama 3.2 3B prefill
+
+Near-peak GEMMs raise the next question: what do they buy in a real model? I built a prefill benchmark for Llama 3.2 3B ([`ablas/llama3b/`](ablas/llama3b/)) in which every matrix multiply goes through AdrenoBLAS, in two weight formats:
+- **fp16.**
+- **Q4_0**: 4-bit values in blocks of 32 with an fp16 scale each, the format llama.cpp's Adreno kernels are tuned for.
+
+The setup:
+- **One command buffer** runs all 28 layers, the LM head on the last token included, with no CPU work in between.
+- **Weights are packed once**, offline. Every activation is written by the kernel that produces it directly in the format the next GEMM reads, so nothing gets packed at run time.
+- **An fp32 reference checks every result.** It is built from transformers' own `LlamaDecoderLayer` and uses the same rounded or quantized weights. The Mac's 17 GB can't hold the model in fp32, so it loads one layer at a time.
+
+The first correct version prefilled 512 tokens in 311 ms (1,647 tokens/s). Its GEMMs already ran at 16 to 17 TFLOP/s, and 40% of the time went elsewhere. Six steps took it to 197 ms:
+
+![Llama 3.2 3B prefill, Q4_0, 512 tokens, step by step](docs/img/ablas-llama3b-steps.png)
+
+### The matrix unit has a map
+
+Vulkan leaves open which lane of a subgroup holds which element of a cooperative matrix. A probe ([`probe/map.comp`](ablas/llama3b/probe/map.comp)) loads matrices of known values and prints every lane's elements. On the 850 the layout is as regular as it gets:
+- a 16 x 64 B matrix holds output column n in lane n, with k in element k;
+- a 64 x 16 A matrix holds row r in lane r;
+- a 64 x 64 accumulator holds row r in lane r, with column e in element e.
+
+Step 9 had inferred the first two from the load instructions. The third means a lane owns a whole row of each output tile.
+
+### Q4_0 in registers
+
+With B laid out by column, a lane can dequantize its own column of weights. Each 16-deep step:
+- Each lane loads 8 bytes of 4-bit values plus its column's scale.
+- It builds two halves at a time: `((w >> 4j) & 0x000F000F) | 0x64006400` reinterpreted as fp16 is 1024 + q, subtracting 1032 is exact, and multiplying by the scale rounds once.
+- It writes the 16 values into the B matrix element by element.
+
+No shared memory is involved. The first version ran 2048³ at 15.5 TFLOP/s, above the fp16 kernel's 14.8. Weights stream at 0.56 bytes each instead of 2, which more than pays for the dequantizing.
+
+It also returned an error of 0.25, and finding out why turned up two more driver bugs:
+- Writing elements into a matrix that was never initialized crashes the compiler.
+- A constant-index write to element 4 of a B matrix is silently dropped. Elements 0 to 3 and 5 to 15 arrive. An identity-matrix test showed exactly one missing k per 16, and an index the compiler can't fold fixed it.
+
+### Writing whole tiles
+
+RMSNorm, SiLU and RoPE first used one thread per row segment. Each wrote 32-byte pieces 2 KB apart into the packed tiles, so they ran at about a third of memory bandwidth: the scattered-write problem again, from `tile_copy` in Step 9. Giving each subgroup one 2 KB tile, with lane = row, took the prefill from 311 to 245 ms.
+
+### Elements are slow; shared memory is fast
+
+The accumulator map invites a flash attention in which a lane runs the softmax over its own row of scores. The first version did that through element access, and it ran slower than the three separate kernels it replaced (24 vs 21 ms at 512 tokens). Removing parts one at a time found the cause:
+- Reading or rewriting an accumulator element costs about 20 clocks.
+- Rescaling the output once per key block took 7 of 11.4 ms per layer at 2,048 tokens.
+- Multiplying the matrix by a per-lane scalar instead was slower still (23.6 ms).
+
+The working version stores each score tile to padded shared memory with `coopMatStore`, and each lane reads its row back as ordinary vectors. Two passes avoid rescaling the output entirely:
+1. The first pass collects each row's maximum and sum.
+2. The second writes normalized probabilities back to shared memory, where `coopMatLoad` turns them into the A operand of P·V.
+
+Two 64-wide accumulators per subgroup would hang (bug #4), so each 128-wide head is split across two subgroups. The final version has those subgroups take alternate key blocks and share their probability tiles, instead of both computing every block. It runs a layer at 2,048 tokens in 4.5 ms, against 17.3 ms for the separate kernels. Two more compiler crashes surfaced:
+- reading accumulator elements with constant indices into a vector;
+- matrix multiplies under a branch that differs between subgroups.
+
+Every multiply now runs unconditionally: the subgroup without a block multiplies zeros.
+
+### Fused epilogues
+
+The same staging works at the end of a GEMM. The library gained `ablas_hgemm_ex` with three epilogues:
+- **SwiGLU** on the gate/up projection, with gate and up weights interleaved 32 rows at a time. It writes silu(gate) · up directly in the packed format of the down projection's input. This removes a pass, and the GEMM writes half as much, so it got faster: 17.5 TFLOP/s.
+- **RoPE** in the qkv projection, which writes Q and K per head and V transposed, ready for attention. RoPE pairs dimensions d and d + 64, so the weight rows of each Q and K head are permuted to [0, 64, 1, 65, ...] at load time. A pair then sits in one lane, and Q·Kᵀ doesn't change because Q and K get the same permutation.
+- **Residual + RMS statistics** on the o and down projections. They add into the fp32 residual stream and write each row's partial sum of squares, so RMSNorm shrinks to one pass that writes tiles. This one barely pays: the extra fp32 reads and writes cost about as much as the separate pass did (198 vs 201 ms at 512 tokens, 894 vs 908 ms at 2,048).
+
+### Tuning for the model's shapes
+
+The catalogue had been tuned on square shapes. [`sweep_llm.py`](ablas/sweep_llm.py) tunes both kernel families, with and without each epilogue, on the model's projections at 512, 1,024 and 2,048 tokens. Each shape's configurations run in one on-device loop, because every adb call through the tunnel costs 2.5 s. Three findings:
+- **Some choices were badly off.** fp16's down projection had been getting a tile that runs at 14.9 TFLOP/s, against 17.3 for the best.
+- **Some 4-subgroup epilogue tiles run at half speed at some shapes** (8.6 vs 16.9 TFLOP/s), so epilogues get their own tuning entries.
+- **The Q4_0 gate/up projection with SwiGLU ran at 17.73 TFLOP/s** at 2,048 tokens. That beats the 17.5 the peak microbenchmark measured in Step 1. At 1.45 GHz it means at least 6,114 multiply-adds per clock, most likely 6,144, for a theoretical peak of about 17.8 TFLOP/s.
+
+### The result
+
+| tokens/s (cooled, best of 3) | 512 tokens | 1,024 | 2,048 |
+| --- | --- | --- | --- |
+| **AdrenoBLAS, Q4_0** | **2,602** | **2,410** | **2,248** |
+| **AdrenoBLAS, fp16** | **2,318** | **2,305** | **2,143** |
+| llama.cpp OpenCL (Adreno kernels), same Q4_0 weights | 456 | 418 | 366 |
+
+The baseline is llama.cpp at `1fdda89` on the same phone, under the same thermal gate, at its fastest setting: micro-batch 512, no flash attention. Its F16 model doesn't fit next to Android in the phone's 11 GB: the process is killed for memory with every load mode.
+
+The device output matches the fp32 reference at 512 and 2,048 tokens in both formats:
+- last-token logits cosine 0.99993 or better;
+- the same top-1 token;
+- KL divergence at most 8e-4;
+- mean hidden-state cosine 0.99993.
+
+One token's hidden state is chaotic: a one-in-a-million change to RMSNorm's epsilon moves it between 0.993 and 0.9998 in every pipeline variant. It is also the most noise-sensitive row in the fp32 reference itself.
+
+At 2,048 tokens, GEMMs are 80% of the time. They run at 14 to 17 TFLOP/s inside the model, against 17.1 to 17.7 in isolation, because the model keeps the GPU busy, and hotter, for a whole second. Attention takes 15% of the time and normalization 4%. The whole Q4_0 prefill averages 15.2 TFLOP/s at 512 tokens: 87% of the measured matrix peak, model and all.
+
 ## Results
 
 Measured through the library with [`ablas_test`](ablas/ablas_test.c), one shape at a time with [`cool_run.sh`](ablas/cool_run.sh), which waits for the GPU to cool to 45 °C with no thermal cap first. Timing uses GPU timestamps, warm-up, then the best of five runs of back-to-back calls. Every call was checked against an fp32 CPU reference on 1,024 sampled elements. The percentage is the share of the measured 17.5 TFLOP/s peak. "Pre-packed" operands went through `ablas_pack_a`/`ablas_pack_b` once, before the timed calls.
@@ -361,6 +458,18 @@ Measured through the library with [`ablas_test`](ablas/ablas_test.c), one shape 
 | pre-packed, 1024³ | 13.41 | 77% |
 | LLM prefill, both pre-packed: 512 x 2048 x 2048 / 512 x 8192 x 2048 / 512 x 2048 x 8192 | 13.91 / 15.17 / 16.20 | 79-93% |
 | LLM prefill, weights pre-packed (activations as given): same shapes | 11.98 / 14.59 / 13.49 | 68-83% |
+
+A second QDC phone unit, after the Llama work changed the runtime, passed the same checks and ran pre-packed 4096³ at 16.69 TFLOP/s (95%) and 4096 x 4096 x 8192 at 16.95.
+
+Q4_0 weights and the fused epilogues at Llama 3.2 3B's projection shapes (isolated kernels from `sweep_llm.py`, M = 512 / 2,048, TFLOP/s; model results in Step 11):
+
+| projection (N x K) | fp16 | Q4_0 |
+| --- | --- | --- |
+| qkv 5120 x 3072 | 15.8 / 16.6 | 16.3 / 17.1 |
+| gate+up 16384 x 3072, SwiGLU epilogue | 17.0 / 16.8 | **17.7 / 17.7** |
+| down 3072 x 8192 (plain; residual epilogue) | 17.3 / 17.4; 15.9 / 15.6 | 17.5 / 17.6; 16.3 / 16.2 |
+| o 3072 x 3072 (plain; residual epilogue) | 16.7 / 16.7; 13.7 / 12.7 | 17.0 / 17.3; 14.2 / 15.0 |
+| LM head 128256 x 3072, M = 64 | 4.8 (memory bound) | 15.1 |
 
 Shapes must be multiples of 64 (M) and 32 (N and K); the packed path needs M, N and K to be multiples of 64, and other shapes fall back to the unpacked kernels. New shapes compile their pipeline in about 150 ms on first use. Accuracy follows the 850's fp16 accumulation: relative error 3e-3 to 1e-2 of the largest output against fp32, growing with K.
 
@@ -379,6 +488,10 @@ Shapes must be multiples of 64 (M) and 32 (N and K); the packed path needs M, N 
 | two 64 x 64 accumulators per subgroup (64 x 128 of C) | GPU hang |
 | persistent workgroups (several output tiles each) | 3x slower on this driver, same inner loop |
 | K unrolled with one 64 x 64 accumulator | correct, but 15.5 / 14.3 vs 16.7 TFLOP/s |
+| softmax and rescaling through accumulator element access | ~20 clocks per element: slower than three separate kernels |
+| rescaling an accumulator with a matrix-times-scalar | slower still (23.6 vs 11.4 ms per attention layer) |
+| fusing the residual add into the o/down GEMMs | correct; only 1.5% faster overall (fp32 traffic moves into the GEMM) |
+| llama.cpp's flash attention or micro-batch 2048, for the baseline | slower than its defaults on this phone |
 
 ## Measuring on a phone you rent by the hour
 
@@ -389,7 +502,7 @@ The Qualcomm Device Cloud phone is reached through an SSH tunnel to the session 
 - **Driver archaeology.** The pipeline-cache blobs and Mesa's disassembler run on the phone itself, so nothing large crosses the tunnel.
 - **Thermal checks.** After about 40 minutes of sweeps the phone capped the GPU at 636 to 1,126 MHz, and a library run came out up to 2x low. [`cool_run.sh`](ablas/cool_run.sh) now runs one shape at a time and waits until the GPU (`gpuss-0`) is at most 45 °C with no thermal cap, and `sweep.py --cool` does the same before every tuning configuration.
 
-The tunnel pushed data at 4 to 9 MB/s. Shape data for 4096³ is 128 MB with its reference, so each new shape cost about 30 seconds of push before any GPU time.
+The tunnel pushed data at 4 to 9 MB/s. Shape data for 4096³ is 128 MB with its reference, so each new shape cost about 30 seconds of push before any GPU time. The Llama weights are 1.8 GB (Q4_0) and 6.4 GB (fp16): 25 minutes of upload, repeated in full because the phone is wiped between sessions. A session also ended mid-sweep, about three and a half hours in; the tunnel stayed up and every connection was reset. The tuner now writes no result file when nothing ran, so a rerun picks up where it stopped. Every adb call through the tunnel costs about 2.5 s, so the LLM tuner pushes all of a shape's kernels at once and runs them in one shell loop on the phone.
 
 ## Reproduce it
 
@@ -413,13 +526,24 @@ adb push build/ablas_test cool_run.sh /data/local/tmp/ablas/
 adb shell 'cd /data/local/tmp/ablas && ./cool_run.sh "P P 4096 4096 4096" "T N 2048 2048 2048"'
 ```
 
+```bash
+# Llama 3.2 3B prefill (ablas/llama3b/README.md has the details)
+cd ablas && python3 sweep_llm.py q4 512,2048 5120:3072,3072:3072:a,16384:3072:g,3072:8192:a && python3 build_lib.py
+cd llama3b && python export.py q4 && python export.py f16 && python ref.py tokens && python ref.py q4 512
+./build.sh && adb push llama3b vkrun bench.sh ref/tokens.bin /data/local/tmp/l3b/   # + kernels/ and weights/
+adb shell "cd /data/local/tmp/l3b && ./llama3b -w w/llama3b_q4 -m 512 -p -o out"      # per-op profile, dumps
+python ref.py cmp q4 512 out                                                          # after adb pull of out/
+adb shell "cd /data/local/tmp/l3b && ./bench.sh 'q4 512' 'q4 2048' 'f16 512' 'f16 2048'"
+```
+
 `ablas_test P P 4096 4096 4096 T N 2048 2048 2048 ...` runs any list of shapes. `P` operands are packed once with `ablas_pack_a`/`ablas_pack_b` before the timed calls.
 
 ## What's next
 
 - **The last 3 to 5%.** At 4096³ it is the store of C, issued by every workgroup at once; at K = 8192 the library is at 97%. Persistent workgroups would hide the store but run 3x slower on this driver, so the next step is finding out why: same inner loop, very different speed.
-- **Packing per call.** Operands as given lose 15-20% at 4096³ (13.7 vs 16.4) and more at 2048³ to packing. Having the previous layer's kernel write its output straight into the tile format would remove that for LLM activations.
-- **fp32 accumulation**, through an element-wise conversion that sidesteps the compiler crash.
-- **Edges, batches and epilogues:** shapes that aren't tile multiples, strided-batched GEMM, and bias or activation fused into the store.
-- **Decode:** GEMV and int4/int8 weight kernels for batch-1 LLM decode, where the matrix units don't help and memory bandwidth (83 GB/s here) decides.
-- **The Adreno 840:** the same library with ALU kernels, compiled by Turnip with the register-allocator patch (+5.0%), and the patch upstream in Mesa.
+- **Packing per call.** Operands as given lose 15-20% at 4096³ (13.7 vs 16.4) to packing. For LLM activations this is solved: the epilogues write each output straight into the next GEMM's tile format.
+- **Attention at long prompts:** 15% of the prefill at 2,048 tokens. A single-pass flash attention needs a cheap rescale of the output accumulator; on this driver that has to go through shared memory, and the output tile won't fit next to the probability tiles yet.
+- **fp32 accumulation**, by converting through the shared-memory epilogue staging instead of the conversion that crashes the compiler.
+- **Edges and batches:** shapes that aren't tile multiples, and strided-batched GEMM in the library (attention is model code today).
+- **Decode:** batch-1 GEMV for Q4_0 and fp16 and a KV cache, where the matrix units don't help and memory bandwidth (83 GB/s here) decides.
+- **The Adreno 840:** the ALU backend is in the library (up to 3.64 TFLOP/s with Turnip); the register-allocator patch (+5.0%) goes upstream to Mesa.

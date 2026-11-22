@@ -9,6 +9,8 @@ then lane l works on row l. Two subgroups stage at a time (2 x 8.7 KB), in round
        take it as ABLAS_OP_P without a pack pass.
   'g'  SwiGLU: B's columns come in interleaved 64-column groups [32 gate | 32 up]; writes
        silu(gate) * up as R tiles of an [M, N/2] matrix (fp32 math).
+  'f'  fp32 output: C is fp32 row-major [M, N]; only rows < the push constant mrows are written (M is padded to the
+       tile, e.g. for a llama.cpp matmul with a few tokens).
   'a'  residual + RMS statistics: C is an fp32 row-major [M, N] residual stream, C += A B; the workspace (binding 3)
        receives each row's sum of squares of the updated C per 64-column tile, ws[r * (N/64) + col0/64].
 """
@@ -16,6 +18,9 @@ ST = 17  # padded row stride of the staging tile, in f16vec4
 
 def decls(nsg, ep=None):
     d = [f"shared f16vec4 ep_sh[{min(nsg, 2)} * 64 * {ST}];"]
+    if ep == "f":
+        d += ["layout(push_constant) uniform EPC { uint mrows; } epc;",
+              "layout(std430, binding = 2) writeonly buffer CF4 { vec4 cf4[]; };"]
     if ep == "a":
         d += ["layout(std430, binding = 2) buffer CF { vec4 cf[]; };",
               "layout(std430, binding = 3) writeonly buffer WS { float wsf[]; };"]
@@ -48,6 +53,11 @@ def body(ep, nsg, N, acc="acc", out="c4"):
                   "        }",
                   f"        {out}[ob + c * 128u + h] = uvec4(w[0], w[1]);",
                   "      }"]
+        elif ep == "f":
+            L += ["    if (r < epc.mrows) {",
+                  f"      uint xi = (r * {N} + col0) / 4u;",
+                  "      for (uint j = 0u; j < 16u; ++j) cf4[xi + j] = vec4(ep_sh[sr + j]);",
+                  "    }"]
         elif ep == "a":
             L += [f"    uint xi = (r * {N} + col0) / 4u;",
                   "    float ss = 0.0;",

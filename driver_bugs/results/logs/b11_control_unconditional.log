@@ -1,0 +1,10 @@
+device: Adreno (TM) 850; driver: Qualcomm Technologies Inc. Adreno Vulkan Driver Driver Build: dbca1a4c11, Ie9dcd0093d, 1787853470
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+ (driverVersion 0x8037b007, Vulkan 1.4.351)
+test: b11_control_unconditional: control: no multiply under a branch
+creating pipeline (vkCreateComputePipelines)...
+pipeline created
+submitting...
+RESULT b11_control_unconditional PASS compiled and ran (compile test; output not checked)

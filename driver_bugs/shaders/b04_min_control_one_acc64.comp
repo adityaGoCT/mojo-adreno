@@ -1,0 +1,25 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+// bug 4 control: one 64 x 64 accumulator per subgroup. Runs correctly.
+// C[M,N] = A[M,K] x B[K,N], fp16 row-major, M = N = K = 2048. dispatch (32, 32, 1), local size 64
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+const uint M = 2048u, N = 2048u, K = 2048u;
+void main() {
+  uint row0 = gl_WorkGroupID.y * 64u, col0 = gl_WorkGroupID.x * 64u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> c0 = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0.0hf);
+  for (uint k = 0u; k < K; k += 16u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a0;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b0;
+    coopMatLoad(a0, a, row0 * K + k, K, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(b0, b, k * N + col0, N, gl_CooperativeMatrixLayoutRowMajor);
+    c0 = coopMatMulAdd(a0, b0, c0);
+  }
+  coopMatStore(c0, c, row0 * N + col0, N, gl_CooperativeMatrixLayoutRowMajor);
+}

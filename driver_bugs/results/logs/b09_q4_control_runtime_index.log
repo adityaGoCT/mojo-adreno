@@ -1,0 +1,10 @@
+device: Adreno (TM) 850; driver: Qualcomm Technologies Inc. Adreno Vulkan Driver Driver Build: dbca1a4c11, Ie9dcd0093d, 1787853470
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+ (driverVersion 0x8037b007, Vulkan 1.4.351)
+test: b09_q4_control_runtime_index: control: initialized, element 4 written with a runtime index
+creating pipeline (vkCreateComputePipelines)...
+pipeline created
+submitting...
+RESULT b09_q4_control_runtime_index PASS 0 of 4096 values wrong

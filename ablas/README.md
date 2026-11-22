@@ -12,6 +12,13 @@ matrices (fresh operands every step); 8.36 TFLOP/s fp16 ALU.
 
 ## Results
 
+**Update (inside llama.cpp): 3.5x (Q4_0) and 3.9x (F16) prefill over stock llama.cpp Vulkan.** A patch to
+ggml-vulkan sends every matmul on a model weight to AdrenoBLAS (fp32 in and out: `ablas_pack_a_f32`,
+`ablas_q4_0_pack_ggml`, `ablas_gemm_f32out`). Llama 3.2 3B pp512 runs at 1,439 tok/s Q4_0 (stock 417) and 1,341 F16
+(stock 344), with the same perplexity and top token as stock: [llamacpp/README.md](llamacpp/README.md). It also
+found driver bug #13 (push descriptors next to ordinary descriptor sets), worked around by
+`ablas_use_descriptor_sets`.
+
 **Update (LLM prefill): Q4_0 weights and fused epilogues.** `ablas_hgemm_q4_0` runs ggml-style Q4_0 weights at up
 to **17.7 TFLOP/s** (Llama 3.2 3B's gate/up projection at M = 2048, with the SwiGLU epilogue), faster than fp16
 because the weights stream at 0.56 bytes each and are dequantized in registers. With them, Llama 3.2 3B prefill runs
@@ -181,7 +188,7 @@ ablas_hgemm(h, cmd, ABLAS_OP_T, ABLAS_OP_N, M, N, K, (ablas_buf){bufA, 0}, (abla
             (ablas_buf){bufC, 0}, (ablas_buf){workspace, 0});
 ```
 
-The device must enable `VK_KHR_push_descriptor`, `VK_KHR_cooperative_matrix`, `shaderFloat16`,
+The device must enable `VK_KHR_push_descriptor` (unless `ablas_use_descriptor_sets` is used), `VK_KHR_cooperative_matrix`, `shaderFloat16`,
 `storageBuffer16BitAccess`, `vulkanMemoryModel` and `cooperativeMatrix`. Shapes: M % 64, N % 32,
 K % 32. Workspace: `ablas_hgemm_workspace_size()` (operands that get packed).
 
@@ -196,6 +203,13 @@ K % 32. Workspace: `ablas_hgemm_workspace_size()` (operands that get packed).
 - Kernel choice: the tuned entry nearest in log(M, N, K) whose tile divides the shape, else the
   64 x 32 fallback kernel of that layout.
 - Pipelines are built on first use of a shape (~150 ms; the driver compiles) and kept in the handle.
+- Inside another Vulkan program (llama.cpp): `ablas_use_descriptor_sets(h)` right after `ablas_create` (ordinary
+  descriptor sets from AdrenoBLAS's own pools instead of push descriptors; driver bug #13), and
+  `ablas_reset_descriptor_sets(h)` once the command buffers that used them have completed. fp32 activations in and
+  out: `ablas_pack_a_f32` (fp32 [M,K] -> packed fp16, rows padded to 64), `ablas_q4_0_pack_ggml` (ggml `block_q4_0`
+  rows -> AdrenoBLAS's Q4_0 layout) and `ablas_gemm_f32out` (packed A x packed fp16 or Q4_0 weight -> fp32 [M,N],
+  rows < M written). `f32out_test.c` tests them, including several GEMMs per command buffer with llama.cpp-style
+  dispatches in between (`REPEAT`, `BOUND_SET_BETWEEN`, `USE_SETS`, `TIME`).
 
 ## Q4_0 weights and fused epilogues
 
@@ -336,6 +350,9 @@ epilogue.py     fused epilogues (packed output, SwiGLU, residual + RMS statistic
 sweep_llm.py    tune both families, with epilogues, on LLM shapes -> results/llm_<fmt>_<shape>[_e<ep>].json
 ablas_kernels_q4.h   Q4_0 catalogue written by build_lib.py (build_q4)
 llama3b/        Llama 3.2 3B prefill benchmark on the library (fp16 and Q4_0), with its own README
+llamacpp/       the ggml-vulkan patch that puts AdrenoBLAS into llama.cpp, build/bench scripts, results, README
+pack_a_f32.comp, q4_pack_ggml.comp  fp32 activations -> packed fp16; ggml block_q4_0 -> AdrenoBLAS Q4_0
+f32out_test.c   ablas_pack_a_f32 + ablas_q4_0_pack_ggml / ablas_pack_b + ablas_gemm_f32out vs the CPU, and timing
 ```
 
 Reproduce (QDC tunnel on [::1]:5037):

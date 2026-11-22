@@ -1,0 +1,43 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+// bug 12 (candidate): an initialized 16 x 64 B matrix written element by element (lane l = column l, element e = k, the
+// mapping coopMatLoad gives and bug 9's kernel relies on) in straight-line code, then one multiply. Expected: C exact
+// (= b12_control_coopmatload). Observed: every C element wrong. The same writes inside the Q4_0 kernel (bug 9) are right
+// except element 4, so this case may share bug 9's cause. An initialized 16 x 64 B matrix written element by element with constant indices. On this driver lane l holds
+// column l of B and element e holds k = e (verified by coopMatLoad + reading elements). a = 64 x 16 with
+// a[r][k] = (k == r % 16), so c[r][n] = B[r % 16][n] = w[n * 16 + r % 16].
+// Expected: c[r][n] == w[n * 16 + r % 16] for all r, n. Observed: rows with r % 16 == 4 are 0 (the write to element 4 is dropped).
+// dispatch (1,1,1)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+void main() {
+  uint l = gl_SubgroupInvocationID;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> ma;
+  coopMatLoad(ma, a, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+  coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b = coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB>(0.0hf);
+  b[0] = float16_t((1.0 + float(l) + 0.0) / 8.0);   // = w[l * 16 + 0]
+  b[1] = float16_t((1.0 + float(l) + 64.0) / 8.0);   // = w[l * 16 + 1]
+  b[2] = float16_t((1.0 + float(l) + 128.0) / 8.0);   // = w[l * 16 + 2]
+  b[3] = float16_t((1.0 + float(l) + 192.0) / 8.0);   // = w[l * 16 + 3]
+  b[4] = float16_t((1.0 + float(l) + 256.0) / 8.0);   // = w[l * 16 + 4]
+  b[5] = float16_t((1.0 + float(l) + 320.0) / 8.0);   // = w[l * 16 + 5]
+  b[6] = float16_t((1.0 + float(l) + 384.0) / 8.0);   // = w[l * 16 + 6]
+  b[7] = float16_t((1.0 + float(l) + 448.0) / 8.0);   // = w[l * 16 + 7]
+  b[8] = float16_t((1.0 + float(l) + 512.0) / 8.0);   // = w[l * 16 + 8]
+  b[9] = float16_t((1.0 + float(l) + 576.0) / 8.0);   // = w[l * 16 + 9]
+  b[10] = float16_t((1.0 + float(l) + 640.0) / 8.0);   // = w[l * 16 + 10]
+  b[11] = float16_t((1.0 + float(l) + 704.0) / 8.0);   // = w[l * 16 + 11]
+  b[12] = float16_t((1.0 + float(l) + 768.0) / 8.0);   // = w[l * 16 + 12]
+  b[13] = float16_t((1.0 + float(l) + 832.0) / 8.0);   // = w[l * 16 + 13]
+  b[14] = float16_t((1.0 + float(l) + 896.0) / 8.0);   // = w[l * 16 + 14]
+  b[15] = float16_t((1.0 + float(l) + 960.0) / 8.0);   // = w[l * 16 + 15]
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0.0hf);
+  acc = coopMatMulAdd(ma, b, acc);
+  coopMatStore(acc, c, 0u, 64u, gl_CooperativeMatrixLayoutRowMajor);
+}

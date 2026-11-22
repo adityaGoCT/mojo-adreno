@@ -1,0 +1,443 @@
+diff --git a/ggml/src/ggml-vulkan/CMakeLists.txt b/ggml/src/ggml-vulkan/CMakeLists.txt
+index d8fa6ef..b99cdac 100644
+--- a/ggml/src/ggml-vulkan/CMakeLists.txt
++++ b/ggml/src/ggml-vulkan/CMakeLists.txt
+@@ -132,6 +132,14 @@ if (Vulkan_FOUND)
+     )
+ 
+     target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan SPIRV-Headers::SPIRV-Headers)
++
++    # AdrenoBLAS (https://github.com/adityaGoCT/mojo-adreno, ablas/): -DGGML_VULKAN_ADRENOBLAS=<path to ablas/>
++    set(GGML_VULKAN_ADRENOBLAS "" CACHE PATH "AdrenoBLAS source directory: fp16/Q4_0 weight matmuls on Adreno matrix units")
++    if (GGML_VULKAN_ADRENOBLAS)
++        target_sources(ggml-vulkan PRIVATE ${GGML_VULKAN_ADRENOBLAS}/ablas.c)
++        target_include_directories(ggml-vulkan PRIVATE ${GGML_VULKAN_ADRENOBLAS})
++        target_compile_definitions(ggml-vulkan PRIVATE GGML_VULKAN_ADRENOBLAS)
++    endif()
+     target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+ 
+     # Workaround to the "can't dereference invalidated vector iterator" bug in clang-cl debug build
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan-types.h b/ggml/src/ggml-vulkan/ggml-vulkan-types.h
+index 211948e..dc4fb16 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan-types.h
++++ b/ggml/src/ggml-vulkan/ggml-vulkan-types.h
+@@ -77,6 +77,7 @@ typedef struct VkPhysicalDeviceCooperativeMatrixMaintenance1FeaturesEXT {
+ #include <map>
+ #include <set>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <shared_mutex>
+ #include <mutex>
+ #include <future>
+@@ -708,6 +709,15 @@ class vk_memory_logger;
+ 
+ struct vk_device_struct {
+     std::recursive_mutex mutex;
++
++#ifdef GGML_VULKAN_ADRENOBLAS
++    // AdrenoBLAS (ablas.h) for the matrix multiplies on the model's weights: see ggml_vk_ablas_mul_mat
++    void * ablas = nullptr;                        // ablas_handle
++    std::vector<vk_buffer> ablas_scratch;          // staging for the in-place weight repack (kept for the device's life)
++    // weights by (VkBuffer, offset): tensor->data is not unique, every device buffer has the same fake base address
++    std::set<std::pair<VkBuffer, uint64_t>> ablas_packed;              // repacked in place
++    std::map<std::pair<VkBuffer, uint64_t>, vk_buffer> ablas_copies;    // repacked copies (copy, verify, auto for Q4_0)
++#endif
+     std::mutex queue_submit_mutex;
+ 
+     // Guards compile_pending, all_pipelines, and the dynamic pipeline maps
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index cc00710..9a7a7e1 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -330,6 +330,51 @@ bool ggml_vk_concat_supported(const ggml_tensor * src0, const ggml_tensor * src1
+ }
+ static bool vk_instance_initialized = false;
+ 
++#ifdef GGML_VULKAN_ADRENOBLAS
++#include "ablas.h"
++static bool ggml_vk_ablas_wanted() {
++    const char * e = getenv("GGML_VK_ADRENOBLAS");
++    return !e || strcmp(e, "0") != 0;
++}
++// GGML_VK_ABLAS_MODE:
++//   auto (default): Q4_0 weights get a repacked copy, so matmuls with fewer than GGML_VK_ABLAS_MIN_M (default 9)
++//                   rows, i.e. decode, keep ggml's mat-vec kernels on the original; F16 weights are repacked in
++//                   place (a copy would double 6 GB), so every matmul on them goes to AdrenoBLAS
++//   inplace:        every weight repacked in its own memory; copy: every weight gets a repacked copy
++//   verify:         copy, and AdrenoBLAS's result compared with ggml's after each graph (every M)
++enum { ABLAS_INPLACE = 0, ABLAS_COPY = 1, ABLAS_VERIFY = 2, ABLAS_AUTO = 3 };
++static int ggml_vk_ablas_mode() {
++    static int mode = -1;
++    if (mode < 0) {
++        const char * e = getenv("GGML_VK_ABLAS_MODE");
++        mode = !e ? ABLAS_AUTO : !strcmp(e, "inplace") ? ABLAS_INPLACE : !strcmp(e, "copy") ? ABLAS_COPY :
++               !strcmp(e, "verify") ? ABLAS_VERIFY : ABLAS_AUTO;
++    }
++    return mode;
++}
++static bool ggml_vk_ablas_inplace(const ggml_tensor * w) {
++    return ggml_vk_ablas_mode() == ABLAS_INPLACE || (ggml_vk_ablas_mode() == ABLAS_AUTO && w->type == GGML_TYPE_F16);
++}
++static int64_t ggml_vk_ablas_min_m() {
++    static int64_t m = -1;
++    if (m < 0) {
++        const char * e = getenv("GGML_VK_ABLAS_MIN_M");
++        m = e ? atoll(e) : 9;
++    }
++    return m;
++}
++// whether AdrenoBLAS takes a matmul on an eligible weight (the original is gone after an in-place repack)
++static bool ggml_vk_ablas_takes(const ggml_tensor * w, int64_t m) {
++    return ggml_vk_ablas_inplace(w) || ggml_vk_ablas_mode() == ABLAS_VERIFY || m >= ggml_vk_ablas_min_m();
++}
++static vk_pipeline_struct * ggml_vk_ablas_packed_marker() {  // prealloc_y holds AdrenoBLAS's packed tiles of a tensor
++    static char marker;
++    return (vk_pipeline_struct *)&marker;
++}
++struct ggml_vk_ablas_check { vk_buffer got; vk_buffer ref; uint32_t M, N; std::string name; };  // verify mode
++static std::vector<ggml_vk_ablas_check> g_ablas_checks;
++#endif
++
+ vk_instance_t vk_instance;
+ 
+ static VkDeviceSize ggml_vk_get_max_buffer_range(const ggml_backend_vk_context * ctx, const vk_buffer &buf, const VkDeviceSize offset) {
+@@ -5414,6 +5459,24 @@ vk_device ggml_vk_get_device(size_t idx) {
+             .setPEnabledExtensionNames(device_extensions);
+         device_create_info.setPNext(&device_features2);
+         device->device = device->physical_device.createDevice(device_create_info);
++#ifdef GGML_VULKAN_ADRENOBLAS
++        if (ggml_vk_ablas_wanted() && device->coopmat_support) {
++            ablas_handle h = nullptr;
++            auto gipa = (PFN_vkGetInstanceProcAddr)vk_instance.instance.getProcAddr("vkGetInstanceProcAddr");
++            if (gipa && ablas_create(&h, (VkPhysicalDevice)device->physical_device, (VkDevice)device->device, gipa,
++                                     (VkInstance)vk_instance.instance) == ABLAS_OK) {
++                // ordinary descriptor sets, not push descriptors: on the Adreno 850 driver, with ggml's descriptor-set
++                // dispatches in between, every push-descriptor dispatch in a command buffer uses the last pushed set
++                if (ablas_use_descriptor_sets(h) == ABLAS_OK) {
++                    device->ablas = h;
++                } else {
++                    ablas_destroy(h);
++                }
++            }
++            GGML_LOG_INFO("ggml_vulkan: AdrenoBLAS %s for fp16 and Q4_0 weight matmuls (GGML_VK_ADRENOBLAS=0 turns it off)\n",
++                          device->ablas ? "enabled" : "not available");
++        }
++#endif
+ 
+         if (device->device_fault) {
+             device->pfn_vkGetDeviceFaultInfoEXT = (PFN_vkGetDeviceFaultInfoEXT)
+@@ -8176,8 +8239,262 @@ void ggml_vk_top_k_mask(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_
+         { (uint32_t)dst->ne[1], (uint32_t)dst->ne[2], (uint32_t)dst->ne[3] });
+ }
+ 
++#ifdef GGML_VULKAN_ADRENOBLAS
++// AdrenoBLAS path for MUL_MAT on a model weight ("blk.*.weight", fp16 or Q4_0, 2D, both dims multiples of 64):
++// the first time a weight is used it is repacked into AdrenoBLAS's tile format, in place (same size) or into a copy
++// (GGML_VK_ABLAS_MODE above); the fp32 activations are packed to fp16 tiles in prealloc_y, and AdrenoBLAS writes the
++// fp32 result. Matmuls that come here are not fused into ggml's kernels (ggml_vk_can_fuse).
++static bool ggml_vk_ablas_weight(const ggml_backend_vk_context * ctx, const ggml_tensor * w) {
++    if (!ctx->device->ablas || !w || (w->type != GGML_TYPE_F16 && w->type != GGML_TYPE_Q4_0)) {
++        return false;
++    }
++    const size_t n = strlen(w->name);
++    if (strncmp(w->name, "blk.", 4) != 0 || n < 7 || strcmp(w->name + n - 7, ".weight") != 0) {
++        return false;
++    }
++    static const char * filter = getenv("GGML_VK_ABLAS_FILTER");  // debugging: only weights whose name contains this
++    if (filter && !strstr(w->name, filter)) {
++        return false;
++    }
++    return w->ne[2] == 1 && w->ne[3] == 1 && w->ne[0] % 64 == 0 && w->ne[1] % 64 == 0 && ggml_is_contiguous(w) &&
++           w->view_src == nullptr && w->buffer && !ggml_backend_buffer_is_host(w->buffer);
++}
++
++// GGML_VK_ABLAS_SELFTEST=1: one Q4_0 GEMM through AdrenoBLAS on this device, outside any graph, vs the CPU
++static void ggml_vk_ablas_selftest(vk_device & dev) {
++    const uint32_t M = 6, N = 1024, K = 3072, Mp = 64;
++    std::vector<float> x((size_t)M * K), wref((size_t)N * K);
++    std::vector<uint8_t> wq((size_t)N * K / 32 * 18);
++    uint32_t s = 1;
++    auto fr = [&]() { s = s * 1664525u + 1013904223u; return (float)(s >> 8) / (float)(1u << 23) - 1.0f; };
++    for (auto & v : x) v = fr();
++    for (uint32_t n = 0; n < N; ++n)
++        for (uint32_t kb = 0; kb < K / 32; ++kb) {
++            uint8_t * blk = wq.data() + ((size_t)n * (K / 32) + kb) * 18;
++            ggml_fp16_t d = ggml_fp32_to_fp16(0.01f + 0.02f * (fr() + 1.0f));
++            memcpy(blk, &d, 2);
++            for (int j = 0; j < 16; ++j) {
++                uint8_t lo = (uint8_t)((fr() + 1.0f) * 8.0f) & 15, hi = (uint8_t)((fr() + 1.0f) * 8.0f) & 15;
++                blk[2 + j] = lo | hi << 4;
++                wref[(size_t)n * K + kb * 32 + j] = ((float)lo - 8.0f) * ggml_fp16_to_fp32(d);
++                wref[(size_t)n * K + kb * 32 + j + 16] = ((float)hi - 8.0f) * ggml_fp16_to_fp32(d);
++            }
++        }
++    vk_buffer X = ggml_vk_create_buffer_device(dev, x.size() * 4), W = ggml_vk_create_buffer_device(dev, wq.size()),
++              P = ggml_vk_create_buffer_device(dev, wq.size()), A = ggml_vk_create_buffer_device(dev, (size_t)Mp * K * 2),
++              C = ggml_vk_create_buffer_device(dev, (size_t)M * N * 4);
++    ggml_vk_buffer_write(X, 0, x.data(), x.size() * 4);
++    ggml_vk_buffer_write(W, 0, wq.data(), wq.size());
++    vk::CommandPool pool = dev->device.createCommandPool(
++        vk::CommandPoolCreateInfo(vk::CommandPoolCreateFlagBits::eResetCommandBuffer, dev->compute_queue->queue_family_index));
++    vk::CommandBuffer cb = dev->device.allocateCommandBuffers(vk::CommandBufferAllocateInfo(pool, vk::CommandBufferLevel::ePrimary, 1))[0];
++    cb.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
++    auto bar = [&]() {
++        vk::MemoryBarrier mb(vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite,
++                             vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
++        cb.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
++                           vk::PipelineStageFlagBits::eComputeShader, {}, { mb }, {}, {});
++    };
++    ablas_handle h = (ablas_handle)dev->ablas;
++    VkCommandBuffer c = (VkCommandBuffer)cb;
++    ablas_buf bW = { (VkBuffer)W->buffer, 0, wq.size() }, bP = { (VkBuffer)P->buffer, 0, wq.size() },
++              bX = { (VkBuffer)X->buffer, 0, x.size() * 4 }, bA = { (VkBuffer)A->buffer, 0, (VkDeviceSize)Mp * K * 2 },
++              bC = { (VkBuffer)C->buffer, 0, (VkDeviceSize)M * N * 4 };
++    bar();
++    int st1 = ablas_q4_0_pack_ggml(h, c, N, K, bW, bP);
++    int st2 = ablas_pack_a_f32(h, c, M, K, bX, bA);
++    bar();
++    int st3 = ablas_gemm_f32out(h, c, 1, M, N, K, bA, bP, bC);
++    cb.end();
++    vk::Fence f = dev->device.createFence({});
++    dev->compute_queue->handle->lock();
++    dev->compute_queue->handle->queue.submit({ vk::SubmitInfo(0, nullptr, nullptr, 1, &cb) }, f);
++    dev->compute_queue->handle->unlock();
++    (void)dev->device.waitForFences({ f }, true, UINT64_MAX);
++    std::vector<float> cm((size_t)M * N);
++    ggml_vk_buffer_read(C, 0, cm.data(), cm.size() * 4);
++    double maxe = 0, maxr = 0;
++    for (uint32_t m = 0; m < M; ++m)
++        for (uint32_t n = 0; n < N; n += 7) {
++            double r = 0;
++            for (uint32_t k = 0; k < K; ++k) r += (double)ggml_fp16_to_fp32(ggml_fp32_to_fp16(x[(size_t)m * K + k])) * wref[(size_t)n * K + k];
++            maxe = std::max(maxe, fabs(cm[(size_t)m * N + n] - r));
++            maxr = std::max(maxr, fabs(r));
++        }
++    fprintf(stderr, "ablas selftest (status %d %d %d, kernel %s): max error %.3g of max |C| %.3g -> %s\n", st1, st2, st3,
++            ablas_last_kernel(h), maxe, maxr, maxe / maxr < 2e-2 ? "PASS" : "FAIL");
++    dev->device.destroyFence(f);
++    dev->device.destroyCommandPool(pool);
++}
++
++// One-time weight repack, W (ggml's layout) -> P (AdrenoBLAS's), through scratch when W and P are the same memory, in
++// its own submission that is waited for: the graph's command buffers stay free of the copies (up to 50 MB per weight),
++// and GGML_VK_ABLAS_CHECK_REPACK=1 can compare the result with the CPU's view of the weight (F16 only; slow, memory-hungry).
++static void ggml_vk_ablas_repack(vk_device & dev, bool q4, uint32_t N, uint32_t K, ablas_buf W, ablas_buf P, vk_buffer scratch,
++                                 vk_buffer wbuf = nullptr, vk_buffer pbuf = nullptr, const char * name = "") {
++    static vk::CommandPool pool;
++    static vk::CommandBuffer cb;
++    static vk::Fence fence;
++    if (!pool) {
++        pool = dev->device.createCommandPool(
++            vk::CommandPoolCreateInfo(vk::CommandPoolCreateFlagBits::eResetCommandBuffer, dev->compute_queue->queue_family_index));
++        cb = dev->device.allocateCommandBuffers(vk::CommandBufferAllocateInfo(pool, vk::CommandBufferLevel::ePrimary, 1))[0];
++        fence = dev->device.createFence({});
++    }
++    ablas_handle h = (ablas_handle)dev->ablas;
++    static const bool check = getenv("GGML_VK_ABLAS_CHECK_REPACK") != nullptr;
++    std::vector<ggml_fp16_t> orig;
++    if (check && !q4) {
++        orig.resize((size_t)N * K);
++        ggml_vk_buffer_read(wbuf, W.offset, orig.data(), orig.size() * 2);
++    }
++    auto bar = [&]() {
++        vk::MemoryBarrier mb(vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite,
++                             vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite);
++        cb.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
++                           vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer, {}, { mb }, {}, {});
++    };
++    cb.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
++    bar();
++    ablas_buf src = W;
++    if (scratch) {
++        cb.copyBuffer((vk::Buffer)W.buffer, scratch->buffer, { vk::BufferCopy(W.offset, 0, W.range) });
++        bar();
++        src = { (VkBuffer)scratch->buffer, 0, W.range };
++    }
++    VkCommandBuffer c = (VkCommandBuffer)cb;
++    ablas_status st = q4 ? ablas_q4_0_pack_ggml(h, c, N, K, src, P) : ablas_pack_b(h, c, ABLAS_OP_T, K, N, src, P);
++    GGML_ASSERT(st == ABLAS_OK);
++    bar();
++    cb.end();
++    dev->compute_queue->handle->lock();
++    dev->compute_queue->handle->queue.submit({ vk::SubmitInfo(0, nullptr, nullptr, 1, &cb) }, fence);
++    dev->compute_queue->handle->unlock();
++    VK_CHECK(dev->device.waitForFences({ fence }, true, UINT64_MAX), "ablas repack", dev);
++    dev->device.resetFences({ fence });
++    cb.reset();
++    if (check && !q4) {  // GGML_VK_ABLAS_CHECK_REPACK: the CPU's view of the weight vs the GPU's copy and repack
++        const size_t n = (size_t)N * K;
++        std::vector<ggml_fp16_t> sv(n), pk(n);
++        size_t bad_s = 0, bad_p = 0;
++        if (scratch) {
++            ggml_vk_buffer_read(scratch, 0, sv.data(), n * 2);
++            for (size_t i = 0; i < n; ++i) bad_s += sv[i] != orig[i];
++        }
++        ggml_vk_buffer_read(pbuf, P.offset, pk.data(), n * 2);
++        for (uint32_t r = 0; r < N; ++r)
++            for (uint32_t k = 0; k < K; ++k)
++                bad_p += pk[((size_t)(r / 64) * (K / 16) + k / 16) * 1024 + (r % 64) * 16 + k % 16] != orig[(size_t)r * K + k];
++        fprintf(stderr, "ablas repack %-24s %ux%u: transfer copy %zu wrong, repack %zu wrong (of %zu)\n", name, N, K, bad_s, bad_p, n);
++    }
++}
++
++static bool ggml_vk_ablas_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
++    const ggml_tensor * src0 = dst->src[0];
++    const ggml_tensor * src1 = dst->src[1];
++    if (!ggml_vk_ablas_weight(ctx, src0)) {
++        return false;
++    }
++    GGML_ASSERT(src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(src1) && ggml_is_contiguous(dst) && src1->ne[2] == 1 && src1->ne[3] == 1);
++    vk_device & dev = ctx->device;
++    ablas_handle h = (ablas_handle)dev->ablas;
++    static bool selftested = false;
++    if (!selftested && getenv("GGML_VK_ABLAS_SELFTEST")) {
++        selftested = true;
++        ggml_vk_ablas_selftest(dev);
++    }
++    const uint32_t K = (uint32_t)src0->ne[0], N = (uint32_t)src0->ne[1], M = (uint32_t)src1->ne[1];
++    const bool q4 = src0->type == GGML_TYPE_Q4_0;
++    // (ggml_vk_preallocate_buffers may submit and restart the command buffer: read it again after that call)
++    VkCommandBuffer cmd = (VkCommandBuffer)subctx->s->buffer->buf;
++    const vk_subbuffer w = ggml_vk_tensor_subbuffer(ctx, src0);
++    const vk_subbuffer x = ggml_vk_tensor_subbuffer(ctx, src1);
++    const vk_subbuffer d = ggml_vk_tensor_subbuffer(ctx, dst);
++    const size_t w_sz = ggml_nbytes(src0);
++    ablas_buf W = { (VkBuffer)w.buffer->buffer, w.offset, w_sz };
++    ablas_status st;
++
++    const int mode = ggml_vk_ablas_mode();
++    if (!ggml_vk_ablas_takes(src0, M)) {
++        return false;
++    }
++    if (!ggml_vk_ablas_inplace(src0)) {  // repacked copy; the original weight stays as it is
++        const std::pair<VkBuffer, uint64_t> key((VkBuffer)w.buffer->buffer, w.offset);
++        auto it = dev->ablas_copies.find(key);
++        if (it == dev->ablas_copies.end()) {
++            vk_buffer nb = ggml_vk_create_buffer_device(dev, w_sz);
++            ggml_vk_ablas_repack(dev, q4, N, K, W, { (VkBuffer)nb->buffer, 0, w_sz }, nullptr, w.buffer, nb, src0->name);
++            it = dev->ablas_copies.emplace(key, nb).first;
++        }
++        W = { (VkBuffer)it->second->buffer, 0, w_sz };
++    } else if (!dev->ablas_packed.count({ (VkBuffer)w.buffer->buffer, w.offset })) {  // first use: repack in place, through a staging copy
++        if (dev->ablas_scratch.empty() || dev->ablas_scratch.back()->size < w_sz) {
++            dev->ablas_scratch.push_back(ggml_vk_create_buffer_device(dev, std::max<size_t>(w_sz, 64u << 20)));
++        }
++        ggml_vk_ablas_repack(dev, q4, N, K, W, W, dev->ablas_scratch.back(), w.buffer, w.buffer, src0->name);
++        dev->ablas_packed.insert({ (VkBuffer)w.buffer->buffer, w.offset });
++    }
++
++    const uint32_t Mp = (M + 63) / 64 * 64;
++    const size_t a_sz = (size_t)Mp * K * 2;
++    if (ctx->prealloc_size_y < a_sz) {
++        ctx->prealloc_size_y = a_sz;
++        ggml_vk_preallocate_buffers(ctx, subctx);
++    }
++    // q/k/v and gate/up read the same activations: pack them once (the tiles stay in prealloc_y until ggml uses it)
++    const bool packed = ctx->prealloc_y_last_pipeline_used == ggml_vk_ablas_packed_marker() &&
++                        ctx->prealloc_y_last_tensor_used == src1 && mode != ABLAS_VERIFY;
++    if (ctx->prealloc_y_need_sync && !packed) {
++        ggml_vk_sync_buffers(ctx, subctx);
++    }
++    cmd = (VkCommandBuffer)subctx->s->buffer->buf;
++    ablas_buf X = { (VkBuffer)x.buffer->buffer, x.offset, (VkDeviceSize)M * K * 4 };
++    ablas_buf A = { (VkBuffer)ctx->prealloc_y->buffer, 0, a_sz };
++    ablas_buf C = { (VkBuffer)d.buffer->buffer, d.offset, (VkDeviceSize)M * N * 4 };
++    vk_buffer vb;
++    if (mode == ABLAS_VERIFY) {  // AdrenoBLAS writes its own buffer; ggml computes dst as usual
++        vb = ggml_vk_create_buffer_device(dev, (size_t)M * N * 4);
++        C = { (VkBuffer)vb->buffer, 0, (VkDeviceSize)M * N * 4 };
++    }
++    if (!packed) {
++        st = ablas_pack_a_f32(h, cmd, M, K, X, A);
++        GGML_ASSERT(st == ABLAS_OK);
++        ggml_vk_sync_buffers(ctx, subctx);
++    }
++    st = ablas_gemm_f32out(h, cmd, q4, M, N, K, A, W, C);
++    GGML_ASSERT(st == ABLAS_OK);
++    ctx->prealloc_y_need_sync = true;  // ggml syncs before it next writes prealloc_y
++    ctx->prealloc_y_last_pipeline_used = ggml_vk_ablas_packed_marker();
++    ctx->prealloc_y_last_tensor_used = src1;
++    if (mode == ABLAS_VERIFY) {  // ggml computes dst from the original weight too; ref is copied right after (verify_copy)
++        g_ablas_checks.push_back({ vb, nullptr, M, N, src0->name });
++        return false;
++    }
++    return true;
++}
++#endif
++
+ void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
+     ggml_tensor * dst = cgraph->nodes[node_idx];
++#ifdef GGML_VULKAN_ADRENOBLAS
++    const size_t n_checks = g_ablas_checks.size();
++    if (ctx->num_additional_fused_ops == 0 && ggml_vk_ablas_mul_mat(ctx, subctx, dst)) {
++        return;
++    }
++    struct verify_copy {  // verify mode: copy ggml's dst into the check's ref buffer as soon as ggml has computed it
++        ggml_backend_vk_context * ctx; vk_context & subctx; ggml_tensor * dst; size_t n;
++        ~verify_copy() {
++            if (g_ablas_checks.size() <= n) return;
++            auto & c = g_ablas_checks.back();
++            const vk_subbuffer d = ggml_vk_tensor_subbuffer(ctx, dst);
++            c.ref = ggml_vk_create_buffer_device(ctx->device, (size_t)c.M * c.N * 4);
++            ggml_vk_sync_buffers(ctx, subctx);
++            subctx->s->buffer->buf.copyBuffer(d.buffer->buffer, c.ref->buffer, { vk::BufferCopy(d.offset, 0, (size_t)c.M * c.N * 4) });
++            ggml_vk_sync_buffers(ctx, subctx);
++        }
++    } vc{ ctx, subctx, dst, n_checks };
++#endif
+     ggml_tensor * src0 = dst->src[0];
+     ggml_tensor * src1 = dst->src[1];
+     VK_LOG_DEBUG("ggml_vk_mul_mat(" << src0 << ", " << src1 << ", " << dst << ")");
+@@ -14018,6 +14335,11 @@ void ggml_vk_graph_cleanup(ggml_backend_vk_context * ctx) {
+     ctx->gc.contexts.clear();
+     ctx->pipeline_descriptor_set_requirements = 0;
+     ctx->descriptor_set_idx = 0;
++#ifdef GGML_VULKAN_ADRENOBLAS
++    if (ctx->device->ablas) {  // the command buffers that used them have completed (callers synchronize first)
++        ablas_reset_descriptor_sets((ablas_handle)ctx->device->ablas);
++    }
++#endif
+ }
+ 
+ void ggml_vk_cleanup(ggml_backend_vk_context * ctx) {
+@@ -14723,6 +15045,12 @@ static bool ggml_vk_can_fuse_hc_post_gate(const struct ggml_cgraph * cgraph, int
+ }
+ 
+ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
++#ifdef GGML_VULKAN_ADRENOBLAS
++    if (ops.begin()[0] == GGML_OP_MUL_MAT && ggml_vk_ablas_weight(ctx, cgraph->nodes[node_idx]->src[0]) &&
++        ggml_vk_ablas_takes(cgraph->nodes[node_idx]->src[0], cgraph->nodes[node_idx]->src[1]->ne[1])) {
++        return false;  // matmuls that go to AdrenoBLAS are not fused into ggml's kernels
++    }
++#endif
+     if (ops.size() == 2 && ops.begin()[0] == GGML_OP_UNARY && ops.begin()[1] == GGML_OP_MUL) {
+         return ggml_vk_can_fuse_unary_mul_pair(cgraph, node_idx);
+     }
+@@ -15935,6 +16263,26 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+     if (!ctx->device->support_async) {
+         ggml_vk_synchronize(ctx);
+     }
++#ifdef GGML_VULKAN_ADRENOBLAS
++    if (!g_ablas_checks.empty()) {
++        ggml_vk_synchronize(ctx);
++        for (auto & c : g_ablas_checks) {
++            std::vector<float> got((size_t)c.M * c.N), ref((size_t)c.M * c.N);
++            ggml_vk_buffer_read(c.got, 0, got.data(), got.size() * 4);
++            ggml_vk_buffer_read(c.ref, 0, ref.data(), ref.size() * 4);
++            double maxd = 0, maxr = 0;
++            for (size_t i = 0; i < got.size(); ++i) {
++                maxd = std::max(maxd, (double)fabsf(got[i] - ref[i]));
++                maxr = std::max(maxr, (double)fabsf(ref[i]));
++            }
++            fprintf(stderr, "ablas verify %-24s M=%4u N=%5u: max |ablas - ggml| %.3g, max |ggml| %.3g, rel %.2e\n",
++                          c.name.c_str(), c.M, c.N, maxd, maxr, maxd / std::max(maxr, 1e-30));
++            ggml_vk_destroy_buffer(c.got);
++            ggml_vk_destroy_buffer(c.ref);
++        }
++        g_ablas_checks.clear();
++    }
++#endif
+ 
+     return GGML_STATUS_SUCCESS;
+ 

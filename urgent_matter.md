@@ -12,6 +12,14 @@ Llama 3.2 3B (`ablas/llama3b/`) found one silent wrong-result bug (#9: a constan
 matrix is dropped) and three compiler crashes (#8, #10, #11). All have free or near-free workarounds; the prefill
 runs 2,602 tokens/s (Q4_0) at 512 tokens with them. #9 matters to anyone writing elements of a B matrix.
 
+**Update (llama.cpp): #13, push descriptors, silent wrong results in any app that mixes them with descriptor
+sets.** Putting AdrenoBLAS (push descriptors) inside llama.cpp's Vulkan backend (ordinary descriptor sets) gave
+all-zero outputs for most GEMMs. Once a dispatch with an ordinary descriptor set is recorded between push-descriptor
+dispatches in one command buffer, every push-descriptor dispatch in that command buffer uses the descriptors pushed
+last: earlier dispatches read and write the last one's buffers (push constants stay per dispatch). AdrenoBLAS now
+has a descriptor-set mode (`ablas_use_descriptor_sets`); with it, llama.cpp + AdrenoBLAS runs Llama 3.2 3B prefill
+3.5x (Q4_0) and 3.9x (F16) faster than stock llama.cpp Vulkan (`ablas/llamacpp/`).
+
 **Update (later): #1 is narrower too.** With a single 64 x 64 accumulator per subgroup, K unrolled by 2 or 4 runs correctly; the hang needs 64 x 32 tiles. Unrolling is slower there anyway (15.5 and 14.3 vs 16.6 TFLOP/s), so fixing #1 is no longer worth much for GEMM. What's left at 4096³ is the store of C, which every workgroup issues at the same moment; persistent workgroups, the usual fix, ran 3x slower on this driver (same inner loop in the disassembly).
 
 **Update (same day): #4 is narrower than first reported, and its workaround is measured.** One 64 x 64 tile per subgroup does not hang; two or more do. With one 64-wide tile per subgroup and 64-wide B panels, fp16 GEMM went from 10.8 to **13.8 TFLOP/s at 2048³ (+28%)** and from 12.5 to **14.1 at 4096³ (+13%)**. That is the low end of the +20-35% estimated below, now measured.
@@ -28,21 +36,26 @@ runs 2,602 tokens/s (Q4_0) at 512 tokens with them. #9 matters to anyone writing
 - Driver build: `dbca1a4c11, Ie9dcd0093d, 1787853470`, dated 08/27/26.
 - Compiler: **E17.52.10.04**.
 
-## The eleven bugs at a glance
+**Reproductions for Qualcomm:** [`driver_bugs/`](driver_bugs/) has a standalone harness, minimal shaders, controls and an
+automatic check for every bug below, plus a twelfth candidate (element writes into a B matrix in straight-line code
+give a wrong product) and #13, re-run on 2026-11-21: `driver_bugs/README.md`.
+
+## The bugs at a glance
 
 | # | bug | kind | what it costs today | estimated gain if fixed | confidence |
 | --- | --- | --- | --- | --- | --- |
 | 4 | fp16 cooperative matrices with N = 64 tiles: hang with two or more 64-wide accumulators per subgroup (or B held in registers across steps) | **GPU hang** | worked around: one 64 x 64 tile per subgroup (+28% at 2048³, +13% at 4096³, measured) | larger tiles per subgroup: unknown | measured |
-| 1 | two dependent `coopMatMulAdd` into one accumulator in one loop body, with 64 x 32 tiles | **GPU hang** | none for the best kernel (a single 64 x 64 accumulator unrolls fine, but slower); shared-memory staging limited to K steps of 16 | ~0% for the best kernel; staged kernels unblocked | measured |
+| 1 | two dependent `coopMatMulAdd` into each of two 64 x 32 accumulators in one loop body (K unrolled by 2) | **GPU hang** | none for the best kernel (a single 64 x 64 accumulator unrolls fine, but slower); shared-memory staging limited to K steps of 16 | ~0% for the best kernel; staged kernels unblocked | measured |
 | 7 | M, N, K as specialization constants | 2x slowdown, **GPU hang** | none for AdrenoBLAS (rewritten in the runtime); **up to 2x for other apps** | 0% for us; up to 2x elsewhere | measured |
 | 5 | `coopMatLoad` from a `uint`/`uvec4` shared array | **silent wrong results** | none (we use `f16vec4` arrays) | correctness for other apps | measured |
-| 3 | converting an fp32 accumulator to fp16 (`coopmat<float16_t>(c)`) | compiler segfault | no fp32 accumulation with fp16 output | accuracy (costs ~9% speed) | measured crash, cause inferred |
-| 2 | adding two cooperative matrices (`c0 + c1`, `ma + ma`) | compiler segfault | element-wise loops instead; no int8 matrix arithmetic | small speed gain; unblocks int8 work | measured |
+| 3 | converting an fp32 accumulator to fp16 (`coopmat<float16_t>(c)`) | compiler segfault; on the 2026-11-21 driver build **wrong values** instead | no fp32 accumulation with fp16 output | accuracy (costs ~9% speed) | measured crash, cause inferred |
+| 2 | adding two cooperative matrices (`c0 + c1`, `ma + ma`) | compiler segfault; on the 2026-11-21 build **wrong sums** (fp16) and pipeline error -13 (int8) | element-wise loops instead; no int8 matrix arithmetic | small speed gain; unblocks int8 work | measured |
 | 6 | 4+ accumulator tiles combined element-wise | `vkCreateComputePipelines` -> `VK_ERROR_UNKNOWN` | blocks the workaround for #1 at larger tiles | small; moot if #1 is fixed | measured |
 | 8 | element writes into a cooperative matrix that was never initialized | compiler segfault | initialize first (`B b = B(0)`) | none (free workaround) | measured |
 | 9 | a constant-index write to element 4 of a 16 x 64 B matrix (`b[4] = x`) | **silent wrong results** (the write is dropped) | write that element with a runtime index | none; correctness for other apps | measured |
 | 10 | constant-index reads of accumulator elements into a vector constructor | compiler segfault (`SPIRVCodeGen::handleOpLoad`) | read elements in a loop | none | measured |
 | 11 | `coopMatMulAdd` under a per-subgroup branch (two subgroups of one workgroup taking different sides) | compiler segfault (`CoopMatLayoutNode::getUseCommonMask`, recursive) | make every multiply unconditional (redo a block, multiply zeros) | ~2% of flash-attention work | measured |
+| 13 | push-descriptor dispatches in a command buffer that also binds an ordinary descriptor set for another pipeline | **silent wrong results**: every push-descriptor dispatch uses the descriptors pushed last | ordinary descriptor sets in libraries that run inside other apps (`ablas_use_descriptor_sets`) | none for speed; correctness for every app that mixes the two | measured |
 
 ## Details
 
@@ -145,6 +158,18 @@ Not a bug but a cost worth knowing: element reads and writes of an accumulator r
 matrix-times-scalar is slower still. Staging an accumulator through shared memory (`coopMatStore`, lanes read rows)
 is how AdrenoBLAS's epilogues and flash attention avoid it.
 
+### 13. Push descriptors next to ordinary descriptor sets (found putting AdrenoBLAS into llama.cpp, `ablas/llamacpp/`)
+
+Record, in one command buffer: pipeline P with push-descriptor layout, push output buffer 1, dispatch; barrier;
+another pipeline with an ordinary descriptor set bound, dispatch; barrier; then the same with buffers 2 and 3.
+Buffers 1 and 2 stay 0 and buffer 3 receives all three dispatches' writes (`o[i] += tag * 65536 + i` leaves
+6 x 65536 + i, tags 1 + 2 + 3), so each push-descriptor dispatch ran with the descriptors pushed last, while its
+push constants were its own. Without the ordinary-set dispatches every buffer is right
+(`driver_bugs/shaders/b13_*.comp`). Binding the other pipeline and its set without dispatching does not trigger it;
+a dispatch of the other pipeline does. In llama.cpp this left most GEMM outputs at zero (the last AdrenoBLAS GEMM in
+each command buffer was right, having received every earlier GEMM's writes). AdrenoBLAS's workaround allocates one ordinary
+descriptor set per dispatch from its own pools; it costs nothing measurable.
+
 ## Adreno 840 (Snapdragon 8 Elite Gen 5), for completeness
 
 Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` this week; the shared-memory and pipeline rows are from `BLOG-COOPMAT.md`):
@@ -160,6 +185,7 @@ Measured with Samsung phones' stock driver and with Mesa Turnip (`asm/mesa/` thi
 
 ## What to ask for, in order
 
+0. **#13** (push descriptors use the last pushed set once ordinary sets are bound in between): silent wrong results in any app or library that mixes the two, such as a BLAS inside a framework.
 1. **The rest of #4** (two 64-wide accumulators per subgroup hang the GPU) and **#1** for 64 x 32 tiles: GPU hangs, a robustness problem for every framework; for AdrenoBLAS's best kernel they no longer cost speed.
 2. **#7 and #5** (2x slowdown and hang; silent wrong data): ecosystem-wide correctness and performance.
 3. **#3 and #2** (compiler crashes): fp32 accumulation for accuracy, int8 matrix work.

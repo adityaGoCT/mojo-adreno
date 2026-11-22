@@ -1,0 +1,191 @@
+; SPIR-V
+; Version: 1.6
+; Generator: Google Shaderc over Glslang; 11
+; Bound: 219
+; Schema: 0
+               OpCapability Shader
+               OpCapability Float16
+               OpCapability GroupNonUniform
+               OpCapability StorageBuffer16BitAccess
+               OpCapability VulkanMemoryModel
+               OpCapability CooperativeMatrixKHR
+               OpExtension "SPV_KHR_cooperative_matrix"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical Vulkan
+               OpEntryPoint GLCompute %4 "main" %SubgroupLocalInvocationId %23 %195
+               OpExecutionMode %4 LocalSize 64 1 1
+               OpDecorate %SubgroupLocalInvocationId RelaxedPrecision
+               OpDecorate %SubgroupLocalInvocationId BuiltIn SubgroupLocalInvocationId
+               OpDecorate %11 RelaxedPrecision
+               OpDecorate %_runtimearr_half ArrayStride 2
+               OpDecorate %_struct_21 Block
+               OpMemberDecorate %_struct_21 0 NonWritable
+               OpMemberDecorate %_struct_21 0 Offset 0
+               OpDecorate %23 NonWritable
+               OpDecorate %23 Binding 0
+               OpDecorate %23 DescriptorSet 0
+               OpDecorate %_runtimearr_half_0 ArrayStride 2
+               OpDecorate %_struct_193 Block
+               OpMemberDecorate %_struct_193 0 NonReadable
+               OpMemberDecorate %_struct_193 0 Offset 0
+               OpDecorate %195 NonReadable
+               OpDecorate %195 Binding 2
+               OpDecorate %195 DescriptorSet 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+%SubgroupLocalInvocationId = OpVariable %_ptr_Input_uint Input
+       %half = OpTypeFloat 16
+     %uint_3 = OpConstant %uint 3
+    %uint_64 = OpConstant %uint 64
+    %uint_16 = OpConstant %uint 16
+     %uint_0 = OpConstant %uint 0
+         %17 = OpTypeCooperativeMatrixKHR %half %uint_3 %uint_64 %uint_16 %uint_0
+%_runtimearr_half = OpTypeRuntimeArray %half
+ %_struct_21 = OpTypeStruct %_runtimearr_half
+%_ptr_StorageBuffer__struct_21 = OpTypePointer StorageBuffer %_struct_21
+         %23 = OpVariable %_ptr_StorageBuffer__struct_21 StorageBuffer
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_StorageBuffer_half = OpTypePointer StorageBuffer %half
+     %uint_1 = OpConstant %uint 1
+         %30 = OpTypeCooperativeMatrixKHR %half %uint_3 %uint_16 %uint_64 %uint_1
+%_ptr_Function_30 = OpTypePointer Function %30
+%half_0x0p_0 = OpConstant %half 0x0p+0
+         %34 = OpConstantComposite %30 %half_0x0p_0
+      %float = OpTypeFloat 32
+    %float_1 = OpConstant %float 1
+%_ptr_Function_half = OpTypePointer Function %half
+      %int_1 = OpConstant %int 1
+      %int_2 = OpConstant %int 2
+      %int_3 = OpConstant %int 3
+      %int_4 = OpConstant %int 4
+      %int_5 = OpConstant %int 5
+      %int_6 = OpConstant %int 6
+      %int_7 = OpConstant %int 7
+      %int_8 = OpConstant %int 8
+      %int_9 = OpConstant %int 9
+     %int_10 = OpConstant %int 10
+     %int_11 = OpConstant %int 11
+     %int_12 = OpConstant %int 12
+     %int_13 = OpConstant %int 13
+     %int_14 = OpConstant %int 14
+     %int_15 = OpConstant %int 15
+     %uint_2 = OpConstant %uint 2
+        %183 = OpTypeCooperativeMatrixKHR %half %uint_3 %uint_64 %uint_64 %uint_2
+        %186 = OpConstantComposite %183 %half_0x0p_0
+%_runtimearr_half_0 = OpTypeRuntimeArray %half
+%_struct_193 = OpTypeStruct %_runtimearr_half_0
+%_ptr_StorageBuffer__struct_193 = OpTypePointer StorageBuffer %_struct_193
+        %195 = OpVariable %_ptr_StorageBuffer__struct_193 StorageBuffer
+%float_0_125 = OpConstant %float 0.125
+   %float_65 = OpConstant %float 65
+  %float_129 = OpConstant %float 129
+  %float_193 = OpConstant %float 193
+  %float_257 = OpConstant %float 257
+  %float_321 = OpConstant %float 321
+  %float_385 = OpConstant %float 385
+  %float_449 = OpConstant %float 449
+  %float_513 = OpConstant %float 513
+  %float_577 = OpConstant %float 577
+  %float_641 = OpConstant %float 641
+  %float_705 = OpConstant %float 705
+  %float_769 = OpConstant %float 769
+  %float_833 = OpConstant %float 833
+  %float_897 = OpConstant %float 897
+  %float_961 = OpConstant %float 961
+          %4 = OpFunction %void None %3
+          %5 = OpLabel
+         %32 = OpVariable %_ptr_Function_30 Function
+         %11 = OpLoad %uint %SubgroupLocalInvocationId
+         %27 = OpAccessChain %_ptr_StorageBuffer_half %23 %int_0 %uint_0
+         %28 = OpCooperativeMatrixLoadKHR %17 %27 %int_0 %uint_16 None
+               OpStore %32 %34
+         %38 = OpConvertUToF %float %11
+         %39 = OpFAdd %float %float_1 %38
+         %43 = OpFMul %float %39 %float_0_125
+         %44 = OpFConvert %half %43
+         %46 = OpAccessChain %_ptr_Function_half %32 %int_0
+               OpStore %46 %44
+         %52 = OpFAdd %float %38 %float_65
+         %53 = OpFMul %float %52 %float_0_125
+         %54 = OpFConvert %half %53
+         %55 = OpAccessChain %_ptr_Function_half %32 %int_1
+               OpStore %55 %54
+         %61 = OpFAdd %float %38 %float_129
+         %62 = OpFMul %float %61 %float_0_125
+         %63 = OpFConvert %half %62
+         %64 = OpAccessChain %_ptr_Function_half %32 %int_2
+               OpStore %64 %63
+         %70 = OpFAdd %float %38 %float_193
+         %71 = OpFMul %float %70 %float_0_125
+         %72 = OpFConvert %half %71
+         %73 = OpAccessChain %_ptr_Function_half %32 %int_3
+               OpStore %73 %72
+         %79 = OpFAdd %float %38 %float_257
+         %80 = OpFMul %float %79 %float_0_125
+         %81 = OpFConvert %half %80
+         %82 = OpAccessChain %_ptr_Function_half %32 %int_4
+               OpStore %82 %81
+         %88 = OpFAdd %float %38 %float_321
+         %89 = OpFMul %float %88 %float_0_125
+         %90 = OpFConvert %half %89
+         %91 = OpAccessChain %_ptr_Function_half %32 %int_5
+               OpStore %91 %90
+         %97 = OpFAdd %float %38 %float_385
+         %98 = OpFMul %float %97 %float_0_125
+         %99 = OpFConvert %half %98
+        %100 = OpAccessChain %_ptr_Function_half %32 %int_6
+               OpStore %100 %99
+        %106 = OpFAdd %float %38 %float_449
+        %107 = OpFMul %float %106 %float_0_125
+        %108 = OpFConvert %half %107
+        %109 = OpAccessChain %_ptr_Function_half %32 %int_7
+               OpStore %109 %108
+        %115 = OpFAdd %float %38 %float_513
+        %116 = OpFMul %float %115 %float_0_125
+        %117 = OpFConvert %half %116
+        %118 = OpAccessChain %_ptr_Function_half %32 %int_8
+               OpStore %118 %117
+        %124 = OpFAdd %float %38 %float_577
+        %125 = OpFMul %float %124 %float_0_125
+        %126 = OpFConvert %half %125
+        %127 = OpAccessChain %_ptr_Function_half %32 %int_9
+               OpStore %127 %126
+        %133 = OpFAdd %float %38 %float_641
+        %134 = OpFMul %float %133 %float_0_125
+        %135 = OpFConvert %half %134
+        %136 = OpAccessChain %_ptr_Function_half %32 %int_10
+               OpStore %136 %135
+        %142 = OpFAdd %float %38 %float_705
+        %143 = OpFMul %float %142 %float_0_125
+        %144 = OpFConvert %half %143
+        %145 = OpAccessChain %_ptr_Function_half %32 %int_11
+               OpStore %145 %144
+        %151 = OpFAdd %float %38 %float_769
+        %152 = OpFMul %float %151 %float_0_125
+        %153 = OpFConvert %half %152
+        %154 = OpAccessChain %_ptr_Function_half %32 %int_12
+               OpStore %154 %153
+        %160 = OpFAdd %float %38 %float_833
+        %161 = OpFMul %float %160 %float_0_125
+        %162 = OpFConvert %half %161
+        %163 = OpAccessChain %_ptr_Function_half %32 %int_13
+               OpStore %163 %162
+        %169 = OpFAdd %float %38 %float_897
+        %170 = OpFMul %float %169 %float_0_125
+        %171 = OpFConvert %half %170
+        %172 = OpAccessChain %_ptr_Function_half %32 %int_14
+               OpStore %172 %171
+        %178 = OpFAdd %float %38 %float_961
+        %179 = OpFMul %float %178 %float_0_125
+        %180 = OpFConvert %half %179
+        %181 = OpAccessChain %_ptr_Function_half %32 %int_15
+               OpStore %181 %180
+        %188 = OpLoad %30 %32
+        %190 = OpCooperativeMatrixMulAddKHR %183 %28 %188 %186
+        %196 = OpAccessChain %_ptr_StorageBuffer_half %195 %int_0 %uint_0
+               OpCooperativeMatrixStoreKHR %196 %190 %int_0 %uint_64 None
+               OpReturn
+               OpFunctionEnd

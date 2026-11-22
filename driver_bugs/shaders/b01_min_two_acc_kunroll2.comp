@@ -1,0 +1,34 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+// bug 1 (minimal): one subgroup, two 64 x 32 fp16 accumulators, K loop unrolled by 2 (two dependent multiply-adds into
+// each accumulator per iteration). Expected: C = A B. Observed: GPU hang (the submit never completes).
+// C[M,N] = A x B fp16, M = N = K = 1024, A stored [M,K], B [K,N], C [M,N].
+// 1 subgroup(s) per workgroup, each 64 x 64 of C as 2 64 x 32 accumulator(s); K unrolled by 2. dispatch (16, 16, 1)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer B { float16_t b[]; };
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+const uint M = 1024u, N = 1024u, K = 1024u;
+void main() {
+  uint sg = gl_SubgroupID, row0 = (gl_WorkGroupID.y * 1u + sg) * 64u, col0 = gl_WorkGroupID.x * 64u;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator> c0 = coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator>(0.0hf);
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator> c1 = coopmat<float16_t, gl_ScopeSubgroup, 64, 32, gl_MatrixUseAccumulator>(0.0hf);
+  for (uint k = 0u; k < K; k += 32u) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a0; coopMatLoad(a0, a, row0 * K + k + 0u, K, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> b00; coopMatLoad(b00, b, (k + 0u) * N + col0 + 0u, N, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> b01; coopMatLoad(b01, b, (k + 0u) * N + col0 + 32u, N, gl_CooperativeMatrixLayoutRowMajor);
+    c0 = coopMatMulAdd(a0, b00, c0);
+    c1 = coopMatMulAdd(a0, b01, c1);
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a1; coopMatLoad(a1, a, row0 * K + k + 16u, K, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> b10; coopMatLoad(b10, b, (k + 16u) * N + col0 + 0u, N, gl_CooperativeMatrixLayoutRowMajor);
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 32, gl_MatrixUseB> b11; coopMatLoad(b11, b, (k + 16u) * N + col0 + 32u, N, gl_CooperativeMatrixLayoutRowMajor);
+    c0 = coopMatMulAdd(a1, b10, c0);
+    c1 = coopMatMulAdd(a1, b11, c1);
+  }
+  coopMatStore(c0, c, row0 * N + col0 + 0u, N, gl_CooperativeMatrixLayoutRowMajor);
+  coopMatStore(c1, c, row0 * N + col0 + 32u, N, gl_CooperativeMatrixLayoutRowMajor);
+}

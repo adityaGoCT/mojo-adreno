@@ -1,0 +1,93 @@
+#version 450
+// bug 11 (original): the causal flash-attention kernel of ablas/llama3b (fa3) before its workaround. The two subgroups
+// of a workgroup take alternate key blocks; the subgroup without a block skips its multiplies (branches that differ
+// between subgroups). Expected: compiles. Observed: segfault in vkCreateComputePipelines, recursion in
+// llvm::CoopMatLayoutNode::getUseCommonMask (libllvm-qgl.so). Control: b11_control_fa3_workaround.comp.
+// Push constants: uint M (e.g. 512), float scale. dispatch (M/64, 24, 1), local size 128.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 128) in;
+layout(push_constant) uniform P { uint M; float scale; } pc;
+layout(std430, binding = 0) readonly buffer Q { float16_t q[]; };
+layout(std430, binding = 1) readonly buffer K { float16_t k[]; };
+layout(std430, binding = 2) readonly buffer VT { float16_t vt[]; };
+layout(std430, binding = 3) writeonly buffer O { uvec4 o[]; };
+shared f16vec4 sh[2 * 64 * 17];
+shared vec2 stat[2 * 64];
+void main() {
+  uint M = pc.M, z = gl_WorkGroupID.y, g = z / 3u, sg = gl_SubgroupID, l = gl_SubgroupInvocationID;
+  uint qb = M / 64u - 1u - gl_WorkGroupID.x, row0 = qb * 64u, d0 = sg * 64u;
+  uint qa = z * M * 128u + qb * 8192u, kbase = g * M * 128u, vbase = g * 128u * M + sg * (M / 16u) * 1024u;
+  uint sb = sg * 64u * 17u, sr = sb + l * 17u;
+  float scale = pc.scale, m = -1e30, lsum = 0.0;
+  for (uint kb = sg; kb <= qb; kb += 2u) {
+    bool valid = true;
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> s = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0);
+    for (uint kk = 0u; kk < 8u; ++kk) {
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a; coopMatLoad(a, q, qa + kk * 1024u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+      coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b; coopMatLoad(b, k, kbase + (kb * 8u + kk) * 1024u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+      s = coopMatMulAdd(a, b, s);
+    }
+    coopMatStore(s, sh, sb, 17u, gl_CooperativeMatrixLayoutRowMajor);
+    subgroupMemoryBarrierShared(); subgroupBarrier();
+    uint lim = kb == qb ? l : 63u;
+    if (valid) {
+      float bm = -1e30;
+      for (uint j = 0u; j < 16u; ++j) { vec4 v = vec4(sh[sr + j]); for (uint i = 0u; i < 4u; ++i) if (4u * j + i <= lim) bm = max(bm, v[i]); }
+      float mn = max(m, bm * scale);
+      lsum *= exp(m - mn);
+      for (uint j = 0u; j < 16u; ++j) { vec4 v = vec4(sh[sr + j]); for (uint i = 0u; i < 4u; ++i) if (4u * j + i <= lim) lsum += exp(v[i] * scale - mn); }
+      m = mn;
+    }
+    subgroupBarrier();
+  }
+  stat[sg * 64u + l] = vec2(m, lsum);
+  barrier();
+  vec2 o2 = stat[(1u - sg) * 64u + l];
+  float mm = max(m, o2.x);
+  float inv = 1.0 / (lsum * exp(m - mm) + o2.y * exp(o2.x - mm));
+  m = mm;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0);
+  for (uint kp = 0u; 2u * kp <= qb; ++kp) {
+    uint kb = 2u * kp + sg;
+    bool valid = true;
+    if (kb <= qb) {
+    coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> s = coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator>(0);
+    for (uint kk = 0u; kk < 8u; ++kk) {
+      coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> a; coopMatLoad(a, q, qa + kk * 1024u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+      coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> b; coopMatLoad(b, k, kbase + (kb * 8u + kk) * 1024u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+      s = coopMatMulAdd(a, b, s);
+    }
+    coopMatStore(s, sh, sb, 17u, gl_CooperativeMatrixLayoutRowMajor);
+    subgroupMemoryBarrierShared(); subgroupBarrier();
+    uint lim = kb == qb ? l : 63u;
+    for (uint j = 0u; j < 16u; ++j) {
+      vec4 v = vec4(sh[sr + j]), p;
+      for (uint i = 0u; i < 4u; ++i) p[i] = valid && 4u * j + i <= lim ? exp(v[i] * scale - m) * inv : 0.0;
+      sh[sr + j] = f16vec4(p);
+    }
+    }
+    barrier();
+    for (uint t = 0u; t < 2u; ++t) {
+      uint kt = 2u * kp + t;
+      if (kt <= qb)
+      for (uint kc = 0u; kc < 4u; ++kc) {
+        coopmat<float16_t, gl_ScopeSubgroup, 64, 16, gl_MatrixUseA> pa; coopMatLoad(pa, sh, t * 64u * 17u + kc * 4u, 17u, gl_CooperativeMatrixLayoutRowMajor);
+        coopmat<float16_t, gl_ScopeSubgroup, 16, 64, gl_MatrixUseB> vb; coopMatLoad(vb, vt, vbase + (kt * 4u + kc) * 1024u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+        acc = coopMatMulAdd(pa, vb, acc);
+      }
+    }
+    barrier();
+  }
+  coopMatStore(acc, sh, sb, 17u, gl_CooperativeMatrixLayoutRowMajor);
+  subgroupMemoryBarrierShared(); subgroupBarrier();
+  uint ob = (((row0 / 64u) * 192u + (z * 128u + d0) / 16u) * 1024u + l * 16u) / 8u;
+  for (uint c = 0u; c < 4u; ++c)
+    for (uint h = 0u; h < 2u; ++h) {
+      f16vec4 x = sh[sr + c * 4u + h * 2u], y = sh[sr + c * 4u + h * 2u + 1u];
+      o[ob + c * 128u + h] = uvec4(packFloat2x16(x.xy), packFloat2x16(x.zw), packFloat2x16(y.xy), packFloat2x16(y.zw));
+    }
+}

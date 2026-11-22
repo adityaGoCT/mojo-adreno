@@ -39,6 +39,7 @@ typedef struct ablas_ctx* ablas_handle;
 typedef struct {
   VkBuffer buffer;
   VkDeviceSize offset;  // multiple of 16 bytes
+  VkDeviceSize range;   // bytes bound from offset; 0 = to the end of the buffer (keep it <= maxStorageBufferRange)
 } ablas_buf;
 
 // gipa + inst resolve every Vulkan entry point the library uses (the application's loader).
@@ -93,11 +94,32 @@ ablas_status ablas_hgemm_q4_0(ablas_handle h, VkCommandBuffer cmd, ablas_op opA,
 //                     must then be given as P).
 // The epilogue kernels exist for the packed path (operands are packed first if not given as P) and the Q4_0
 // kernels. ABLAS_UNSUPPORTED on the Adreno 840 backend.
-typedef enum { ABLAS_EPI_NONE = 0, ABLAS_EPI_PACKED = 1, ABLAS_EPI_SWIGLU = 2, ABLAS_EPI_RESIDUAL_RMS = 3 } ablas_epilogue;
+typedef enum { ABLAS_EPI_NONE = 0, ABLAS_EPI_PACKED = 1, ABLAS_EPI_SWIGLU = 2, ABLAS_EPI_RESIDUAL_RMS = 3, ABLAS_EPI_F32 = 4 } ablas_epilogue;
 ablas_status ablas_hgemm_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, ablas_op opB, uint32_t M, uint32_t N,
                             uint32_t K, ablas_buf A, ablas_buf B, ablas_buf C, ablas_buf workspace, ablas_epilogue ep);
 ablas_status ablas_hgemm_q4_0_ex(ablas_handle h, VkCommandBuffer cmd, ablas_op opA, uint32_t M, uint32_t N, uint32_t K,
                                  ablas_buf A, ablas_buf W, ablas_buf C, ablas_buf workspace, ablas_epilogue ep);
+
+// For frameworks that keep activations in fp32 (llama.cpp's ggml): C (fp32 row-major [M, N]) = A W^T, with the weight W
+// [N, K] packed once (ablas_pack_b with ABLAS_OP_T for fp16 [N, K], ablas_q4_0_pack_ggml for ggml Q4_0 blocks) and A
+// packed per call from fp32 with ablas_pack_a_f32. Any M >= 1: A is packed with M rounded up to 64 rows (zeros) and
+// only the first M rows of C are written. N multiple of 64, K of 64. fp16 inputs, fp16 accumulation, fp32 out.
+// Descriptor sets instead of push descriptors. AdrenoBLAS pushes its descriptors (VK_KHR_push_descriptor) by
+// default. On the Adreno 850 driver, once a dispatch of another pipeline with an ordinary descriptor set bound is
+// recorded between push-descriptor dispatches in one command buffer, every push-descriptor dispatch in it uses the
+// descriptors pushed last, so earlier GEMMs write into the last GEMM's output (../driver_bugs/ #13). Hosts that
+// record their own descriptor-set dispatches between AdrenoBLAS calls (llama.cpp's ggml-vulkan) call
+// ablas_use_descriptor_sets right after ablas_create, before any other call. AdrenoBLAS then
+// allocates one descriptor set per dispatch from its own pools; ablas_reset_descriptor_sets frees them all and may
+// be called only when no command buffer recorded since the last reset is pending. Without VK_KHR_push_descriptor this
+// mode is on from the start.
+ablas_status ablas_use_descriptor_sets(ablas_handle h);
+void ablas_reset_descriptor_sets(ablas_handle h);
+
+ablas_status ablas_pack_a_f32(ablas_handle h, VkCommandBuffer cmd, uint32_t M, uint32_t K, ablas_buf A_f32, ablas_buf dst);
+ablas_status ablas_q4_0_pack_ggml(ablas_handle h, VkCommandBuffer cmd, uint32_t N, uint32_t K, ablas_buf blocks, ablas_buf dst);
+ablas_status ablas_gemm_f32out(ablas_handle h, VkCommandBuffer cmd, int w_is_q4_0, uint32_t M, uint32_t N, uint32_t K,
+                               ablas_buf A_packed, ablas_buf W_packed, ablas_buf C_f32);
 
 // Name of the kernel the last ablas_hgemm call used (for logs and benchmarks).
 const char* ablas_last_kernel(ablas_handle h);

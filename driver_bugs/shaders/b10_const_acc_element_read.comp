@@ -1,0 +1,33 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+// bug 10: read the 64 elements of a 64 x 64 accumulator with constant indices into f16vec4 constructors.
+// x: 64 x 64 row-major; lane l holds row l (element e = column e), so y == x.
+// Expected: compiles, y == x. Observed: segfault in vkCreateComputePipelines (SPIRVCodeGen::handleOpLoad). dispatch (1,1,1)
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 2) writeonly buffer Y4 { f16vec4 y4[]; };
+void main() {
+  uint l = gl_SubgroupInvocationID;
+  coopmat<float16_t, gl_ScopeSubgroup, 64, 64, gl_MatrixUseAccumulator> acc;
+  coopMatLoad(acc, x, 0u, 64u, gl_CooperativeMatrixLayoutRowMajor);
+  y4[l * 16u + 0u] = f16vec4(acc[0], acc[1], acc[2], acc[3]);
+  y4[l * 16u + 1u] = f16vec4(acc[4], acc[5], acc[6], acc[7]);
+  y4[l * 16u + 2u] = f16vec4(acc[8], acc[9], acc[10], acc[11]);
+  y4[l * 16u + 3u] = f16vec4(acc[12], acc[13], acc[14], acc[15]);
+  y4[l * 16u + 4u] = f16vec4(acc[16], acc[17], acc[18], acc[19]);
+  y4[l * 16u + 5u] = f16vec4(acc[20], acc[21], acc[22], acc[23]);
+  y4[l * 16u + 6u] = f16vec4(acc[24], acc[25], acc[26], acc[27]);
+  y4[l * 16u + 7u] = f16vec4(acc[28], acc[29], acc[30], acc[31]);
+  y4[l * 16u + 8u] = f16vec4(acc[32], acc[33], acc[34], acc[35]);
+  y4[l * 16u + 9u] = f16vec4(acc[36], acc[37], acc[38], acc[39]);
+  y4[l * 16u + 10u] = f16vec4(acc[40], acc[41], acc[42], acc[43]);
+  y4[l * 16u + 11u] = f16vec4(acc[44], acc[45], acc[46], acc[47]);
+  y4[l * 16u + 12u] = f16vec4(acc[48], acc[49], acc[50], acc[51]);
+  y4[l * 16u + 13u] = f16vec4(acc[52], acc[53], acc[54], acc[55]);
+  y4[l * 16u + 14u] = f16vec4(acc[56], acc[57], acc[58], acc[59]);
+  y4[l * 16u + 15u] = f16vec4(acc[60], acc[61], acc[62], acc[63]);
+}

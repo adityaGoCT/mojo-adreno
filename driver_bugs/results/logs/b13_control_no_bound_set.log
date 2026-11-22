@@ -1,0 +1,12 @@
+device: Adreno (TM) 850; driver: Qualcomm Technologies Inc. Adreno Vulkan Driver Driver Build: dbca1a4c11, Ie9dcd0093d, 1787853470
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+ (driverVersion 0x8037b007, Vulkan 1.4.351)
+test: b13_control_no_bound_set: control: the same 3 push-descriptor dispatches only
+creating pipeline (vkCreateComputePipelines)...
+pipeline created
+creating pipeline (vkCreateComputePipelines)...
+pipeline created
+submitting...
+RESULT b13_control_no_bound_set PASS dispatch 1: 0 of 65536 wrong (0 still 0, o[0] = 1 * 65536 + 0); dispatch 2: 0 of 65536 wrong (0 still 0, o[0] = 2 * 65536 + 0); dispatch 3: 0 of 65536 wrong (0 still 0, o[0] = 3 * 65536 + 0)

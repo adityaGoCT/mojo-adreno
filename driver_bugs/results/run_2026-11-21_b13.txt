@@ -1,0 +1,6 @@
+device: Adreno (TM) 850; driver: Qualcomm Technologies Inc. Adreno Vulkan Driver Driver Build: dbca1a4c11, Ie9dcd0093d, 1787853470
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+
+RESULT b13_push_then_bound_set WRONG dispatch 1: 65536 of 65536 wrong (65536 still 0, o[0] = 0 * 65536 + 0); dispatch 2: 65536 of 65536 wrong (65536 still 0, o[0] = 0 * 65536 + 0); dispatch 3: 65536 of 65536 wrong (0 still 0, o[0] = 6 * 65536 + 0); other dispatch ran 3 times
+RESULT b13_control_no_bound_set PASS dispatch 1: 0 of 65536 wrong (0 still 0, o[0] = 1 * 65536 + 0); dispatch 2: 0 of 65536 wrong (0 still 0, o[0] = 2 * 65536 + 0); dispatch 3: 0 of 65536 wrong (0 still 0, o[0] = 3 * 65536 + 0)

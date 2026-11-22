@@ -1,0 +1,16 @@
+device: Adreno (TM) 850; driver: Qualcomm Technologies Inc. Adreno Vulkan Driver Driver Build: dbca1a4c11, Ie9dcd0093d, 1787853470
+Date: 08/27/26
+Compiler Version: E17.52.10.04
+Driver Branch: 
+ (driverVersion 0x8037b007, Vulkan 1.4.351)
+test: b02_add_i8_loop: int8 multiplies with ma = ma + ma between them
+creating pipeline (vkCreateComputePipelines)...
+Invalid mask for Layout[rowmajor-linear malu_folded_k_first_f32 malu_folded_k_first_f16 malu_folded_k_first_i8 malu_folded_k_last_f32 malu_folded_k_last_f16 malu_folded_k_last_i8 ] Node:   %195 = insertelement <64 x i8> %192, i8 %194, i32 63: 
+layout value: nullptr
+    use Node: 
+         %.023 = phi <64 x i8> [ %195, %0 ], [ %216, %197 ]
+    def Node: 
+         %2 = call <64 x i16> @llvm.qgpu.coopmat.layout.annotate.v64i16(i64 24, i32 64, i32 32, i32 1, <64 x i16> %1) #4
+
+
+RESULT b02_add_i8_loop PIPELINE_ERROR vkCreateComputePipelines returned -13

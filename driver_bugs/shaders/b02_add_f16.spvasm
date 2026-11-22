@@ -1,0 +1,62 @@
+; SPIR-V
+; Version: 1.6
+; Generator: Google Shaderc over Glslang; 11
+; Bound: 38
+; Schema: 0
+               OpCapability Shader
+               OpCapability Float16
+               OpCapability StorageBuffer16BitAccess
+               OpCapability VulkanMemoryModel
+               OpCapability CooperativeMatrixKHR
+               OpExtension "SPV_KHR_cooperative_matrix"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical Vulkan
+               OpEntryPoint GLCompute %4 "main" %18 %36
+               OpExecutionMode %4 LocalSize 64 1 1
+               OpDecorate %_runtimearr_half ArrayStride 2
+               OpDecorate %_struct_16 Block
+               OpMemberDecorate %_struct_16 0 NonWritable
+               OpMemberDecorate %_struct_16 0 Offset 0
+               OpDecorate %18 NonWritable
+               OpDecorate %18 Binding 0
+               OpDecorate %18 DescriptorSet 0
+               OpDecorate %_runtimearr_half_0 ArrayStride 2
+               OpDecorate %_struct_34 Block
+               OpMemberDecorate %_struct_34 0 NonReadable
+               OpMemberDecorate %_struct_34 0 Offset 0
+               OpDecorate %36 NonReadable
+               OpDecorate %36 Binding 2
+               OpDecorate %36 DescriptorSet 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %half = OpTypeFloat 16
+       %uint = OpTypeInt 32 0
+     %uint_3 = OpConstant %uint 3
+    %uint_64 = OpConstant %uint 64
+    %uint_32 = OpConstant %uint 32
+     %uint_2 = OpConstant %uint 2
+         %12 = OpTypeCooperativeMatrixKHR %half %uint_3 %uint_64 %uint_32 %uint_2
+%_runtimearr_half = OpTypeRuntimeArray %half
+ %_struct_16 = OpTypeStruct %_runtimearr_half
+%_ptr_StorageBuffer__struct_16 = OpTypePointer StorageBuffer %_struct_16
+         %18 = OpVariable %_ptr_StorageBuffer__struct_16 StorageBuffer
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+     %uint_0 = OpConstant %uint 0
+%_ptr_StorageBuffer_half = OpTypePointer StorageBuffer %half
+  %uint_2048 = OpConstant %uint 2048
+%_runtimearr_half_0 = OpTypeRuntimeArray %half
+ %_struct_34 = OpTypeStruct %_runtimearr_half_0
+%_ptr_StorageBuffer__struct_34 = OpTypePointer StorageBuffer %_struct_34
+         %36 = OpVariable %_ptr_StorageBuffer__struct_34 StorageBuffer
+          %4 = OpFunction %void None %3
+          %5 = OpLabel
+         %23 = OpAccessChain %_ptr_StorageBuffer_half %18 %int_0 %uint_0
+         %24 = OpCooperativeMatrixLoadKHR %12 %23 %int_0 %uint_32 None
+         %27 = OpAccessChain %_ptr_StorageBuffer_half %18 %int_0 %uint_2048
+         %28 = OpCooperativeMatrixLoadKHR %12 %27 %int_0 %uint_32 None
+         %31 = OpFAdd %12 %24 %28
+         %37 = OpAccessChain %_ptr_StorageBuffer_half %36 %int_0 %uint_0
+               OpCooperativeMatrixStoreKHR %37 %31 %int_0 %uint_32 None
+               OpReturn
+               OpFunctionEnd
