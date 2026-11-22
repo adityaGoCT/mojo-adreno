@@ -123,7 +123,19 @@ adb shell "cd /data/local/tmp/pi0 && ./pi0_lt -r 4"       # -p: per operation; -
 - **The expert's attention** (37 ms a chunk):
   - With 2 key blocks per split, `famask256s1` computes S once instead of three times. It was not faster in the
     chunk yet (36.8 ms against 33.6 for the general split kernel with tile output).
-  - The merge reads its partials one row per lane, which is uncoalesced. That is the suspect.
+  - The merge (`../lt/kernels/facombine.comp`) is the suspect. It gives each lane one row of the row-major partials,
+    so a 64-lane load reads 64 rows 512 bytes apart. The expert also gets only 8 workgroups of 64 threads from it,
+    each thread doing 224 loads in sequence (32 chunks of 8 dims × 7 splits).
+  - **`../lt/kernels/facombine_coalesced.comp` is the replacement, written but NOT TESTED on a device** (the QDC
+    phone dropped first; it compiles):
+    - one thread per 8 dims of a row, so consecutive threads read consecutive 16 bytes and 32 threads cover a row;
+    - the expert gets 16,384 threads, each doing 7 loads (one per split) instead of 224;
+    - the math is the same.
+    - To try it: list it in `../lt/gen_kernels.py` in place of `facombine`, and dispatch
+      `(qrows * HD / 8 + 255) / 256` × heads workgroups in `ablasLtAttentionMasked`. Then run `lt_test`'s key-split
+      cases and time `pi0_lt`.
+    - The merge's own share of the 36.8 ms was not measured separately, so the gain is not known yet. If the merge
+      is what held `famask256s1` back, the s1 kernel's halved matrix work should then show.
 - **Vision:**
   - SigLIP's fc2 (768 × 1152 × 4352) runs 10% faster on 128 × 128 tiles than on the 256 × 128 ones it gets.
   - LayerNorm could take its statistics from the residual epilogue, as RMSNorm does (~3 ms).

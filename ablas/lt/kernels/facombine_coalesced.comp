@@ -1,0 +1,40 @@
+#version 450
+// NOT TESTED ON A DEVICE (written 2026-11-22 when the QDC phone dropped; compiles with glslc). Not in the library's
+// kernel table: ablasLt.c dispatches facombine.comp. A drop-in replacement for it, the same merge with the threads
+// laid out for memory:
+//   facombine.comp: lane = row, workgroup = 64 rows of one head; each lane walks its row's HD / 8 chunks of every
+//     split. A 64-lane load touches 64 rows 512 bytes apart (heads of 256), and π0's expert (64 rows, 8 heads) gets
+//     8 workgroups, 512 threads, each doing (HD / 8) * nsplit = 224 loads in sequence.
+//   this one: thread = 8 dims of one row; consecutive threads read consecutive 16 bytes of a row (32 threads cover
+//     a 512-byte row), and the expert gets 64 rows * 32 chunks * 8 heads = 16,384 threads, each doing nsplit = 7
+//     loads.
+// To use it: list it in gen_kernels.py instead of facombine, and dispatch (qrows * (HD / 8) + 255) / 256 by heads
+// workgroups (ablasLtAttentionMasked). Check with lt_test's key-split cases, then time pi0_lt's steps.
+//
+// Merges famask's key splits: out[row, z * hdv + d] = sum_s w_s part[s][z][row][d], w_s = l_s exp(m_s - M) /
+// sum_s' l_s' exp(m_s' - M), M = max_s m_s, where part (fp16 row-major [nsplit][heads][qrows][HD]) is each split's
+// output normalized by its own sum l_s and (m_s, l_s) = st[(s * heads + z) * qrows + row]. out: tiles [qrows, outw].
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint nsplit, qrows, outw, hdv, HD; } pc;
+layout(std430, binding = 0) readonly buffer PART { uvec4 part[]; };
+layout(std430, binding = 1) readonly buffer ST { vec2 st[]; };
+layout(std430, binding = 2) writeonly buffer O { uvec4 o[]; };
+vec4 lo(uvec4 u) { return vec4(unpackFloat2x16(u.x), unpackFloat2x16(u.y)); }
+vec4 hi(uvec4 u) { return vec4(unpackFloat2x16(u.z), unpackFloat2x16(u.w)); }
+void main() {
+  uint z = gl_WorkGroupID.y, H = gl_NumWorkGroups.y, nch = pc.HD / 8u, i = gl_GlobalInvocationID.x;
+  uint row = i / nch, d = (i % nch) * 8u;
+  if (row >= pc.qrows || d >= pc.hdv) return;
+  float M = -1e30, tot = 0.0, w[16];
+  for (uint s = 0u; s < pc.nsplit; ++s) M = max(M, st[(s * H + z) * pc.qrows + row].x);
+  for (uint s = 0u; s < pc.nsplit; ++s) { vec2 ml = st[(s * H + z) * pc.qrows + row]; w[s] = ml.y * exp(ml.x - M); tot += w[s]; }
+  float inv = tot > 0.0 ? 1.0 / tot : 0.0;
+  vec4 a = vec4(0.0), b = vec4(0.0);
+  for (uint s = 0u; s < pc.nsplit; ++s) { uvec4 u = part[(((s * H + z) * pc.qrows + row) * pc.HD + d) / 8u]; a += w[s] * lo(u); b += w[s] * hi(u); }
+  a *= inv, b *= inv;
+  uint col = z * pc.hdv + d;
+  o[(((row / 64u) * (pc.outw / 16u) + col / 16u) * 1024u + (row % 64u) * 16u + col % 16u) / 8u] =
+      uvec4(packFloat2x16(f16vec2(a.xy)), packFloat2x16(f16vec2(a.zw)), packFloat2x16(f16vec2(b.xy)), packFloat2x16(f16vec2(b.zw)));
+}

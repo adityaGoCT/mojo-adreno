@@ -25,6 +25,9 @@ The last four rows came with π0 ([`../pi0`](../pi0)). Two more things changed u
 - **Heads of 256 use one accumulator per subgroup.** Two long-lived 64 x 64 accumulators per subgroup hang the 850
   (driver bug #4), so P V runs once per 128 output dims.
 
+`kernels/facombine_coalesced.comp` is a coalesced version of the key-split merge. It is **not tested on a device**
+and not in the kernel table: see [`../pi0/README.md`](../pi0/README.md#next).
+
 Every call records into the caller's command buffer and, unless `ABLASLT_NO_AUTO_BARRIER` is set, ends with a
 barrier. `ABLASLT_DESCRIPTOR_SETS` switches AdrenoBLAS and this layer to ordinary descriptor sets, for hosts that
 record their own descriptor-set dispatches in between (driver bug #13).
