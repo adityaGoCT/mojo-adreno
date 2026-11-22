@@ -12,21 +12,26 @@ AdrenoBLAS now runs fp16 GEMM at **17.0 TFLOP/s at 4096 x 4096 x 8192 (97% of th
 
 Then I put a whole model on it. **Llama 3.2 3B prefills 512 tokens at 2,602 tokens/s with Q4_0 weights and 2,318 with fp16 weights** (2,248 and 2,143 at 2,048 tokens), with every matrix multiply in AdrenoBLAS. That is **5.7 to 6.1x llama.cpp's OpenCL backend** on the same phone with the same Q4_0 weights, and the output matches an fp32 reference (logits cosine 0.99993 or better, same top-1 token). The Q4_0 GEMM dequantizes 4-bit weights in registers straight into the matrix unit and runs at up to **17.7 TFLOP/s**, faster than fp16. That is more than the 17.5 my peak microbenchmark measured, so the true peak is likely about 17.8 (6,144 multiply-adds per clock). The whole Q4_0 prefill averages 15.2 TFLOP/s.
 
+Then I put the library where most people run models: **inside llama.cpp**. A 370-line patch to llama.cpp's Vulkan backend sends every matrix multiply on a model weight to AdrenoBLAS and leaves the rest of llama.cpp alone. Llama 3.2 3B prefill becomes **3.5x faster with Q4_0 weights and 3.9x with F16** (1,439 and 1,341 tokens/s at 512 tokens, against 417 and 344 for stock llama.cpp). The output is identical to stock llama.cpp: same perplexity, same top token at every position, and the Q4_0 prefill GEMMs are bit-identical to its own. Getting there turned up a driver bug that has nothing to do with matrices (#13): mix push descriptors with ordinary descriptor sets in one command buffer and the driver silently gives every push-descriptor dispatch the last one's buffers.
+
 On assembly: on the 850 it can be **read but not written**. The driver's compiled code sits in its pipeline cache and Mesa's disassembler decodes it, except four instruction words that drive the matrix unit. But a checksum rejects any edited code. On an Adreno 840 through Mesa's Turnip driver, hand-written assembly runs and beats both compilers' fp16 GEMM by about 10%; teaching its main trick to Turnip's register allocator recovers 5.0%.
 
-Five lessons carried the most weight:
+Six lessons carried the most weight:
 
 1. **On this GPU, layout is the kernel.** Each cooperative-matrix load wants long contiguous rows. A stored [K, M] beats A stored [M, K] by 1.3x at 2048³, and PyTorch's `Linear` layout runs at 2.4 TFLOP/s against 10.8. At 4096³, packing operands into contiguous tiles took the same kernel from 8.8 to 12.8 TFLOP/s, one 64 x 64 tile per subgroup took it to 15.3, and storing K contiguously inside each tile took it to 16.4.
 2. **Benchmark the benchmark.** My first fp16 peak said 1,000 TFLOP/s, and my first matrix peak said 66. The compiler had deleted one loop and hoisted the other. Only kernels that load fresh data every iteration gave honest numbers.
-3. **Map the driver, then route around it.** Eleven stock-driver bugs shaped the design: hangs, compiler crashes, wrong data and a 2x slowdown from Vulkan specialization constants. The generator never emits the bad patterns, and the runtime rewrites the SPIR-V it hands to the driver. One bug turned out narrower than it first looked, and routing around it was worth +28%.
+3. **Map the driver, then route around it.** Twelve stock-driver bugs shaped the design: hangs, compiler crashes, wrong data and a 2x slowdown from Vulkan specialization constants. The generator never emits the bad patterns, and the runtime rewrites the SPIR-V it hands to the driver. One bug turned out narrower than it first looked, and routing around it was worth +28%.
 4. **Read the machine code.** The last big step came from the driver's own statistics and a disassembly of the loop: 16 scalar 4-byte loads per step where 4 vector loads would do. Each matrix-unit lane holds one row of A and one column of B along K, so the tiles have to store K contiguously.
 5. **A model is more than its GEMMs, and the matrix unit has a map.** The first correct Llama spent 40% of its time outside matrix multiplies. On the 850 each lane of the matrix unit owns one row of A, one column of B and one row of the result, so dequantization, softmax and activation work can stay inside a lane. But touching matrix elements directly costs about 20 clocks each; staging a tile through shared memory is the fast way, and fusing that work into each GEMM's epilogue removed most of the rest.
+6. **A library inside someone else's program meets new bugs, theirs and the driver's.** In llama.cpp, AdrenoBLAS's push descriptors met llama.cpp's descriptor sets, and the driver mixed them up without an error. llama.cpp's tensor "addresses" turned out to be offsets that repeat across its memory buffers. A verify mode that runs both paths on every matrix multiply and compares them found both in an afternoon.
 
-The code companion is [`ablas/`](ablas/) (the library), [`ablas/llama3b/`](ablas/llama3b/) (the Llama benchmark) and [`asm/`](asm/) (the peak and assembly probes) in this repo.
+The code companion is [`ablas/`](ablas/) (the library), [`ablas/llama3b/`](ablas/llama3b/) (the Llama benchmark), [`ablas/llamacpp/`](ablas/llamacpp/) (the llama.cpp patch) and [`asm/`](asm/) (the peak and assembly probes) in this repo.
 
 ![fp16 GEMM on the Adreno 850, step by step](docs/img/ablas-progress.png)
 
 ![Llama 3.2 3B prefill on the Adreno 850](docs/img/ablas-llama3b.png)
+
+![Llama 3.2 3B prefill in llama.cpp, stock vs AdrenoBLAS](docs/img/ablas-llamacpp.png)
 
 ## The question: does a phone GPU need assembly to reach peak?
 
@@ -444,6 +449,53 @@ One token's hidden state is chaotic: a one-in-a-million change to RMSNorm's epsi
 
 At 2,048 tokens, GEMMs are 80% of the time. They run at 14 to 17 TFLOP/s inside the model, against 17.1 to 17.7 in isolation, because the model keeps the GPU busy, and hotter, for a whole second. Attention takes 15% of the time and normalization 4%. The whole Q4_0 prefill averages 15.2 TFLOP/s at 512 tokens: 87% of the measured matrix peak, model and all.
 
+## Step 12: Inside llama.cpp
+
+A benchmark runtime shows what the hardware can do; most people run models through llama.cpp. So the next question was how much of the speed survives inside it if AdrenoBLAS replaces only llama.cpp's matrix multiplies and everything else stays llama.cpp's: attention, normalization, RoPE, the KV cache, sampling.
+
+### The patch
+
+llama.cpp's Vulkan backend (ggml-vulkan, at `1fdda89`) already runs on the 850, on the same matrix units, at 417 tokens/s for Q4_0. The patch hooks its matrix multiply: when the weight is a `blk.*.weight` in F16 or Q4_0, the call goes to AdrenoBLAS. ggml hands over fp32 activations and expects fp32 results, so the library got three new calls:
+- `ablas_pack_a_f32` converts the fp32 input to packed fp16 tiles, rows padded to 64;
+- `ablas_q4_0_pack_ggml` converts ggml's `block_q4_0` weights to AdrenoBLAS's Q4_0 layout on the GPU;
+- `ablas_gemm_f32out` runs the GEMM with a new epilogue that writes fp32 rows straight into ggml's output tensor, only the M real rows.
+
+Weights are repacked once, on first use. Q4_0 weights get a repacked copy (1.6 GB extra), so decode, at one row per matrix multiply, keeps llama.cpp's mat-vec kernels on the original. F16 weights are repacked in place, because a copy of 5.6 GB doesn't fit. The query, key and value projections read the same input, and so do gate and up, so each input is packed once. The fp32-output epilogue got its own tuning entries: before tuning, the kernels it picked ran at 8.5 to 15 TFLOP/s; after, 14 to 17 for Q4_0 and 11 to 16 for fp16.
+
+### Bug 13: push descriptors next to descriptor sets
+
+The first run printed "888888...". A verify mode, which runs each matrix multiply through both AdrenoBLAS and llama.cpp and compares them, found most AdrenoBLAS results exactly zero. Every one was right when it ran alone, and the last AdrenoBLAS dispatch in each command buffer was right.
+
+AdrenoBLAS passes its buffers with push descriptors, which are recorded into the command buffer with each dispatch. llama.cpp binds ordinary descriptor sets. With a llama.cpp-style dispatch between AdrenoBLAS's, every push-descriptor dispatch in the command buffer ran with the descriptors pushed last. A one-line shader shows it: three dispatches that add `tag * 65536 + i` into three buffers leave the first two at 0 and the third at 6 x 65,536 + i (1 + 2 + 3). Each dispatch's push constants were its own; only the buffers were wrong. Without the dispatches in between, all three buffers are right. Binding the other pipeline and its set without dispatching doesn't trigger it.
+
+This affects any library that uses push descriptors inside a program that doesn't, and it fails silently. AdrenoBLAS now has a descriptor-set mode, `ablas_use_descriptor_sets`: one ordinary set per dispatch from its own pools, freed when llama.cpp cleans up after a graph. It costs nothing measurable. The repro is #13 in [`driver_bugs/`](driver_bugs/).
+
+### An address that isn't one
+
+Q4_0 now matched llama.cpp exactly. F16 still produced nonsense. Verify mode showed layers 0 to 22 right, and every weight of layer 23 repacked into values that appeared nowhere in that weight. The cause was mine. I keyed "already repacked" weights by the tensor's data pointer, but ggml-vulkan gives every device buffer the same fake base address. The 6.4 GB F16 model is spread over buffers of about 1 GB each. Layer 23 sat in the sixth at the same offset as layer 2 in the second, so it got layer 2's weights. The 1.8 GB Q4_0 model had no such collision. Weights are now keyed by (buffer, offset).
+
+### The result
+
+| llama-bench, tokens/s | 512 tokens | 1,024 | 2,048 | decode |
+| --- | --- | --- | --- | --- |
+| **llama.cpp Vulkan + AdrenoBLAS, Q4_0** | **1,439** | **1,272** | **924** | 30.7 |
+| llama.cpp Vulkan, Q4_0 | 417 | 403 | 362 | 29.5 |
+| **llama.cpp Vulkan + AdrenoBLAS, F16** | **1,341** | **1,248** | **902** | 10.9 |
+| llama.cpp Vulkan, F16 | 344 | 336 | 306 | 10.9 |
+
+That is 3.5x (Q4_0) and 3.9x (F16) at 512 tokens, falling to 2.6x and 2.9x at 2,048. Unlike its OpenCL backend, llama.cpp's Vulkan backend loads the F16 model on this phone. Every test started with the GPU at or below 45 °C and no thermal cap; repeat runs that evening agreed within 5%. Decode doesn't change: one token at a time is limited by memory bandwidth in both builds.
+
+The answers don't change either:
+- **Q4_0:** perplexity 31.3109 vs 31.3116 on this repo's blog posts (8 x 512 tokens). The top token is the same at every position. The prefill GEMMs are bit-identical to llama.cpp's: both multiply fp16 operands into fp16 accumulators on the same matrix units, in the same k order.
+- **F16:** perplexity 29.5491 vs 29.5496, same top token everywhere.
+- **Text:** greedy continuations match stock llama.cpp token for token, for a short prompt and a 900-token one.
+
+Inside llama.cpp the Q4_0 prefill runs at 1,439 tokens/s, against 2,602 in AdrenoBLAS's own runtime. The difference is everything that isn't a GEMM:
+- **At 512 tokens:** the GEMMs take about 190 ms of the 356 and packing activations about 20 (timed in isolation). llama.cpp's normalization, RoPE, SwiGLU, residual adds, KV-cache writes and the barriers between them take the other ~150 ms. The own runtime fuses those into the GEMM epilogues.
+- **At 2,048 tokens:** llama.cpp's flash attention runs at about 1 TFLOP/s on this GPU and takes a third of the time, in the stock build and the patched one alike.
+
+Both are fixable inside llama.cpp, and they are the next steps.
+
 ## Results
 
 Measured through the library with [`ablas_test`](ablas/ablas_test.c), one shape at a time with [`cool_run.sh`](ablas/cool_run.sh), which waits for the GPU to cool to 45 °C with no thermal cap first. Timing uses GPU timestamps, warm-up, then the best of five runs of back-to-back calls. Every call was checked against an fp32 CPU reference on 1,024 sampled elements. The percentage is the share of the measured 17.5 TFLOP/s peak. "Pre-packed" operands went through `ablas_pack_a`/`ablas_pack_b` once, before the timed calls.
@@ -491,7 +543,11 @@ Shapes must be multiples of 64 (M) and 32 (N and K); the packed path needs M, N 
 | softmax and rescaling through accumulator element access | ~20 clocks per element: slower than three separate kernels |
 | rescaling an accumulator with a matrix-times-scalar | slower still (23.6 vs 11.4 ms per attention layer) |
 | fusing the residual add into the o/down GEMMs | correct; only 1.5% faster overall (fp32 traffic moves into the GEMM) |
-| llama.cpp's flash attention or micro-batch 2048, for the baseline | slower than its defaults on this phone |
+| llama.cpp's flash attention or micro-batch 2048, for the OpenCL baseline | slower than its defaults on this phone |
+| AdrenoBLAS's push descriptors inside llama.cpp | most GEMMs wrote into the last GEMM's output (driver bug #13); ordinary descriptor sets work |
+| keying repacked weights by ggml's tensor data pointer | the pointer repeats across buffers: F16 layer 23 got layer 2's weights |
+| larger micro-batches for llama.cpp + AdrenoBLAS at 2,048 tokens | 916-937 tokens/s at 512, 1,024 and 2,048: attention, not the GEMMs, sets the pace |
+| llama.cpp Vulkan without flash attention (`-fa 0`) | segfaults on this phone, in stock llama.cpp too |
 
 ## Measuring on a phone you rent by the hour
 
@@ -536,6 +592,14 @@ python ref.py cmp q4 512 out                                                    
 adb shell "cd /data/local/tmp/l3b && ./bench.sh 'q4 512' 'q4 2048' 'f16 512' 'f16 2048'"
 ```
 
+```bash
+# llama.cpp + AdrenoBLAS (ablas/llamacpp/README.md has the details)
+cd ~/llama.cpp && git checkout 1fdda89 && git apply <this repo>/ablas/llamacpp/adrenoblas-ggml-vulkan.patch
+LLAMA=~/llama.cpp <this repo>/ablas/llamacpp/build.sh              # stock and AdrenoBLAS builds for Android
+adb push build-android-vulkan/bin-stripped/* /data/local/tmp/lcpp/vk_stock/   # likewise -ablas -> vk_ablas/
+adb shell "cd /data/local/tmp/lcpp && ./vkbench.sh vk_ablas Llama-3.2-3B-Instruct-Q4_0-pure.gguf 'pp512 pp2048 tg32'"
+```
+
 `ablas_test P P 4096 4096 4096 T N 2048 2048 2048 ...` runs any list of shapes. `P` operands are packed once with `ablas_pack_a`/`ablas_pack_b` before the timed calls.
 
 ## What's next
@@ -545,5 +609,6 @@ adb shell "cd /data/local/tmp/l3b && ./bench.sh 'q4 512' 'q4 2048' 'f16 512' 'f1
 - **Attention at long prompts:** 15% of the prefill at 2,048 tokens. A single-pass flash attention needs a cheap rescale of the output accumulator; on this driver that has to go through shared memory, and the output tile won't fit next to the probability tiles yet.
 - **fp32 accumulation**, by converting through the shared-memory epilogue staging instead of the conversion that crashes the compiler.
 - **Edges and batches:** shapes that aren't tile multiples, and strided-batched GEMM in the library (attention is model code today).
+- **More of llama.cpp:** AdrenoBLAS's flash attention in place of llama.cpp's (5.4 TFLOP/s against about 1 at long prompts), and the own runtime's fusions (gate/up with SwiGLU, o and down with the residual add, RoPE into qkv) as graph-level fusions in ggml-vulkan. Together they should close most of the gap between 1,439 and 2,602 tokens/s.
 - **Decode:** batch-1 GEMV for Q4_0 and fp16 and a KV cache, where the matrix units don't help and memory bandwidth (83 GB/s here) decides.
 - **The Adreno 840:** the ALU backend is in the library (up to 3.64 TFLOP/s with Turnip); the register-allocator patch (+5.0%) goes upstream to Mesa.

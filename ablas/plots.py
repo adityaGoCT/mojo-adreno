@@ -145,6 +145,33 @@ def llama_steps():
     fig.tight_layout(rect=(0, 0, 1, 0.84))
     fig.savefig(OUT / "ablas-llama3b-steps.png")
 
+def llamacpp():
+    """Llama 3.2 3B prefill in llama.cpp's Vulkan backend: stock vs AdrenoBLAS for the weight matmuls (llama-bench)."""
+    rows = [("Q4_0, 512 tokens", 1439, 417), ("Q4_0, 1,024 tokens", 1272, 403), ("Q4_0, 2,048 tokens", 924, 362),
+            ("F16, 512 tokens", 1341, 344), ("F16, 1,024 tokens", 1248, 336), ("F16, 2,048 tokens", 902, 306)]
+    fig, ax = plt.subplots(figsize=(8.4, 4.6), dpi=150)
+    y = [6.4, 5.4, 4.4, 2.6, 1.6, 0.6]
+    h = 0.34
+    for off, k, col in ((0.19, 1, BLUE), (-0.19, 2, GRAY)):
+        bars(ax, [v + off for v in y], [r[k] for r in rows], col, h)
+        for yi, r in zip(y, rows):
+            ax.text(r[k] + 20, yi + off, f"{r[k]:,}", va="center", color=INK, fontsize=8.5)
+    for yi, r in zip(y, rows):
+        ax.text(r[1] + 20 + 15 * len(f"{r[1]:,}") + 55, yi + 0.19, f"{r[1] / r[2]:.1f}x", va="center", color=INK2,
+                fontsize=8.5)
+    ax.set_yticks(y, [r[0] for r in rows])
+    frame(ax, 1800, "Llama 3.2 3B prefill in llama.cpp on the Adreno 850",
+          "tokens/s, llama-bench; llama.cpp 1fdda89 Vulkan backend, the weight matmuls in AdrenoBLAS vs stock", "tokens/s")
+    ax.set_ylim(0.0, 7.0)
+    for b in ax.patches:
+        if isinstance(b, FancyBboxPatch):
+            b.set_mutation_aspect(1 / 1800)
+    hs = [plt.Rectangle((0, 0), 1, 1, fc=c) for c in (BLUE, GRAY)]
+    ax.legend(hs, ["llama.cpp Vulkan + AdrenoBLAS", "llama.cpp Vulkan (stock)"], loc="upper center",
+              bbox_to_anchor=(0.5, -0.15), ncol=2, frameon=False, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    fig.savefig(OUT / "ablas-llamacpp.png")
+
 if __name__ == "__main__":
-    progress(); layouts(); peaks(); llama(); llama_steps()
+    progress(); layouts(); peaks(); llama(); llama_steps(); llamacpp()
     print("wrote", sorted(p.name for p in OUT.glob("ablas-*.png")))
