@@ -14,10 +14,16 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 import dsk
 import g4k
 import lk
+import lkh
 
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of gemm_q4's 128)
 comptime PAD = 128  # cache rows past the context: prefill's matrix-unit attention reads up to a block's 64-aligned end
 comptime SCORE_MAX = 4096  # prompts up to this many positions use the matrix-unit prefill attention (g4k)
+# LFM2_GEMM=q (int4 storage): prefill projections on lkh.gemm_hq instead of lk.gemm_q4: X packed into fp16 R tiles, the
+# int4 rows unpacked into shared memory inside the fp16 cooperative-matrix product, K in chunks of GCH added in fp32
+# (as Qwen3-4B's QWEN3_GEMM=q), for batches of at least GQ_ROWS padded rows
+comptime GCH = 2048
+comptime GQ_ROWS = 256
 comptime TAPS = (2, 9, 17, 21, 27)  # the layers whose residual stream the DSpark drafter reads
 
 
@@ -55,6 +61,9 @@ struct LFM2(Movable):
     var logits: DeviceBuffer[DType.float32]
     var tap_on: Bool  # prefill and verify keep the TAPS layers' rows in `taps` (for the drafter)
     var taps: DeviceBuffer[DType.float32]  # [PMAX, 5 D]
+    var gemmq: Bool  # LFM2_GEMM=q: prefill projections on lkh.gemm_hq
+    var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k (F)
+    var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
     var vbx: Dict[Int, DeviceBuffer[DType.float32]]  # verify: each conv layer's B x rows [MR, D]
     var vlog: DeviceBuffer[DType.float32]  # verify: logits rows [MR, V]
     var vt: DeviceBuffer[DType.int32]  # verify: each row's argmax
@@ -128,6 +137,9 @@ struct LFM2(Movable):
         self.dump = ""
         self.tap_on = False
         self.taps = ctx.enqueue_create_buffer[DType.float32](PMAX * 5 * D)
+        self.gemmq = False
+        self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F)
+        self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * max(2 * self.F, (self.F + GCH - 1) // GCH * D))
         self.vbx = Dict[Int, DeviceBuffer[DType.float32]]()
         for l in range(self.L):
             if not self.attn[l]:
@@ -221,6 +233,18 @@ struct LFM2(Movable):
     def gemm(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], n: Int, k: Int,
              rows: Int) raises:
         """y[rows, n] = x[rows, k] W^T (rows: a multiple of 128)."""
+        if self.q4 and self.gemmq and rows >= GQ_ROWS:
+            var chunks = (k + GCH - 1) // GCH
+            if chunks * n > max(2 * self.F, (self.F + GCH - 1) // GCH * self.D) or k > self.F:
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2), Int32(k),
+                                                  Int32(rows * k // 8), grid_dim=groups(rows * k // 8, 256), block_dim=256)
+            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
+                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k), Int32(rows),
+                grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
+                                                     grid_dim=groups(rows * n // 8, 256), block_dim=256)
+            return
         if self.q4:
             self.ctx.enqueue_function[lk.gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y, Int64(n),
                                                   Int64(k), grid_dim=Dim(n // 128, rows // 128), block_dim=256)

@@ -12,6 +12,8 @@
 #     LFM2_PROFILE=prefill  the same for the prompt
 #     LFM2_ATTN=scalar      prefill attention with lk.attention instead of the matrix units (gemma4's g4k kernels)
 #     LFM2_GEMV=word        int4 decode with a word (8 weights) a lane a step instead of a block of 32 (dot_q4b)
+#     LFM2_GEMM=q           int4 prefill projections on lkh.gemm_hq (fp16 cooperative matrices, int4 unpacked inside the
+#                           product, K chunks summed in fp32) for batches of 256 rows or more
 #     LFM2_DSPARK=<dir>     speculative decoding with the DSpark drafter (its manifest.txt and model.safetensors): each
 #                           step drafts up to 9 tokens and the target checks them in one pass (dspark.mojo); the
 #                           prompt is prefilled in batches with the drafter's taps. LFM2_DSPARK_LOG=1: a line a step.
@@ -188,6 +190,7 @@ def main() raises:
     var model = LFM2(ctx, String(args[1]), String(args[2]))
     model.wide = getenv("LFM2_GEMV") != "word"
     model.attn_mma = getenv("LFM2_ATTN") != "scalar"
+    model.gemmq = getenv("LFM2_GEMM") == "q"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", storage", "q4" if model.q4 else "f16", ", context", model.CAP)
     var P = len(prompt)

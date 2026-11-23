@@ -120,6 +120,7 @@ def main():
     ap.add_argument("--rows", type=int, default=16, help="logit rows the phone keeps for --check (0.5 MB each)")
     ap.add_argument("--no-eos", action="store_true")
     ap.add_argument("--name", help="build/lfm2/runs/<name>.json for fp32_check.py")
+    ap.add_argument("--env", nargs="*", default=[], help="extra LFM2_* settings for the phone (e.g. LFM2_GEMM=q)")
     a = ap.parse_args()
     tok = tokenizer()
     text = a.prompt_file.read_text() if a.prompt_file else a.prompt
@@ -128,7 +129,7 @@ def main():
     print(f"prompt: {P} tokens ({text[:60]!r}{'...' if len(text) > 60 else ''})")
     toks, prompt_ms, dec_ms, logits, every, log = run_phone(a.storage, ids, a.tokens, a.prefill, a.warm,
                                                             a.rows if a.check else 0, eos=not a.no_eos,
-                                                            config=a.config)
+                                                            config=a.config, extra_env=a.env)
     for line in log.splitlines():
         if line.startswith(("weights", "prompt", "decode", "warm", "npu", "prefill", "gpu", "handoff")):
             print("phone:", line)

@@ -16,6 +16,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
 import lk
+import lkh
 import q4bk
 import q35k
 
@@ -24,11 +25,25 @@ comptime PAD = 128  # cache rows past the context: prefill's matrix-unit attenti
 comptime HD = 256
 comptime CONV = q35k.CONV  # 8192: q | k | v of the linear attention
 comptime NVD = 4096  # 32 value heads x 128
+# QWEN35_GEMM=q: the batch's whole 128s of rows (at least GQ_ROWS) on fp16 cooperative matrices instead of lk.gemm_q4 /
+# q35k.gemm_aff: X packed into fp16 R tiles; Q4_0 weights unpacked into shared memory inside the product (lkh.gemm_hq,
+# as Qwen3-4B's QWEN3_GEMM=q); the affine storage unpacked into fp16 tiles first (q35k.deq_aff) and multiplied by
+# lkh.gemm_h; K in chunks of GCH added in fp32. A last 64 rows stay on q35k.gemm64.
+comptime GCH = 2048
+comptime GQ_ROWS = 256
 comptime STATE = 32 * 128 * 128
 
 
 def groups(n: Int, per: Int) -> Int:
     return (n + per - 1) // per
+
+
+def part_cols(D: Int, F: Int, qkvz: Int, qkvg: Int, H: Int) -> Int:
+    """The widest chunks x n of the prefill products (QWEN35_GEMM=q's part buffer holds PMAX rows of it)."""
+    var c = (F + GCH - 1) // GCH * D
+    c = max(c, (D + GCH - 1) // GCH * max(qkvz, max(qkvg, 2 * F)))
+    c = max(c, (max(NVD, H * HD) + GCH - 1) // GCH * D)
+    return c
 
 
 struct Qwen35(Movable):
@@ -71,6 +86,10 @@ struct Qwen35(Movable):
     var logits: DeviceBuffer[DType.float32]
     var dump: String  # prefill: append each layer's residual stream rows (fp32) to this file (stage checks)
     var prof: Bool  # wait after each launch and add its time to times[kind] (QWEN35_PROFILE)
+    var gemmq: Bool  # QWEN35_GEMM=q
+    var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k (F)
+    var wd: DeviceBuffer[DType.float16]  # the affine weights unpacked into fp16 tiles (the largest: down, D x F)
+    var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
     var times: Dict[String, Float64]
     var mark: Float64
     var dnc: Int  # prefill: value columns a 16-lane group of the delta rule takes (1, 2 or 4; QWEN35_DNC)
@@ -142,6 +161,10 @@ struct Qwen35(Movable):
         self.logits = ctx.enqueue_create_buffer[DType.float32](self.V)
         self.dump = ""
         self.prof = False
+        self.gemmq = False
+        self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F)
+        self.wd = ctx.enqueue_create_buffer[DType.float16](self.D * self.F)
+        self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * part_cols(self.D, self.F, self.QKVZ, self.QKVG, self.H))
         self.times = Dict[String, Float64]()
         self.mark = 0
         self.dnc = 2
@@ -228,6 +251,9 @@ struct Qwen35(Movable):
                                                             self.floats[name + ".d"], self.floats[name + ".c"], x, y,
                                                             Int32(cols), grid_dim=rows, block_dim=64)
 
+    def part_cols(self) -> Int:
+        return part_cols(self.D, self.F, self.QKVZ, self.QKVG, self.H)
+
     def gemm(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], n: Int, k: Int,
              rows: Int) raises:
         """y[rows, n] = x[rows, k] W^T on the matrix units, W as gemv() reads it. rows: a multiple of 64; whole 128s
@@ -235,7 +261,41 @@ struct Qwen35(Movable):
         var full = rows // 128 * 128
         var q4 = name + ".s" in self.halves
         var hi = name + ".h" in self.words
-        if full:
+        if self.gemmq and full >= GQ_ROWS:
+            var chunks = (k + GCH - 1) // GCH
+            if chunks * n > self.part_cols() or k > self.F or (not q4 and n * k > self.D * self.F):
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, full * k // 2), Int32(k),
+                                                  Int32(full * k // 8), grid_dim=(full * k // 8 + 255) // 256,
+                                                  block_dim=256)
+            if q4:
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
+                    self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                    Int32(full), grid_dim=Dim(n // 64, full // 128, chunks), block_dim=128)
+            else:
+                var wq = self.words[name + ".q"]
+                var wdu = self.wd.create_sub_buffer[DType.uint32](0, n * k // 2)
+                if hi:
+                    self.ctx.enqueue_function[q35k.deq_aff[True]](wq, self.words[name + ".h"], self.floats[name + ".d"],
+                                                                  self.floats[name + ".c"], wdu, Int32(n), Int32(k),
+                                                                  Int32(n * k // 256), grid_dim=(n * k // 256 + 255) // 256,
+                                                                  block_dim=256)
+                else:
+                    self.ctx.enqueue_function[q35k.deq_aff[False]](wq, wq, self.floats[name + ".d"],
+                                                                   self.floats[name + ".c"], wdu, Int32(n), Int32(k),
+                                                                   Int32(n * k // 256), grid_dim=(n * k // 256 + 255) // 256,
+                                                                   block_dim=256)
+                if full % 256 == 0:
+                    self.ctx.enqueue_function[lkh.gemm_h[4, 2, 1, GCH]](
+                        self.xa, self.wd, self.part, Int32(n), Int32(k), Int32(full),
+                        grid_dim=Dim(n // 128, full // 256, chunks), block_dim=512)
+                else:
+                    self.ctx.enqueue_function[lkh.gemm_h[2, 2, 1, GCH]](
+                        self.xa, self.wd, self.part, Int32(n), Int32(k), Int32(full),
+                        grid_dim=Dim(n // 128, full // 128, chunks), block_dim=256)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(full * n), Int32(chunks),
+                                                     grid_dim=(full * n // 8 + 255) // 256, block_dim=256)
+        elif full:
             var g = Dim(n // 128, full // 128)
             if q4:
                 self.ctx.enqueue_function[lk.gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y,

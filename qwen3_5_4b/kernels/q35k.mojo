@@ -21,7 +21,7 @@
 # Every workgroup is one 64-lane subgroup. Loops before a subgroup sum or shuffle run the same number of iterations in
 # every lane (guards inside).
 from std.math import exp, log1p, rsqrt
-from std.memory import stack_allocation
+from std.memory import bitcast, stack_allocation
 from max.gpu import barrier, block_idx, global_idx, thread_idx
 from max.gpu.compute.arch.mma_spirv import CoopMatrix, MATRIX_A, MATRIX_B, ACCUMULATOR
 from max.gpu.memory import AddressSpace
@@ -166,6 +166,44 @@ def gemm_aff[HI: Bool](wq: U32, wh: U32, wd: F32, wc: F32, x: F32, y: F32, n: In
                 acc = at.multiply_add(bt, acc)
             barrier()
     acc.store(out, ldy)
+
+
+def deq_aff[HI: Bool](wq: U32, wh: U32, wd: F32, wc: F32, dst: U32, n: Int32, k: Int32, total: Int32):
+    """The affine storage (d (lo - 8 + 16 hi) + c per block of 32) -> lkh.gemm_h's fp16 B tiles, [n/64][k/16][16][64]
+    with N contiguous, written as pairs of halves; lkh.deq_w's mapping: a thread takes 8 rows x one block of 32 k, and
+    neighbouring threads neighbouring rows (total = n k / 256)."""
+    var v = global_idx.x
+    if v >= Int(total):
+        return
+    var kk = Int(k)
+    var nb = Int(n) // 8
+    var rb = v % nb
+    var kb = v // nb
+    var r = 8 * rb
+    var blocks = kk // 32
+    var w = SIMD[DType.uint32, 32]()
+    var dv = SIMD[DType.float32, 8]()
+    var cv = SIMD[DType.float32, 8]()
+    var hv = SIMD[DType.uint32, 8](0)
+    comptime for j in range(8):
+        var w4 = wq.load[width=4]((r + j) * (kk // 8) + 4 * kb)
+        comptime for i in range(4):
+            w[4 * j + i] = w4[i]
+        dv[j] = wd[(r + j) * blocks + kb]
+        cv[j] = wc[(r + j) * blocks + kb]
+        comptime if HI:
+            hv[j] = wh[(r + j) * blocks + kb]
+    var base = (r // 64) * (kk // 16) * 1024 + r % 64
+    comptime for i in range(4):
+        comptime for e in range(8):
+            var kx = 32 * kb + 8 * i + e
+            var q = SIMD[DType.int32, 8]()
+            comptime for j in range(8):
+                q[j] = Int32(((w[4 * j + i] >> UInt32(4 * e)) & 15) ^ 8) - 8
+                comptime if HI:
+                    q[j] += 16 * Int32((hv[j] >> UInt32(8 * i + e)) & 1)
+            var h = (q.cast[DType.float32]() * dv + cv).cast[DType.float16]()
+            dst.store((base + (kx // 16) * 1024 + (kx % 16) * 64) // 2, bitcast[DType.uint32, 4](h))
 
 
 def gemm64[KIND: Int](wq: U32, ws: F16, wh: U32, wd: F32, wc: F32, x: F32, y: F32, n: Int64, k: Int64, row0: Int64):

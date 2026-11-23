@@ -12,6 +12,8 @@
 #     QWEN35_PROFILE=1        decode steps wait after each launch; prints the time per kind of launch (ms a token)
 #     QWEN35_PROFILE=prefill  the same for the prompt
 #     QWEN35_DNC=1|2|4        prefill's delta rule: value columns a 16-lane group takes (default 2)
+#     QWEN35_GEMM=q           prefill projections on fp16 cooperative matrices (lkh.gemm_hq for Q4_0, q35k.deq_aff +
+#                             lkh.gemm_h for the affine storage; K chunks summed in fp32) for batches of 256 rows or more
 #
 # Greedy decode; the argmax is the GPU's. Prints "tok <id> <ms>" per generated token, the prompt's and decode's times on
 # the phone's clock, and the process's memory (lfm2/pipette.py parses the same lines).
@@ -77,6 +79,7 @@ def main() raises:
     var t_load = now_ms()
     var model = Qwen35(ctx, String(args[1]), String(args[2]), Int(getenv("QWEN35_CTX", "2048")))
     model.dnc = Int(getenv("QWEN35_DNC", "2"))
+    model.gemmq = getenv("QWEN35_GEMM") == "q"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", context", model.CAP)
     var P = len(prompt)

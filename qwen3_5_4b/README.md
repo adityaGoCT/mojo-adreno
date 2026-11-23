@@ -148,6 +148,19 @@ Prefill profile (410 tokens, `QWEN35_PROFILE=prefill`; each launch waited for): 
 out_proj 227, full attention's q|k|v|gate 100, delta rule 86, residual adds and norms 52, o_proj 51, full attention
 42, a|b 27, conv 21, gated norm 17, head 9.
 
+**Prefill on fp16 cooperative matrices** (`QWEN35_GEMM=q`). This applies Qwen3-4B's `QWEN3_GEMM=q`
+([`../qwen3_4b/README.md`](../qwen3_4b/README.md)) to the batch's whole 128s of rows, for batches of 256 or more:
+- X is packed into fp16 tiles (`lkh.pack_x`).
+- The Q4_0 projections run on `lkh.gemm_hq`, which unpacks the int4 rows into shared memory inside the product.
+- The affine storage is first unpacked into fp16 tiles (`q35k.deq_aff`) and multiplied by `lkh.gemm_h`.
+- K is split into chunks of 2,048, added in fp32 by `lkh.sum_parts`.
+- A last 64 rows stay on `gemm64`.
+
+It needs the fork's SPIR-V backend from `2cb90a66ac`. On a Galaxy Z Fold the 410-token prompt takes 1,274 ms instead of
+1,954-1,994 (322 tokens/s instead of 207; alternating runs, each after the GPU cooled to 45 °C), and decode is
+unchanged. Against the GGUF's weights, 64 of 64 tokens match, with KL 3.6e-5 and logits within 0.11. Against bf16, 60
+of 64 tokens agree, as for the int4 reference itself (KL 0.0113 against its 0.0122).
+
 ## Checks
 
 - `reference.py` drives transformers' own `Qwen3_5DecoderLayer` (Gated DeltaNet with transformers' chunked delta rule,
@@ -214,6 +227,7 @@ The program's switches (`qwen3_5_4b.mojo`):
 - `QWEN35_WARM`: untimed warm-up runs.
 - `QWEN35_PROFILE=1|prefill`: time each kind of launch.
 - `QWEN35_DNC=1|2|4`: the prefill delta rule's columns a group.
+- `QWEN35_GEMM=q`: prefill projections on fp16 cooperative matrices (batches of 256 rows or more).
 
 ## Lessons
 

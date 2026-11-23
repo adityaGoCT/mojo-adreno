@@ -126,6 +126,18 @@ Net of the waits, those int4 matrix-vector kernels read their weights at 46–61
 62 GB/s. Reading a block of 32 weights (16 bytes and its scale) a lane a step instead (`dot_q4b`, now the default;
 `LFM2_GEMV=word` for the first ones) brought a step from 31.2–32.7 to 27.4–28.9 ms (58 GB/s), with the same results.
 
+**Prefill on fp16 cooperative matrices** (`LFM2_GEMM=q`, int4 storage). This uses the same kernels as Qwen3-4B's
+`QWEN3_GEMM=q` ([`../qwen3_4b/README.md`](../qwen3_4b/README.md)):
+- `lkh.pack_x` packs X into fp16 tiles.
+- `lkh.gemm_hq` unpacks the int4 rows into shared memory inside the fp16 cooperative-matrix product, K in chunks of
+  2,048.
+- `lkh.sum_parts` adds the chunks in fp32.
+
+It applies to batches of 256 rows or more and needs the fork's SPIR-V backend from `2cb90a66ac`. On a Galaxy Z Fold
+the 415-token prompt takes 718-731 ms instead of 1,328-1,352 (573 tokens/s instead of 310; alternating runs, each
+after the GPU cooled to 45 °C). Decode is unchanged. Against the reference on the same weights, 64 of 64 tokens are its
+argmax, with mean KL 1.4e-4 and logits within 0.39 (the fp32 products: 1.1e-4).
+
 ## The NPU
 
 `export_npu.py` writes the graphs. Their initializers point into `npu_w8.bin` (external data next to the graphs).
