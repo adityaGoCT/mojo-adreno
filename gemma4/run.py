@@ -59,6 +59,7 @@ def main():
     ap.add_argument("--bf16", action="store_true")
     ap.add_argument("--rows", type=int, default=8, help="logit rows the phone keeps for --check (1 MB each)")
     ap.add_argument("--no-eos", action="store_true", help="generate --tokens even past an end of turn")
+    ap.add_argument("--env", nargs="*", default=[], help="extra GEMMA4_* settings for the phone (e.g. GEMMA4_GEMM=q)")
     a = ap.parse_args()
     text = a.prompt_file.read_text() if a.prompt_file else a.prompt
     tok, ids = tokenize(a.model, text)
@@ -78,6 +79,7 @@ def main():
         adb("shell", f"rm -f {d}/logits.f32")
     if a.prefill:
         env.append("GEMMA4_PREFILL=1")
+    env += a.env
     # one plain command per adb shell line (the lab's bridge drops lines with && or a bare &, and a long prompt's
     # ids on the line dropped it too: they go in a file)
     idfile = sdir / "prompt.ids"

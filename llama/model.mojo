@@ -12,6 +12,7 @@ import gemv
 import gemv_add
 import gemv_add_q4
 import gemv_q4
+import lkh
 import p_add
 import p_attention
 import p_attention_scalar
@@ -36,6 +37,13 @@ comptime MAXPOS = 512
 comptime CHUNKS = 4  # the embedding (and lm_head) in 4 tensors of <= 128 MB, the stock driver's largest binding
 comptime QKV = (H + 2 * KVH) * HD
 comptime CHUNK_ROWS = V // CHUNKS
+# LLAMA_GEMM=q: prefill projections on fp16 cooperative matrices (lfm2/kernels/lkh.mojo) instead of p_gemm_q4 /
+# p_gemm's fp32 ones: X packed into fp16 R tiles (pack_x), the int4 or fp16 rows unpacked into fp16 shared memory
+# inside the product (gemm_hq: 2 x 1 subgroups, 128 rows x 64 columns a workgroup), K in chunks of GCH whose fp16
+# partial products are added in fp32 (sum_parts). The 840 rounds every partial sum of an fp16 product to fp16: with
+# chunks of 2048, the 431-token prompt's logits moved by up to 0.39 (KL 5.7e-3) and a near-tied first token flipped;
+# with 1024, 0.18 (KL 4.5e-4) for 5% more time.
+comptime GCH = 1024
 
 
 struct Llama(Movable):
@@ -45,6 +53,9 @@ struct Llama(Movable):
     var floats: Dict[String, DeviceBuffer[DType.float32]]  # the RoPE tables
     var q4: Bool
     var fused_attention: Bool  # p_attention, until a driver cannot create it
+    var gemmq: Bool  # LLAMA_GEMM=q: prefill projections on lkh's fp16 cooperative matrices
+    var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to MAXPOS rows of the widest k (F)
+    var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
     var x: DeviceBuffer[DType.float32]
     var xn: DeviceBuffer[DType.float32]
     var qkv: DeviceBuffer[DType.float32]
@@ -63,6 +74,10 @@ struct Llama(Movable):
         self.floats = Dict[String, DeviceBuffer[DType.float32]]()
         self.q4 = False
         self.fused_attention = True
+        self.gemmq = False
+        self.xa = ctx.enqueue_create_buffer[DType.float16](MAXPOS * F)
+        self.part = ctx.enqueue_create_buffer[DType.float16](
+            MAXPOS * max((D + GCH - 1) // GCH * 2 * F, (F + GCH - 1) // GCH * D))
         self.x = ctx.enqueue_create_buffer[DType.float32](D)
         self.xn = ctx.enqueue_create_buffer[DType.float32](D)
         self.qkv = ctx.enqueue_create_buffer[DType.float32](QKV)
@@ -168,7 +183,27 @@ struct Llama(Movable):
     def pproj(self, n: Int, k: Int, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
               rows: Int) raises:
         """Y = X W^T for `rows` rows, with W the tensor `name` (n x k) in fp16 or int4: 128 x 128 tiles of Y
-        on cooperative matrices, 256 threads each."""
+        on cooperative matrices, 256 threads each (LLAMA_GEMM=q: lkh's, below)."""
+        if self.gemmq:
+            var chunks = (k + GCH - 1) // GCH
+            if rows * k > len(self.xa) or chunks * rows * n > len(self.part):
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2),
+                                                  Int32(k), Int32(rows * k // 8),
+                                                  grid_dim=(rows * k // 8 + 255) // 256, block_dim=256)
+            var g = Dim(n // 64, rows // 128, chunks)
+            if self.q4:
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.Q4]](
+                    self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                    Int32(rows), grid_dim=g, block_dim=128)
+            else:  # the fp16 rows as pairs of halves; no scales
+                var w = self.halves[name]
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.FP16]](
+                    self.xa, w.create_sub_buffer[DType.uint32](0, n * k // 2), w, self.part, Int32(n), Int32(k),
+                    Int32(rows), grid_dim=g, block_dim=128)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
+                                                     grid_dim=(rows * n // 8 + 255) // 256, block_dim=256)
+            return
         var grid = Dim(n // 128, rows // 128)
         if self.q4:
             self.ctx.enqueue_function[p_gemm_q4.p_gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y,

@@ -14,12 +14,18 @@ from std.memory import bitcast
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
+import lkh
 import p_gemm_q4
 import p_gemm_q8
 
 comptime PL = 256  # the per-layer input's width
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of p_gemm_q4's 128)
 comptime PAD = 128  # positions past the context that a padded prefill batch touches
+# GEMMA4_GEMM=q: prefill projections on fp16 cooperative matrices (lfm2/kernels/lkh.mojo) instead of p_gemm_q4 /
+# p_gemm_q8's fp32 ones: X packed into fp16 R tiles (pack_x), the int4 or int8 rows unpacked into fp16 shared memory
+# inside the product (gemm_hq: 2 x 1 subgroups, 128 rows x 64 columns a workgroup), K in chunks of GCH whose fp16
+# partial products are added in fp32 (sum_parts). The 840 rounds every partial sum of an fp16 product to fp16.
+comptime GCH = 2048
 
 
 def groups(n: Int, per: Int) -> Int:
@@ -84,6 +90,9 @@ struct Gemma4(Movable):
     var ppg: DeviceBuffer[DType.float32]
     var ppa: DeviceBuffer[DType.float32]
     var pscores: DeviceBuffer[DType.float32]  # [PMAX rows, H, CAP + PAD keys]
+    var gemmq: Bool  # GEMMA4_GEMM=q: prefill projections on lkh's fp16 cooperative matrices
+    var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k
+    var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
 
     def __init__(out self, ctx: DeviceContext, dir: String, checkpoint: String) raises:
         """dir: export.py's manifest.txt, rope tables and convert's gemma4.bin; checkpoint: model.safetensors."""
@@ -167,6 +176,11 @@ struct Gemma4(Movable):
         self.ppg = ctx.enqueue_create_buffer[DType.float32](PMAX * PL)
         self.ppa = ctx.enqueue_create_buffer[DType.float32](PMAX * PL)
         self.pscores = ctx.enqueue_create_buffer[DType.float32](PMAX * self.H * (self.CAP + PAD))
+        self.gemmq = False
+        var maxq = (self.H + 2 * self.KVH) * maxhd
+        self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * max(D, maxf, self.H * maxhd))
+        self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * max(
+            groups(D, GCH) * max(2 * maxf, self.L * PL, maxq), groups(max(maxf, self.H * maxhd), GCH) * D))
         self.load(dir)
 
     def load(mut self, dir: String) raises:
@@ -342,6 +356,25 @@ struct Gemma4(Movable):
     def gemm(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], n: Int, k: Int,
              rows: Int) raises:
         """y[rows, n] = x[rows, k] W^T for the int4 or int8 matrix `name` (n x k), on cooperative matrices."""
+        if self.gemmq:
+            var chunks = groups(k, GCH)
+            if rows * k > len(self.xa) or chunks * rows * n > len(self.part):
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2),
+                                                  Int32(k), Int32(rows * k // 8),
+                                                  grid_dim=groups(rows * k // 8, 256), block_dim=256)
+            var grid = Dim(n // 64, rows // 128, chunks)
+            if name in self.int8:
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.Q8]](
+                    self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                    Int32(rows), grid_dim=grid, block_dim=128)
+            else:
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.Q4]](
+                    self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                    Int32(rows), grid_dim=grid, block_dim=128)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
+                                                     grid_dim=groups(rows * n // 8, 256), block_dim=256)
+            return
         if name in self.int8:
             self.ctx.enqueue_function[p_gemm_q8.p_gemm_q8](self.words[name + ".q"], self.halves[name + ".s"], x, y,
                                                            Int64(n), Int64(k), grid_dim=Dim(n // 128, rows // 128),

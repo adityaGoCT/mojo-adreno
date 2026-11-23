@@ -9,7 +9,8 @@
 #   B  W^T in fp16 as 16 x 64 tiles with N contiguous, the K tiles of a column block adjacent, [n/64][k/16][16][64]
 #      (deq_w writes them from lk's int4 rows before each product, so the int4 rows stay the only copy of the weights,
 #      shared with decode's gemv_q4); or gemm_hq unpacks lk's int4 rows into shared memory inside the product, B rows
-#      along N, a K step at a time, with no fp16 copy of W at all.
+#      along N, a K step at a time, with no fp16 copy of W at all. gemm_hq also takes llama's and gemma4's storage
+#      (int4 or int8 with a scale per 64: GS, FMT) and fp16 rows (llama's fp16 weights).
 # The 840 rounds every partial sum of an fp16 cooperative product to fp16 (2.7% error over 4096 products), so K is split
 # into chunks of CH: grid z = chunk, each writing its fp16 partial C, and sum_parts adds them in fp32.
 #
@@ -99,21 +100,29 @@ def gemm_h[WM: Int, WN: Int, TN: Int, CH: Int](xa: F16, wd: F16, part: F16, n: I
         c1.store(out + 64, nn)
 
 
-def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool](
+comptime Q4 = 0  # gemm_hq's weight formats: int4, 8 a word, low nibble first, an fp16 scale per GS (lk, llama, gemma4)
+comptime Q8 = 1  # int8, 4 a word, low byte first, an fp16 scale per GS (gemma4's int8 storage)
+comptime FP16 = 2  # fp16 rows, read as pairs of halves; no scales (llama's fp16 weights)
+
+
+def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int = G, FMT: Int = Q4](
     xa: F16, wq: U32, ws: F16, part: F16, n: Int32, k: Int32, rows: Int32
 ):
-    """part[z] (rows x n, fp16) = X[:, z CH .. z CH + CH] W[:, same]^T with W unpacked from lk's int4 rows inside the
-    product: a workgroup of WM x WN subgroups, each computing 64 x 64 of C, unpacks the workgroup's BKS x 64 WN slice of
-    W^T into shared memory (fp16, rows along N) a K step at a time, then each subgroup multiplies its A tiles (loaded
-    from xa's R tiles) by its 16 x 64 B tiles from shared memory. An unpack unit is RG rows of W x 8 k (one word a row):
-    RG fp16 scale and word loads, then 8 stores of RG halves (one k each, along N). Neighbouring threads take
-    neighbouring words of the same rows (ALONG_K: the loads coalesce) or neighbouring rows (the stores do). Launch with
-    grid (n / (64 WN), rows / (64 WM), ceil(k / CH)) and 64 WM WN threads; CH and k multiples of BKS."""
+    """part[z] (rows x n, fp16) = X[:, z CH .. z CH + CH] W[:, same]^T with W unpacked from its rows (int4, int8 or
+    fp16: FMT) inside the product: a workgroup of WM x WN subgroups, each computing 64 x 64 of C, unpacks the
+    workgroup's BKS x 64 WN slice of W^T into shared memory (fp16, rows along N) a K step at a time, then each subgroup
+    multiplies its A tiles (loaded from xa's R tiles) by its 16 x 64 B tiles from shared memory. An unpack unit is RG
+    rows of W x 8 k (a word a row for int4, two for int8, four for fp16): RG scale and word loads, then 8 stores of RG
+    halves (one k each, along N). Neighbouring threads take neighbouring 8 k of the same rows (ALONG_K: the loads
+    coalesce) or neighbouring rows (the stores do). Launch with grid (n / (64 WN), rows / (64 WM), ceil(k / CH)) and
+    64 WM WN threads; CH and k multiples of BKS, and of GS for int4 and int8."""
     comptime BN = 64 * WN
     comptime T = 64 * WM * WN
-    comptime KW = BKS // 8  # words of a row a K step
+    comptime KW = BKS // 8  # units of 8 k of a row a K step
     comptime UNITS = (BN // RG) * KW
     comptime PER = (UNITS + T - 1) // T
+    comptime WPU = 1 if FMT == Q4 else (2 if FMT == Q8 else 4)  # words of a row a unit
+    comptime assert FMT == Q4 or FMT == Q8 or FMT == FP16, "FMT: Q4, Q8 or FP16"
     var sb = stack_allocation[BKS * BN, DType.float16, address_space=AddressSpace.SHARED]()
     var kk = Int(k)
     var nn = Int(n)
@@ -140,14 +149,36 @@ def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool](
                     kw = u // (BN // RG)
                 var r = colw + rg * RG  # the first row of W (column of C)
                 var kx = kb + 8 * kw
-                var w = SIMD[DType.uint32, RG]()
+                var w = SIMD[DType.uint32, RG * WPU]()  # row j's words at WPU j ..
                 var sv = SIMD[DType.float16, RG]()
                 comptime for j in range(RG):
-                    w[j] = wq[(r + j) * (kk // 8) + kx // 8]
-                    sv[j] = ws[(r + j) * (kk // G) + kx // G]
+                    comptime if WPU == 1:
+                        w[j] = wq[(r + j) * (kk // 8) + kx // 8]
+                    else:
+                        var wv = wq.load[width=WPU]((r + j) * (kk * WPU // 8) + kx * WPU // 8)
+                        comptime for h in range(WPU):
+                            w[WPU * j + h] = wv[h]
+                    comptime if FMT != FP16:
+                        sv[j] = ws[(r + j) * (kk // GS) + kx // GS]
                 comptime for e in range(8):
-                    var q = (((w >> UInt32(4 * e)) & 15) ^ 8).cast[DType.int32]() - 8
-                    sb.unsafe_store((8 * kw + e) * BN + rg * RG, q.cast[DType.float16]() * sv)
+                    var h: SIMD[DType.float16, RG]
+                    comptime if FMT == Q4:
+                        var we = SIMD[DType.uint32, RG]()
+                        comptime for j in range(RG):
+                            we[j] = w[j]
+                        var q = (((we >> UInt32(4 * e)) & 15) ^ 8).cast[DType.int32]() - 8
+                        h = q.cast[DType.float16]() * sv
+                    elif FMT == Q8:
+                        var we = SIMD[DType.uint32, RG]()
+                        comptime for j in range(RG):
+                            we[j] = w[2 * j + e // 4]
+                        var q = (((we >> UInt32(8 * (e % 4))) & 255) ^ 128).cast[DType.int32]() - 128
+                        h = q.cast[DType.float16]() * sv
+                    else:
+                        h = SIMD[DType.float16, RG]()
+                        comptime for j in range(RG):
+                            h[j] = bitcast[DType.float16, 2](w[4 * j + e // 2])[e % 2]
+                    sb.unsafe_store((8 * kw + e) * BN + rg * RG, h)
         barrier()
         comptime for s in range(BKS // 16):
             var at = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(abase + (kb // 16 + s) * 1024, 16)

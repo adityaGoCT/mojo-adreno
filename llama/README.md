@@ -193,6 +193,42 @@ The first run on a phone also compiles the pipelines. On this driver build, the 
 anything. The driver plugin keeps a pipeline cache file, so later runs load them in under a
 millisecond.
 
+#### Prefill on fp16 cooperative matrices (`LLAMA_GEMM=q`)
+
+`p_gemm` and `p_gemm_q4` multiply on fp32 cooperative matrices (64 × 64 × 8). The 840 has no matrix
+unit, and its fp16 product (64 × 64 × 16) runs at twice their ceiling. With `LLAMA_GEMM=q`
+(`run.py --env LLAMA_GEMM=q`), `Llama.prefill` uses `lfm2/kernels/lkh.mojo` instead, as Qwen3-4B's
+`QWEN3_GEMM=q` does. For each projection:
+1. `pack_x` packs X into fp16 tiles in the layout the 840 reads fastest.
+2. `gemm_hq` unpacks W's rows (int4 with a scale per 64, or fp16) into fp16 shared memory inside the
+   product. W keeps its one copy, shared with decode.
+3. K is split into chunks of 1024, each written as an fp16 partial product. `sum_parts` adds the
+   chunks in fp32.
+
+On the Fold, the 431-token prompt, three rounds, each run after the GPU cooled to 45 °C:
+
+| Weights | Prompt, fp32 products | Prompt, `LLAMA_GEMM=q` | Against PyTorch on the same weights |
+|---|---|---|---|
+| 4-bit | 590–594 ms | **331–334 ms (1.78×)** | 48 of 48 tokens; logits within 0.18 |
+| fp16 | 637–642 ms | **375–402 ms (1.66×)** | 48 of 48 tokens; logits within 0.31 |
+
+Against the same run without the switch (whose logits are within 7.5e-5 of PyTorch's), the KL at the
+prompt's last position is 4.5e-4 (4-bit) and 2.5e-5 (fp16). Decode is unchanged.
+
+The 840 rounds every partial sum of an fp16 product to fp16, so the chunks are short. With chunks of
+2048, the 4-bit logits moved by up to 0.39 and the KL was 5.7e-3. That was enough to flip the first
+token, a near tie: "According" scores 27.42 and "The" 27.26 (probabilities 0.53 and 0.45). Chunks
+of 1024 cost 15 ms more and give 48 of 48 tokens.
+
+Each product alone (`bench_hq`, `android/build.py llamahq`; 512 rows, chunks of 1024, with `pack_x`):
+
+| Projection | `p_gemm_q4` | `gemm_hq`, int4 | `p_gemm` | `gemm_hq`, fp16 |
+|---|---|---|---|---|
+| q/k/v, 3072 × 2048 | 2.09 TFLOP/s | 4.32 | 1.84 | 4.35 |
+| o, 2048 × 2048 | 1.85 | 3.84 | 1.66 | 3.59 |
+| gate/up, 16384 × 2048 | 2.12 | 4.98 | 2.02 | 4.34 |
+| down, 2048 × 8192 | 1.73 | 2.94 | 1.52 | 2.58 |
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the
@@ -246,6 +282,8 @@ $PY llama/run.py --model <snapshot dir> --prompt "..." --max-new 48    # stock d
 $PY llama/run.py --model <snapshot dir> --backend turnip               # Mesa Turnip
 $PY llama/run.py --model <snapshot dir> --backend native               # Turnip, Mojo's own SPIR-V target
 $PY llama/run.py --model <snapshot dir> --prefill --prompt-file llama/prompts/long.txt  # Adreno 8xx
+$PY llama/run.py --model <snapshot dir> --runner mojo --prefill --quant q4 --prompt-file llama/prompts/long.txt \
+    --env LLAMA_GEMM=q                                                 # prefill on fp16 cooperative matrices
 ```
 
 `--backend native` compiles the kernels with a source-built Mojo that has the `adreno710` Vulkan

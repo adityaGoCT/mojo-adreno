@@ -41,6 +41,7 @@ phone's tokens; first difference: position 58); mean KL(bf16 || int8) 0.0116
 | Decode, int4 | **28.1 ms a token (35.6 tokens/s)** | **53.8 ms a token (18.6 tokens/s)** |
 | Decode, int8 | **41.1 ms a token (24.3 tokens/s)** | **83.0 ms a token (12.0 tokens/s)** |
 | A 960-token prompt, batched prefill, int4 / int8 | **2.36 / 2.44 s** (int4: 406 tokens/s, 13× a token at a time) | **4.71 / 4.76 s** (204 tokens/s, 15×) |
+| The same, projections on fp16 cooperative matrices ([`GEMMA4_GEMM=q`](#on-fp16-cooperative-matrices-gemma4_gemmq)), int4 / int8 | **1.41 / 1.43 s** (678 tokens/s) | **2.45 s** (int4; 393 tokens/s) |
 | On the GPU, int4 / int8 | 1.21 / 2.15 GB | 2.47 / 4.46 GB |
 | bf16's greedy choice agrees, int4 → int8 (short, long prompt) | 42 of 47 → 53 of 54, 49 of 64 → 64 of 64 | 39 of 48 → 52 of 52, 55 of 64 → 64 of 64 |
 
@@ -172,6 +173,50 @@ little above a normal run's total):
 | **total** | **2.44 s** (a normal run: 2.36 s) | **4.85 s** (4.71 s) |
 
 The int4 projections are 80–86% of a prompt. They run at the rate `p_gemm_q4` reaches for Llama (1.7–2.1 TFLOP/s).
+
+### On fp16 cooperative matrices (`GEMMA4_GEMM=q`)
+
+The 840 has no matrix unit, and its fp16 product (64 × 64 × 16) runs at twice the fp32 one's ceiling. With
+`GEMMA4_GEMM=q` (`run.py --env GEMMA4_GEMM=q`), each projection of a batch uses `lfm2/kernels/lkh.mojo` instead, as
+Qwen3-4B's `QWEN3_GEMM=q` does:
+1. `pack_x` packs X into fp16 tiles in the layout the 840 reads fastest.
+2. `gemm_hq` unpacks the int4 or int8 rows (a scale per 64) into fp16 shared memory inside the product.
+   `gemma4.bin` keeps its one copy of each matrix, shared with decode.
+3. K is split into chunks of 2048, each written as an fp16 partial product. `sum_parts` adds the chunks in fp32.
+
+On the Fold, each run after the GPU cooled to 45 °C:
+
+| Model, storage, prompt | Prompt, fp32 products | Prompt, `GEMMA4_GEMM=q` |
+|---|---|---|
+| E2B, int4, the post (960 tokens; 3 rounds) | 2.33–2.35 s | **1.41–1.42 s (1.65×, 678 tokens/s)** |
+| E2B, int8, the post (3 rounds) | 2.40–2.41 s | **1.42–1.43 s (1.69×)** |
+| E2B, int4, the sky (19 tokens; 2 rounds) | 311–315 ms | **167–169 ms (1.86×)** |
+| E4B, int4, the post (3 rounds) | 4.66–4.67 s | **2.44–2.45 s (1.91×, 393 tokens/s)** |
+
+Checked as in [Checks](#checks), against the reference on the same weights and against bf16:
+
+| Model, storage, prompt | Max \|phone − reference\| | Greedy = reference | bf16 agrees | Mean KL(bf16 ‖ storage) |
+|---|---|---|---|---|
+| E2B, int4, the post | 0.57 (median position 0.28) | 64 of 64 | 49 of 64 | 0.62 |
+| E2B, int8, the post | 0.47 (median position 0.29) | 64 of 64 | 64 of 64 | 0.0054 |
+| E2B, int4, the sky | 0.78 (median position 0.13) | 47 of 47 | 42 of 47 | 0.30 |
+| E4B, int4, the post | 0.77 (median position 0.30) | 63 of 64 | | |
+
+The logits move by up to 0.8, against 1.2e-4 with fp32 products, because the 840 rounds every partial sum of an fp16
+product to fp16. On the long prompt, the mean KL against the int4 reference over the 8 rows checked is 6.1e-4 (E2B)
+and 4.8e-4 (E4B). Every greedy token of E2B is still the reference's. E4B's one exception is a near tie: at the 53rd
+generated token, the reference's top two logits are 0.021 apart. For E2B, the agreement with bf16 and its KL are the
+same as with fp32 products (E4B's bf16 check was not rerun). The per-layer gate reads the residual stream itself,
+not a normed copy, in fp16. Its range held for these prompts: the logits stayed finite. Decode is unchanged.
+
+Each product alone (`llama/bench_hq.mojo`, `android/build.py llamahq`), at 512 rows with `pack_x`:
+
+| Projection (E2B) | `p_gemm_q4` | `gemm_hq`, int4 | `p_gemm_q8` | `gemm_hq`, int8 |
+|---|---|---|---|---|
+| q/k/v, 2560 × 1536 | 1.77 TFLOP/s | 4.06 | 1.76 | 4.26 |
+| o, 1536 × 2048 | 2.04 | 3.70 | 1.93 | 3.60 |
+| gate/up, 12288 × 1536 | 2.16 | 5.03 | 2.15 | 5.01 |
+| down, 1536 × 6144 | 2.12 | 4.26 | 1.97 | 4.09 |
 
 ## Checks
 
@@ -378,6 +423,8 @@ adb shell "cd $D/e2b/int8; $D/gemma4/gemma4_convert .. recipe.txt gemma4.bin"   
 build/vla/venv/bin/python gemma4/run.py --model e2b --check --bf16                 # the sky prompt
 build/vla/venv/bin/python gemma4/run.py --model e2b --storage int8 --check --bf16
 build/vla/venv/bin/python gemma4/run.py --model e2b --prefill --check --prompt-file gemma4/prompts/long.txt
+build/vla/venv/bin/python gemma4/run.py --model e2b --prefill --check --prompt-file gemma4/prompts/long.txt \
+    --env GEMMA4_GEMM=q                                       # the batches' projections on fp16 cooperative matrices
 build/vla/venv/bin/python gemma4/step_profile.py --model e2b [--storage int8] [--prefill]   # time per kernel
 ```
 
@@ -389,8 +436,9 @@ on the `adb shell` line dropped the lab's bridge. Then it runs one plain command
 
 - **Between int4 and int8.** int8 decodes at about 1.5× int4's time. A 5- or 6-bit storage, or GPTQ-style rounding
   for the int4 MLPs of `mixed`, could land in between; [int8](#int8) shows where the error comes from.
-- **Prefill in fp16 on the matrix units.** The int4 projections are 80–86% of the prompt and run fp32 cooperative
-  matrices at 1.8–2.1 TFLOP/s; the 840's fp16 product is about twice that (fp16 accumulators only).
+- **The rest of the prompt.** With the projections on fp16 cooperative matrices (`GEMMA4_GEMM=q`), attention and
+  the row kernels are a larger share; `pack_x` could fuse into the norms and the GELU product that feed each
+  projection.
 - **Fewer decode launches.** A quarter of a step's launches are single-workgroup norms and residual adds.
 - **The Hexagon NPU for prefill**, as for π0's prefix (`../npu`).
 - **Images and audio.** The checkpoints hold vision and audio towers; only the text model runs here.

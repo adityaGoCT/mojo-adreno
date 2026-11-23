@@ -243,6 +243,7 @@ def main():
     ap.add_argument("--reexport", action="store_true")
     ap.add_argument("--quant", choices=["fp16", "q4"], default="fp16",
                     help="q4: int4 projections and lm_head (groups of 64, fp16 scales); embedding fp16")
+    ap.add_argument("--env", nargs="*", default=[], help="extra LLAMA_* settings for the phone (e.g. LLAMA_GEMM=q)")
     a = ap.parse_args()
     if a.prompt_file:
         a.prompt = pathlib.Path(a.prompt_file).read_text().strip()
@@ -275,6 +276,7 @@ def main():
     env = f"LD_LIBRARY_PATH={TURNIP} VK_RUN_API=1.3 " if a.backend in ("turnip", "native") else ""
     if a.prefill:  # llama_vk: the kernel directory; llama.mojo: any value (its kernels are inside it)
         env += f"LLAMA_PREFILL={DEV}/prefill840 " + ("LLAMA_PROFILE=1 " if os.environ.get("LLAMA_PROFILE") else "")
+    env += "".join(e + " " for e in a.env)
     runner = (f"MODULAR_DRIVER_PLUGINS=vulkan@{DEV}/mojo/libM_driver_vulkan.so mojo/llama {model_dir.name}"
               if a.runner == "mojo" else f"./llama_vk {model_dir.name} {a.backend}")
     cmd = (f"cd {DEV}; {env}LLAMA_EOS={','.join(map(str, eos))} LLAMA_LOGITS={DEV}/logits.bin "

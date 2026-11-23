@@ -6,6 +6,7 @@
 #     LLAMA_EOS=128001,128009   stop tokens          LLAMA_LOGITS=<file>   logits after the prompt (fp32)
 #     LLAMA_PREFILL=<anything>  the whole prompt at once (Llama.prefill: the matmuls on cooperative
 #                               matrices); otherwise one token at a time through the decode path
+#     LLAMA_GEMM=q              the prefill's matmuls on fp16 cooperative matrices (lfm2/kernels/lkh.mojo)
 #
 # Then up to <max new> tokens are generated greedily (argmax on the CPU). Output: "tok <id> <ms>" for
 # each generated token.
@@ -41,6 +42,7 @@ def main() raises:
     print("device:", ctx.name())
     var t_load = now_ms()
     var model = Llama(ctx, String(args[1]))
+    model.gemmq = getenv("LLAMA_GEMM") == "q"
     print("loaded in", round((now_ms() - t_load) / 1e3, 1), "s")
     var logits = List[Float32](length=V, fill=0)
 

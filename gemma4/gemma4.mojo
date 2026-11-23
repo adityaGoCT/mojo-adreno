@@ -7,6 +7,7 @@
 #     GEMMA4_LOGITS_EVERY=k   only every k-th of those (the 1st, the k+1st, ...): 1 MB a row crosses a slow bridge
 #     GEMMA4_EOS=1,106        stop after one of these tokens
 #     GEMMA4_PREFILL=1        the prompt in batches (Gemma4.prefill); otherwise a token at a time
+#     GEMMA4_GEMM=q           the batches' projections on fp16 cooperative matrices (lfm2/kernels/lkh.mojo's gemm_hq)
 #
 # Greedy decode; the argmax is the GPU's. Prints "tok <id> <ms>" per generated token and the prompt's and decode's
 # times on the phone's clock.
@@ -48,6 +49,7 @@ def main() raises:
     print("device:", ctx.name())
     var t_load = now_ms()
     var model = Gemma4(ctx, String(args[1]), String(args[2]))
+    model.gemmq = getenv("GEMMA4_GEMM") == "q"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", context", model.CAP)
     var P = len(prompt)

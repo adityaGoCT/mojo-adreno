@@ -13,6 +13,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py lfm2        # build/android/lfm2/: lfm2/lfm2.mojo (LFM2.5-2.6B), lfm2_convert
   python3 android/build.py lfm2bench   # build/android/lfm2bench/: lfm2/bench_rows.mojo (few-row product kernels)
   python3 android/build.py lfm2q4h     # build/android/lfm2q4h/: lfm2/bench_q4h.mojo (fp16 cooperative-matrix int4 GEMM)
+  python3 android/build.py llamahq     # build/android/llamahq/: llama/bench_hq.mojo (the same, scales per 64, int4/int8/fp16)
   python3 android/build.py smempack    # build/android/smempack/: coopmat/smem_pack.mojo (fp16 tiles packed in shared memory)
   python3 android/build.py qwen3_4b    # build/android/qwen3_4b/: qwen3_4b/qwen3_4b.mojo (Qwen3-4B), qwen3_4b_convert
   python3 android/build.py qwen3_5_4b  # build/android/qwen3_5_4b/: qwen3_5_4b/qwen3_5_4b.mojo (Qwen3.5-4B), its convert
@@ -144,7 +145,7 @@ def llama():
     out = BUILD / "llama"
     out.mkdir(parents=True, exist_ok=True)
     mojo_object(ROOT / "llama/llama.mojo", out / "llama.o",
-                includes=[ROOT / "llama", ROOT / "llama/kernels", ROOT / "llama/kernels/prefill"])
+                includes=[ROOT / "llama", ROOT / "llama/kernels", ROOT / "llama/kernels/prefill", ROOT / "lfm2/kernels"])
     link(out, "llama", [out / "llama.o"])
 
 
@@ -180,7 +181,7 @@ def gemma4():
     out = BUILD / "gemma4"
     out.mkdir(parents=True, exist_ok=True)
     mojo_object(ROOT / "gemma4/gemma4.mojo", out / "gemma4.o",
-                includes=[ROOT / "gemma4", ROOT / "gemma4/kernels", ROOT / "llama/kernels/prefill"])
+                includes=[ROOT / "gemma4", ROOT / "gemma4/kernels", ROOT / "llama/kernels/prefill", ROOT / "lfm2/kernels"])
     link(out, "gemma4", [out / "gemma4.o"])
     sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-ffp-contract=off", "-o", out / "gemma4_convert",
        ROOT / "gemma4/convert.c")
@@ -212,6 +213,16 @@ def lfm2q4h():
     out.mkdir(parents=True, exist_ok=True)
     mojo_object(ROOT / "lfm2/bench_q4h.mojo", out / "bench_q4h.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels"])
     link(out, "bench_q4h", [out / "bench_q4h.o"])
+
+
+def llamahq():
+    """llama/bench_hq.mojo: llama's and gemma4's fp32 cooperative-matrix prefill products against lkh.gemm_hq (int4,
+    int8 or fp16 rows, a scale per 64, unpacked into fp16 shared memory) at Llama 3.2 1B's and Gemma 4 E2B's shapes."""
+    out = BUILD / "llamahq"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "llama/bench_hq.mojo", out / "bench_hq.o",
+                includes=[ROOT / "lfm2/kernels", ROOT / "llama/kernels/prefill", ROOT / "gemma4/kernels"])
+    link(out, "bench_hq", [out / "bench_hq.o"])
 
 
 def smempack():
@@ -273,7 +284,7 @@ def bonsai():
 
 def main():
     steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
-             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "smempack": smempack,
+             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "llamahq": llamahq, "smempack": smempack,
              "qwen3_4b": qwen3_4b, "qwen3_5_4b": qwen3_5_4b}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
