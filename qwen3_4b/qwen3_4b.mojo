@@ -14,6 +14,8 @@
 #     QWEN3_ATTN=qwen3k      decode attention with qwen3k's attn_scores + attn_values (a workgroup a query head's half
 #                            walking every position) instead of q4bk's chunks of 32 positions (attn_part, attn_combine)
 #     QWEN3_SKIP=a,b         decode leaves out these kinds of launch (qkv, attn, o, gu, down, norm, head): ablations
+#     QWEN3_GEMM=h           prefill projections on lkh's fp16 cooperative matrices (K chunks summed in fp32) for batches
+#                            of 256 rows or more, instead of lk.gemm_q4's fp32 ones
 #
 # Greedy decode; the argmax is the GPU's. Prints "tok <id> <ms>" per generated token, the prompt's and decode's times on
 # the phone's clock, and the process's memory (lfm2/pipette.py parses the same lines).
@@ -79,6 +81,7 @@ def main() raises:
     var t_load = now_ms()
     var model = Qwen3(ctx, String(args[1]), String(args[2]), Int(getenv("QWEN3_CTX", "2048")))
     model.skip = getenv("QWEN3_SKIP")
+    model.gemmh = getenv("QWEN3_GEMM") == "h"
     model.chunked = getenv("QWEN3_ATTN") != "qwen3k"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", context", model.CAP)

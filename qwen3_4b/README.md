@@ -128,6 +128,49 @@ still took 16-22 ms.
 Prefill profile (404 tokens, `QWEN3_PROFILE=prefill`; each launch waited for): gate/up 871 ms, down 506, attention
 351, q/k/v 278, o 239, norms 56, SiLU 48, q/k norm + RoPE 28, head 6.
 
+**Prefill on fp16 cooperative matrices** (`QWEN3_GEMM=h`, `../lfm2/kernels/lkh.mojo`). On the 840, `gemm_q4`'s fp32
+64 × 64 × 8 products run on the ALUs at the fp32 rate. The fp16 64 × 64 × 16 product has twice that ceiling (7.29
+TFLOP/s measured). The [adreno-gemm-worklog](https://github.com/adityaGoCT/adreno-gemm-worklog)'s Adreno 840 post found
+the layouts the 840's driver reads fastest. `lkh` applies them in four kernels:
+- `pack_x` writes X as fp16 64 × 16 tiles with K contiguous in each row (each lane loads its own row).
+- `deq_w` unpacks the int4 rows into fp16 16 × 64 tiles with N contiguous (the 840 stages B into shared memory along
+  N).
+- `gemm_h` multiplies them on fp16 cooperative matrices, straight from memory, with K split into chunks of 2,048.
+- `sum_parts` adds the chunks in fp32, because the 840 rounds every partial sum of an fp16 product to fp16.
+
+The int4 rows stay the only weights, shared with decode. Measured on a Galaxy Z Fold with `../lfm2/bench_q4h.mojo`
+(512 rows), in TFLOP/s:
+
+| shape | `gemm_q4` | `lkh` with `pack_x` + `deq_w` | `gemm_h` + `sum_parts` alone |
+|---|---|---|---|
+| q\|k\|v (6144 × 2560) | 2.17 | 3.51 | 5.29 |
+| o (2560 × 4096) | 1.71 | 3.00 | 5.14 |
+| gate\|up (19456 × 2560) | 2.15 | 3.58 | 5.49 |
+| down (2560 × 9728) | 1.89 | 2.83 | 5.64 |
+
+The products differ from `gemm_q4`'s by 1.1-1.6% of the largest output.
+
+End to end, the 404-token prompt takes 1,540 ms instead of 2,245 (262 tokens/s instead of 180, alternating runs on
+the same phone). The prefill profile:
+- q/k/v 179 ms (from 274), o 137 (236), gate/up 527 (870), down 334 (502).
+- Attention, unchanged at about 350 ms, is now the largest step.
+
+Against transformers on the same int4 weights, the long prompt's 64 tokens all match, with KL 2.6e-4 and logits within
+0.64; the fp32 products were within about 1e-4. Against bf16, 62 of 64 tokens agree, as for the int4 reference itself
+(KL 0.0567 against its 0.0538). Batches of fewer than 256 rows stay on `gemm_q4`: there, unpacking every weight
+(`pack_x` + `deq_w`, about 12.5 ms a layer) costs more than the faster products save. The 19-token prompt takes 506 ms
+either way.
+
+What holds it back is that unpacking pass. The products alone run at 5.1-5.6 TFLOP/s, about 2.6× `gemm_q4`. A GLSL
+version that unpacks the int4 weights into shared memory inside the product kept most of that. The fork's SPIR-V
+backend cannot do it yet:
+- it writes an fp16 shared array one half at a time (a 32-bit store too, as two halves);
+- the 840's driver places single fp16 elements of shared memory 4 bytes apart;
+- so half of a packed tile is never written.
+
+For the same reason, `deq_w` and `pack_x` write their fp16 output as 32-bit words: that took `deq_w` from 7.8 ms to
+1.5 ms on o's shape.
+
 ## Checks
 
 - `reference.py`: transformers' own `Qwen3DecoderLayer`, `Qwen3RotaryEmbedding`, `create_causal_mask` and
@@ -189,6 +232,8 @@ The program's switches (`qwen3_4b.mojo`):
 - `QWEN3_PROFILE=1|prefill`: time each kind of launch.
 - `QWEN3_ATTN=qwen3k`: the old decode attention.
 - `QWEN3_SKIP=qkv,attn,o,gu,down,norm,head`: leave kinds of launch out, for timing ablations.
+- `QWEN3_GEMM=h`: prefill projections on `../lfm2/kernels/lkh.mojo`'s fp16 cooperative matrices (batches of 256 rows
+  or more).
 
 ## Lessons
 
@@ -218,6 +263,9 @@ The program's switches (`qwen3_4b.mojo`):
 - **fp16 K/V cache**: half the attention's bytes at long contexts (5-6 ms → ~3 at 1,100 positions).
 - **Prefill padding**: a 64-row tile for the batch's last rows would take a 404-token prompt from 512 rows of work
   to 448.
+- **In-kernel int4 unpack for `QWEN3_GEMM=h`**: once the fork's backend keeps 32-bit stores to fp16 shared memory
+  packed, `deq_w`'s pass can go (about 450 ms of the 1,540). The same switch fits LFM2 and Qwen3.5, which share
+  `gemm_q4`.
 
 ## Files
 

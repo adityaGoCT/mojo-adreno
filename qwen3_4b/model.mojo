@@ -12,11 +12,17 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
 import lk
+import lkh
 import q4bk
 import qwen3k
 
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of gemm_q4's 128)
 comptime PAD = 128  # cache rows past the context: prefill's matrix-unit attention reads up to a block's 64-aligned end
+# QWEN3_GEMM=h: prefill projections on lkh's fp16 cooperative matrices instead of lk.gemm_q4: X packed into fp16 R tiles,
+# W's int4 rows unpacked into fp16 B tiles before each product, K in chunks of GCH added in fp32; a workgroup of 4 x 2
+# subgroups (2 x 2 when the padded rows are not a multiple of 256), one 64 x 64 tile each (lfm2/bench_q4h's best on the
+# Fold at Qwen3-4B's shapes); batches of fewer than 256 padded rows stay on lk.gemm_q4
+comptime GCH = 2048
 comptime HD = 128
 
 
@@ -60,6 +66,10 @@ struct Qwen3(Movable):
     var times: Dict[String, Float64]
     var mark: Float64
     var skip: String  # decode: kinds of launch left out (QWEN3_SKIP=qkv,attn,o,gu,down,norm,head: timing ablations)
+    var gemmh: Bool  # QWEN3_GEMM=h: prefill projections on lkh's kernels
+    var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k (F)
+    var wd: DeviceBuffer[DType.float16]  # lkh's B: the projection's weights in fp16 tiles (the largest: gate|up)
+    var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
 
     def __init__(out self, ctx: DeviceContext, dir: String, bin: String, cap: Int) raises:
         """dir: export.py's manifest.txt (q4/) with rope.f32 one level up; bin: convert.c's weight file; cap: the
@@ -114,6 +124,10 @@ struct Qwen3(Movable):
         self.times = Dict[String, Float64]()
         self.mark = 0
         self.skip = ""
+        self.gemmh = False
+        self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F)
+        self.wd = ctx.enqueue_create_buffer[DType.float16](2 * self.F * self.D)
+        self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * 2 * (2 * self.F))
         self.reset()
         self.load(dir, bin)
 
@@ -184,6 +198,28 @@ struct Qwen3(Movable):
     def gemm(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], n: Int, k: Int,
              rows: Int) raises:
         """y[rows, n] = x[rows, k] W^T (rows: a multiple of 128) on the matrix units."""
+        # Below 256 rows the int4 -> fp16 unpacking of every weight (about 12.5 ms a layer) costs more than the faster
+        # product saves: gemm_q4 there.
+        if self.gemmh and rows >= 256:
+            var chunks = groups(k, GCH)
+            if chunks * rows * n > PMAX * 4 * self.F or n * k > 2 * self.F * self.D:
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2), Int32(k),
+                                                  Int32(rows * k // 8), grid_dim=groups(rows * k // 8, 256), block_dim=256)
+            self.ctx.enqueue_function[lkh.deq_w](self.words[name + ".q"], self.halves[name + ".s"],
+                                                 self.wd.create_sub_buffer[DType.uint32](0, n * k // 2), Int32(n), Int32(k),
+                                                 Int32(n * k // 256), grid_dim=groups(n * k // 256, 256), block_dim=256)
+            if rows % 256 == 0:
+                self.ctx.enqueue_function[lkh.gemm_h[4, 2, 1, GCH]](
+                    self.xa, self.wd, self.part, Int32(n), Int32(k), Int32(rows),
+                    grid_dim=Dim(n // 128, rows // 256, chunks), block_dim=512)
+            else:
+                self.ctx.enqueue_function[lkh.gemm_h[2, 2, 1, GCH]](
+                    self.xa, self.wd, self.part, Int32(n), Int32(k), Int32(rows),
+                    grid_dim=Dim(n // 128, rows // 128, chunks), block_dim=256)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
+                                                     grid_dim=groups(rows * n // 8, 256), block_dim=256)
+            return
         self.ctx.enqueue_function[lk.gemm_q4](self.words[name + ".q"], self.halves[name + ".s"], x, y, Int64(n),
                                               Int64(k), grid_dim=Dim(n // 128, rows // 128), block_dim=256)
 
