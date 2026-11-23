@@ -60,7 +60,7 @@ class Cfg:
     act: str            # GLU activation: silu (SwiGLU) or gelu_tanh (GeGLU)
     tied: bool          # LM head = the token embedding
     inv_freq: np.ndarray  # RoPE frequencies (float32 [head_dim / 2]), any scaling applied
-    q_prescale: float = 1.0  # a power of two of the softmax scale folded into W_q, b_q: fa3 forms Q K^T in fp16
+    q_prescale: float = 1.0  # a power of two folded into W_q, b_q on top of the library's ABLASLT_Q_SCALE (none needed yet)
 
 
 def rope_inv_freq(base, dim):
@@ -178,9 +178,7 @@ class HFSource:
         self.cfg = Cfg(arch=self.arch, n_layers=c["num_hidden_layers"], dim=dim, n_heads=heads,
                        n_kv_heads=c.get("num_key_value_heads", heads), head_dim=hd, ffn=c["intermediate_size"],
                        vocab=c["vocab_size"], eps=float(np.float32(c["rms_norm_eps"])), act="silu",
-                       tied=bool(c.get("tie_word_embeddings", False)) or "output" not in self.t, inv_freq=inv,
-                       # Qwen2's K bias makes raw Q K^T reach 2.7e5 (Qwen2.5-1.5B, layer 0): past fp16
-                       q_prescale=1 / 16 if self.arch == "qwen2" else 1.0)
+                       tied=bool(c.get("tie_word_embeddings", False)) or "output" not in self.t, inv_freq=inv)
 
     HF = {"self_attn.q_proj": "attn_q", "self_attn.k_proj": "attn_k", "self_attn.v_proj": "attn_v",
           "self_attn.o_proj": "attn_output", "mlp.gate_proj": "ffn_gate", "mlp.up_proj": "ffn_up",

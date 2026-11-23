@@ -23,6 +23,15 @@ extern "C" {
 
 typedef struct ablasLt_ctx* ablasLtHandle;
 
+// Q tiles (ROPE_QKV's q, the attention operations' q) hold Q * ABLASLT_Q_SCALE. The attention kernels form Q K^T in
+// an fp16 accumulator, which raw products overflow (Qwen2's K bias: 2.7e5 in one layer of Qwen2.5-1.5B, so NaN):
+// with a power of two of the softmax scale folded into Q it holds about the scaled logits (overflow only past
+// softmax logits of ~9e4 with heads of 128, ~6.5e4 with 256), exactly, at no cost. An fp32 accumulator is blocked on
+// the 850: converting one to fp16 crashes the compiler (driver bug #3) and fp32 scores do not fit in 32 KB of shared
+// memory next to P. The attention functions take the usual softmax scale; callers that write Q tiles themselves
+// multiply Q by ABLASLT_Q_SCALE. The precision of the scores is unchanged (fp16, relative to the logit).
+#define ABLASLT_Q_SCALE (1.0f / 16)
+
 typedef enum { ABLASLT_F16 = 0, ABLASLT_F32 = 1, ABLASLT_Q4_0 = 2 } ablasLtType;
 
 typedef enum {
@@ -56,6 +65,7 @@ typedef enum {
   // W = q_proj ; k_proj ; v_proj rows ([(nh + 2 nkv) * 128, K]). RoPE (rotate_half pairs d, d + 64, head dim 128)
   // on Q and K, then the attention operands: q = Q tiles [nh][M, 128], k = K tiles [nkv][M, 128], vt = V^T tiles
   // [nkv][128, M] (ablasLtAttention's inputs). D unused. rope: fp32 [M][128], cos[64] | sin[64] per position.
+  // q holds Q * ABLASLT_Q_SCALE (see above), in both forms.
   //
   // The general form (any of head_dim, head_dim_valid, bias, kv_rows, kv_offset set, or no rope): heads of head_dim
   // (128 or 256; 0 = 128), of which W has head_dim_valid columns each (0 = all; fewer: SigLIP's heads of 72, written

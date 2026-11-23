@@ -166,8 +166,11 @@ RoPE). The rest was already there: heads of 128 (12 query, 2 KV: a group of 6), 
   the softmax scale afterwards. Qwen2's K bias (up to 316) makes the raw logits reach 274,656 in layer 0 (14,033 in
   layer 15; 190-2,463 elsewhere), past fp16's 65,504: inf, then NaN in the softmax. Activations elsewhere fit fp16
   (the SwiGLU output peaks at 3,969; the fp32 residual at 6,440).
-- **Fix, in the converter:** the qwen2 template folds 1/16 of the scale into W_q and b_q (a power of two: exact in
-  fp16 and Q4_0, and it commutes with RoPE) and passes scale x 16 to the attention. Raw logits now peak at 17,166.
+- **Fix:** 1/16 of the softmax scale folded into Q (a power of two: exact in fp16 and Q4_0, and it commutes with
+  RoPE), the attention given scale x 16. Raw logits then peak at 17,166. The phone result below was measured with
+  this done by the converter (W_q and b_q divided by 16, commit fbc0abb). It now lives in the library
+  (`ABLASLT_Q_SCALE`, `../lt/README.md`), for every caller, and the qwen2 template no longer does it: that version
+  has not run on a phone yet (the QDC session ended).
 - **Result** (`ref_hf.py`: transformers' Qwen2 in fp32 with the phone's Q4_0-dequantized weights, 512 tokens of the
   same blog text in Qwen's tokenizer):
 
@@ -222,9 +225,13 @@ metadata, not the tokenizer.
 
 ## Next
 
-- **`fa3`'s fp16 Q K^T accumulator** is a range risk for any model with large attention logits (Qwen2's K bias
-  here). The converter's power-of-two prescale works around it per template; an fp32 accumulator for S, or the
-  library pre-scaling Q itself, would remove it for every caller.
+- **On the next phone session:** `lt_test` (with its new bias + RoPE + large-logit check), `llama_lt` against its
+  earlier logits, and Qwen2.5-1.5B converted again without the template's prescale, to confirm the library's Q
+  pre-scale. Llama should match the earlier results to fp16 rounding of values below ~1e-3 (q / 16 can go
+  subnormal there); `llama_lt` and `plan_run` stay bit-identical to each other.
+- **fp32 attention scores** (for precision, not range: with a large common offset in the logits fp16 scores lose
+  the differences between keys): blocked by driver bug #3 and 32 KB of shared memory; possible by computing the
+  softmax from accumulator elements (lane = row on the 850) instead of through shared memory, to be probed there.
 - **Fix `ablasLtWeightPack`'s Q4_0 rounding** (`../lt/ablasLt.c`, `quantize_q4_0_row`): the product in its own
   statement, or `#pragma STDC FP_CONTRACT OFF`, so device-side packing equals ggml's.
 - **More templates from the same IR:** Qwen3 (QK-norm needs a per-head RMSNorm call), Gemma 3 (GeGLU, pre/post

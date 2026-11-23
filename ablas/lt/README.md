@@ -25,6 +25,16 @@ The last four rows came with π0 ([`../pi0`](../pi0)). Two more things changed u
 - **Heads of 256 use one accumulator per subgroup.** Two long-lived 64 x 64 accumulators per subgroup hang the 850
   (driver bug #4), so P V runs once per 128 output dims.
 
+**Q tiles are pre-scaled (2026-11-22, not yet run on a device).** The attention kernels form Q K^T in an fp16
+accumulator. Qwen2.5-1.5B's K bias drives raw products to 2.7e5 in one layer: inf, then NaN in the softmax
+(`../convert/README.md`). An fp32 accumulator is blocked on the 850: converting one to fp16 crashes the compiler
+(driver bug #3), and fp32 scores do not fit in 32 KB of shared memory next to P. So ROPE_QKV now writes Q times
+`ABLASLT_Q_SCALE` (1/16) and the attention functions divide their scale by it. A power of two: exact, free, and the
+scores overflow only past softmax logits of ~9e4 (heads of 128). Their precision is unchanged (fp16, relative to
+the logit). Only `rope_qk` and `qksplit` changed; `fa3` and `famask*` compile to the same SPIR-V. `lt_test` reads Q
+tiles divided by `ABLASLT_Q_SCALE` and has a new check: bias and RoPE together in ROPE_QKV's general form (Qwen2's
+case, untested until now), then causal attention with raw Q K^T up to ~2e5.
+
 `kernels/facombine_coalesced.comp` is a coalesced version of the key-split merge. It is **not tested on a device**
 and not in the kernel table: see [`../pi0/README.md`](../pi0/README.md#next).
 

@@ -6,12 +6,13 @@
 // over HD: dims d and d + HD/2 pair up; cs fp32 [M][HD] = cos[HD/2] | sin[HD/2] per row). Dims hdv..HD-1 are
 // written as zero (SigLIP's heads of 72 padded to 128). hdv and ncols multiples of 8.
 // Subgroup = the 16-dim chunk c (c < HD/32) and its partner c + HD/32 of one head, for 64 rows (lane = row).
-// Grid (nh + nkv, M / 64, HD / 128), 4 subgroups.
+// Grid (nh + nkv, M / 64, HD / 128), 4 subgroups. Q is written times qscale (ABLASLT_Q_SCALE, a power of two: the
+// attention's fp16 Q K^T stays in range).
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_KHR_shader_subgroup_basic : require
 layout(local_size_x = 256) in;
-layout(push_constant) uniform P { uint M, ncols, nh, hdv, HD, qrows, krows, koff, flags; } pc;
+layout(push_constant) uniform P { uint M, ncols, nh, hdv, HD, qrows, krows, koff, flags; float qscale; } pc;
 layout(std430, binding = 0) readonly buffer QKV { uvec4 qkv[]; };
 layout(std430, binding = 1) readonly buffer CS { vec4 cs[]; };
 layout(std430, binding = 2) writeonly buffer Q { uvec4 q[]; };
@@ -48,7 +49,8 @@ void main() {
       y2a = x2a * coa + x1a * sia; y2b = x2b * cob + x1b * sib;
     }
     uint o1 = (base + (d1 / 16u) * 1024u + d1 % 16u) / 8u, o2 = (base + (d2 / 16u) * 1024u + d2 % 16u) / 8u;
-    uvec4 w1 = uvec4(pk(y1a), pk(y1b)), w2 = uvec4(pk(y2a), pk(y2b));
+    float f = isq ? pc.qscale : 1.0;
+    uvec4 w1 = uvec4(pk(y1a * f), pk(y1b * f)), w2 = uvec4(pk(y2a * f), pk(y2b * f));
     if (isq) { q[o1] = w1; q[o2] = w2; } else { k[o1] = w1; k[o2] = w2; }
   }
 }

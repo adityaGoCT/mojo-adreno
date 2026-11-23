@@ -256,7 +256,8 @@ static ablas_status qkv_general(ablasLtHandle h, VkCommandBuffer cmd, const abla
   ablasLtBarrier(h, cmd);
   uint32_t flags = (desc->rope.buffer ? 1u : 0u) | (desc->bias.buffer ? 2u : 0u);
   ablas_buf bias = desc->bias.buffer ? desc->bias : qkv, rope = desc->rope.buffer ? desc->rope : qkv;
-  struct { uint32_t M, ncols, nh, hdv, HD, qrows, krows, koff, flags; } pq = {M, N, nh, hdv, hd, M, krows, koff, flags};
+  struct { uint32_t M, ncols, nh, hdv, HD, qrows, krows, koff, flags; float qscale; } pq =
+      {M, N, nh, hdv, hd, M, krows, koff, flags, ABLASLT_Q_SCALE};
   ablas_buf qb[5] = {qkv, rope, desc->q, desc->k, bias};
   if ((st = dispatch(h, cmd, LT_QKSPLIT, qb, 5, &pq, sizeof pq, nh + nkv, M / 64, hd / 128))) return st;
   struct { uint32_t M, ncols, vcol0, hdv, HD, krows, koff, flags; } pv = {M, N, (nh + nkv) * hdv, hdv, hd, krows, koff, flags};
@@ -352,7 +353,7 @@ ablas_status ablasLtMatmul(ablasLtHandle h, VkCommandBuffer cmd, const ablasLtMa
     if ((st = gemm(h, cmd, q4, M, N, K, Ap, W, qkv, none, ABLAS_EPI_NONE))) return st;
     snprintf(h->last, sizeof h->last, "%s + rope_qk + vtrans", ablas_last_kernel(h->ab));
     ablasLtBarrier(h, cmd);
-    struct { uint32_t M, ncols, nh; } prq = {M, N, nh};
+    struct { uint32_t M, ncols, nh; float qscale; } prq = {M, N, nh, ABLASLT_Q_SCALE};
     ablas_buf rb[4] = {qkv, desc->rope, desc->q, desc->k};
     if ((st = dispatch(h, cmd, LT_ROPE_QK, rb, 4, &prq, sizeof prq, nh + nkv, M / 64, 1))) return st;
     struct { uint32_t M, ncols, vcol0; } pvt = {M, N, (nh + nkv) * 128};
@@ -423,7 +424,7 @@ ablas_status ablasLtAttention(ablasLtHandle h, VkCommandBuffer cmd, uint32_t M, 
                               uint32_t n_kv_heads, float scale, ablas_buf q, ablas_buf k, ablas_buf vt,
                               ablas_buf out) {
   if (!M || M % 64 || !n_heads || !n_kv_heads || n_heads % n_kv_heads) return ABLAS_BAD_SHAPE;
-  struct { uint32_t M; float scale; uint32_t group; } pa = {M, scale, n_heads / n_kv_heads};
+  struct { uint32_t M; float scale; uint32_t group; } pa = {M, scale / ABLASLT_Q_SCALE, n_heads / n_kv_heads};  // q is Q * ABLASLT_Q_SCALE
   ablas_buf b[4] = {q, k, vt, out};
   ablas_status st = dispatch(h, cmd, LT_FA3, b, 4, &pa, sizeof pa, M / 64, n_heads, 1);
   if (st) return st;
@@ -477,7 +478,7 @@ ablas_status ablasLtAttentionMasked(ablasLtHandle h, VkCommandBuffer cmd, const 
     part = sub(d->workspace, 0, pbytes), st = sub(d->workspace, pbytes, (VkDeviceSize)ns * d->n_heads * qrows * 8);
   }
   struct { uint32_t nq, qrows, krows, kbatch, nkb, kvalid, sbase, scount, scausal; float scale; uint32_t group, outw, hdv, nsplit, bps; } pa =
-      {d->M, qrows, krows, kvb, nkb, kvalid, d->suffix_base, d->suffix_count, d->suffix_causal, d->scale,
+      {d->M, qrows, krows, kvb, nkb, kvalid, d->suffix_base, d->suffix_count, d->suffix_causal, d->scale / ABLASLT_Q_SCALE,
        d->n_heads / d->n_kv_heads, outw, hdv, ns, bps};
   ablas_buf b[5] = {q, k, vt, part, st};
   int kern = (hd == 256 ? LT_FAMASK256 : LT_FAMASK128) + (ns == 1 ? 0 : bps <= 2 ? 2 : 1);  // "", "s", "s1"

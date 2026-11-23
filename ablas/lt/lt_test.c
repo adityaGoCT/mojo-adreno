@@ -285,7 +285,7 @@ static double ref_masked(const am_t* a) {
           for (uint32_t e = 0; e < hd; ++e)
             acc += (double)hget(a->q, (size_t)z * qrows * hd + tidx(qrow, e, hd)) *
                    hget(a->k, (size_t)g * krows * hd + tidx(b * kvb + j, e, hd));
-          s[j] = acc * d->scale, m = fmax(m, s[j]);
+          s[j] = acc / ABLASLT_Q_SCALE * d->scale, m = fmax(m, s[j]);  // q tiles hold Q * ABLASLT_Q_SCALE
         }
         for (uint32_t j = 0; j < keys; ++j) sum += s[j] > -1e299 ? (s[j] = exp(s[j] - m)) : (s[j] = 0);
         for (uint32_t e = 0; e < hdv; ++e) {
@@ -337,7 +337,7 @@ static void test_gemma_qkv_attention(uint32_t P, uint32_t valid, uint32_t K) {
           const float* xh = x + h * hd;
           float ref = d < hd / 2 ? xh[d] * c[d] - xh[d + hd / 2] * c[hd / 2 + d]
                                  : xh[d] * c[d - hd / 2] + xh[d - hd / 2] * c[d];
-          float got = h < nh ? hget(qb, (size_t)h * M * hd + tidx(r, d, hd)) : hget(&k, tidx(r0 + r, d, hd));
+          float got = h < nh ? hget(qb, (size_t)h * M * hd + tidx(r, d, hd)) / ABLASLT_Q_SCALE : hget(&k, tidx(r0 + r, d, hd));
           err = fmax(err, fabs(got - ref)), mx = fmax(mx, fabs(ref));
         }
       for (uint32_t d = 0; d < hd; ++d)
@@ -399,7 +399,7 @@ static void test_vit_qkv_attention(uint32_t nb, uint32_t T, uint32_t nh, uint32_
       for (uint32_t d = 0; d < hd; ++d) {
         float rq = d < hdv ? x[h * hdv + d] : 0, rk = d < hdv ? x[(nh + h) * hdv + d] : 0,
               rv = d < hdv ? x[(2 * nh + h) * hdv + d] : 0;
-        err = fmax(err, fabs(hget(&q, (size_t)h * M * hd + tidx(r, d, hd)) - rq));
+        err = fmax(err, fabs(hget(&q, (size_t)h * M * hd + tidx(r, d, hd)) / ABLASLT_Q_SCALE - rq));
         err = fmax(err, fabs(hget(&k, (size_t)h * M * hd + tidx(r, d, hd)) - rk));
         err = fmax(err, fabs(hget(&vt, (size_t)h * hd * M + tidx(d, r, M)) - rv));
         mx = fmax(mx, fmax(fabs(rq), fmax(fabs(rk), fabs(rv))));
@@ -483,7 +483,7 @@ static void test_rope_attention(uint32_t M, uint32_t nh, uint32_t nkv, uint32_t 
         int isq = hd < nh;
         vbuf_t* t = isq ? &q : &k;
         uint32_t hh = isq ? hd : hd - nh;
-        float got = (float)((_Float16*)t->map)[(size_t)hh * M * 128 + tidx(r, d, 128)];
+        float got = (float)((_Float16*)t->map)[(size_t)hh * M * 128 + tidx(r, d, 128)] / (isq ? ABLASLT_Q_SCALE : 1.0f);
         err = fmax(err, fabs(got - ref)), mx = fmax(mx, fabs(ref));
         (isq ? Q : Kk)[((size_t)hh * M + r) * 128 + d] = got;
       }
@@ -521,6 +521,81 @@ static void test_rope_attention(uint32_t M, uint32_t nh, uint32_t nkv, uint32_t 
   }
   report("attention (causal, grouped KV heads)", !at.st && aerr / amx < 2e-2, aerr / amx);
   free(s), free(Q), free(Kk), free(qkv), free(we);
+}
+
+// ROPE_QKV's general form with bias and RoPE together (Qwen2), then causal attention whose raw Q K^T is past fp16:
+// key 0 is an attention sink (row 0 of A times 200), and the Q bias (+-300) points along its K on the dims RoPE
+// barely turns (56-63, 120-127), so the raw products reach ~1.5e5-3e5 while the softmax stays well conditioned.
+// With Q unscaled in the tiles, fa3's fp16 accumulator overflowed to inf and the softmax gave NaN (Qwen2.5-1.5B).
+static void test_qkv_bias_rope_sink(uint32_t M, uint32_t nh, uint32_t nkv, uint32_t K) {
+  const uint32_t hd = 128, N = (nh + 2 * nkv) * hd, grp = nh / nkv;
+  float *a = rmat(M, K, 1.0f), *w = rmat(N, K, 0.05f), *we, *bias = calloc(N, 4);
+  for (uint32_t k = 0; k < K; ++k) a[k] = h16(a[k] * 200);
+  vbuf_t A = tiles_of(a, M, K), W = weight(ABLASLT_F16, ABLASLT_WEIGHT_PLAIN, w, N, K, &we);
+  for (uint32_t h = 0; h < nh; ++h)
+    for (uint32_t d = 0; d < hd; ++d)
+      if (d % 64 >= 56) bias[h * hd + d] = dot(a, we + (size_t)(nh * hd + h / grp * hd + d) * K, K) >= 0 ? 300.0f : -300.0f;
+  vbuf_t Bi = vk_buffer(&v, (size_t)N * 4), cs = vk_buffer(&v, (size_t)M * 128 * 4),
+         q = vk_buffer(&v, (size_t)nh * M * hd * 2), k = vk_buffer(&v, (size_t)nkv * M * hd * 2),
+         vt = vk_buffer(&v, (size_t)nkv * hd * M * 2), O = vk_buffer(&v, (size_t)M * nh * hd * 2);
+  memcpy(Bi.map, bias, (size_t)N * 4);
+  for (uint32_t p = 0; p < M; ++p)
+    for (int i = 0; i < 64; ++i) {
+      float ang = p * powf(500000.0f, -i / 64.0f);
+      ((float*)cs.map)[p * 128 + i] = cosf(ang), ((float*)cs.map)[p * 128 + 64 + i] = sinf(ang);
+    }
+  mm_t m = {{ABLASLT_EPILOGUE_ROPE_QKV, .n_heads = nh, .n_kv_heads = nkv, .rope = B(&cs), .q = B(&q), .k = B(&k),
+             .vt = B(&vt), .bias = B(&Bi)},
+            B(&A), B(&W), {0}, {0}, {ABLASLT_F16, ABLASLT_ORDER_TILED, M, K}, {ABLASLT_F16, ABLASLT_ORDER_WEIGHT, N, K}, {0}};
+  vbuf_t ws = vk_buffer(&v, ablasLtMatmulWorkspaceSize(&m.desc, &m.a, &m.w, NULL));
+  m.ws = B(&ws);
+  run(rec_mm, &m);
+  // Q, K: bias, then RoPE, against the host (qkv rounded to fp16 as the GEMM writes it); Q tiles / ABLASLT_Q_SCALE
+  double err = 0, mx = 0;
+  for (uint32_t r = 0; r < M; ++r) {
+    float* x = malloc(N * 4);
+    for (uint32_t n = 0; n < N; ++n) x[n] = h16((float)dot(a + (size_t)r * K, we + (size_t)n * K, K)) + bias[n];
+    const float* c = (float*)cs.map + (size_t)r * 128;
+    for (uint32_t h = 0; h < nh + nkv; ++h)
+      for (uint32_t d = 0; d < hd; ++d) {
+        const float* xh = x + h * hd;
+        float ref = d < 64 ? xh[d] * c[d] - xh[d + 64] * c[64 + d] : xh[d] * c[d - 64] + xh[d - 64] * c[d];
+        float got = h < nh ? hget(&q, (size_t)h * M * hd + tidx(r, d, hd)) / ABLASLT_Q_SCALE
+                           : hget(&k, (size_t)(h - nh) * M * hd + tidx(r, d, hd));
+        err = fmax(err, fabs(got - ref)), mx = fmax(mx, fabs(ref));
+      }
+    free(x);
+  }
+  report("matmul ROPE_QKV general (bias and RoPE together, as Qwen2)", !m.st && err / mx < 2e-2, err / mx);
+  at_t at = {M, nh, nkv, &q, &k, &vt, &O};
+  run(rec_at, &at);
+  // causal reference from the GPU's own tiles
+  double aerr = 0, amx = 0, raw = 0, *s = malloc(M * sizeof *s);
+  int nan = 0;
+  for (uint32_t h = 0; h < nh; ++h)
+    for (uint32_t r = 0; r < M; ++r) {
+      double mxs = -1e300, sum = 0;
+      for (uint32_t j = 0; j <= r; ++j) {
+        double acc = 0;
+        for (uint32_t d = 0; d < hd; ++d)
+          acc += (double)hget(&q, (size_t)h * M * hd + tidx(r, d, hd)) / ABLASLT_Q_SCALE *
+                 hget(&k, (size_t)(h / grp) * M * hd + tidx(j, d, hd));
+        raw = fmax(raw, fabs(acc));
+        s[j] = acc / sqrt(128.0), mxs = fmax(mxs, s[j]);
+      }
+      for (uint32_t j = 0; j <= r; ++j) sum += (s[j] = exp(s[j] - mxs));
+      for (uint32_t d = 0; d < hd; ++d) {
+        double o = 0;
+        for (uint32_t j = 0; j <= r; ++j) o += s[j] / sum * hget(&vt, (size_t)(h / grp) * hd * M + tidx(d, j, M));
+        float got = tile_at(&O, r, h * hd + d, nh * hd);
+        nan |= got != got;
+        aerr = fmax(aerr, fabs(got - o)), amx = fmax(amx, fabs(o));
+      }
+    }
+  char name[128];
+  snprintf(name, sizeof name, "attention, raw Q K^T up to %.3g (fp16 max 65504)%s", raw, nan ? ", NaN" : "");
+  report(name, !at.st && !nan && raw > 65504 && aerr / amx < 2e-2, aerr / amx);
+  free(s), free(bias), free(we), free(a), free(w);
 }
 
 typedef struct { uint32_t M, D; vbuf_t *x, *ss, *w, *o, *ws; ablas_status st; } nm_t;
@@ -574,6 +649,7 @@ int main(int argc, char** argv) {
   test_residual(128, 512, 256);
   test_swiglu(128, 256, 256);
   test_rope_attention(128, 6, 2, 256);         // 3 query heads per KV head, as Llama 3.2 3B
+  test_qkv_bias_rope_sink(128, 6, 1, 128);     // Qwen2: q/k/v bias with RoPE, raw Q K^T past fp16
   test_rmsnorm(128, 512);
   // π0's operations (../pi0)
   test_geglu(128, 256, 256);
