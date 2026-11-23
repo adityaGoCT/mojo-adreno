@@ -1,6 +1,0 @@
-RESULT q4_0 M=512 best 196.78 ms (2601.9 tok/s), mean 202.00 ms; linear+head 2.94 TFLOP, attention 0.045 TFLOP (causal) -> 15.15 TFLOP/s overall   [waited 0s, start 41800mC, 5/20 clock samples at 1.45 GHz]
-RESULT q4_0 M=1024 best 424.95 ms (2409.7 tok/s), mean 426.33 ms; linear+head 5.82 TFLOP, attention 0.181 TFLOP (causal) -> 14.13 TFLOP/s overall   [waited 4s, start 43000mC, 7/24 clock samples at 1.45 GHz]
-RESULT q4_0 M=2048 best 910.89 ms (2248.3 tok/s), mean 928.63 ms; linear+head 11.60 TFLOP, attention 0.722 TFLOP (causal) -> 13.52 TFLOP/s overall   [waited 4s, start 44200mC, 3/39 clock samples at 1.45 GHz]
-RESULT fp16 M=512 best 220.86 ms (2318.2 tok/s), mean 223.15 ms; linear+head 2.94 TFLOP, attention 0.045 TFLOP (causal) -> 13.50 TFLOP/s overall   [waited 6s, start 45100mC, 6/46 clock samples at 1.45 GHz]
-RESULT fp16 M=1024 best 444.32 ms (2304.7 tok/s), mean 472.36 ms; linear+head 5.82 TFLOP, attention 0.181 TFLOP (causal) -> 13.51 TFLOP/s overall   [waited 8s, start 44800mC, 4/51 clock samples at 1.45 GHz]
-RESULT fp16 M=2048 best 955.70 ms (2142.9 tok/s), mean 966.81 ms; linear+head 11.60 TFLOP, attention 0.722 TFLOP (causal) -> 12.89 TFLOP/s overall   [waited 8s, start 45400mC, 7/67 clock samples at 1.45 GHz]

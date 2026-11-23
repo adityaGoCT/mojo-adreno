@@ -1,3 +1,0 @@
-copy sh_copy_rot 64 1 diag/copy.spv 1 1 1
-coop sh_copy 64 1 diag/coop.spv 1 1 1
-coopacc sh_copy 64 1 diag/coopacc.spv 1 1 1

@@ -1,6 +1,6 @@
 # How to Optimize a GEMM for a Phone GPU: an Adreno 850 Worklog
 
-*A companion to [Part 5: AdrenoBLAS](BLOG-ABLAS.md) · November 22, 2026 · Aditya*
+*A companion to [Part 5: AdrenoBLAS](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md) · November 22, 2026 · Aditya*
 
 In 2022 Simon Boehm wrote [a worklog](https://siboehm.com/articles/22/CUDA-MMM) of ten CUDA kernels for one matrix
 multiply, each a small change to the last, from a naive kernel to within a few percent of cuBLAS. It is still the
@@ -55,7 +55,7 @@ later).
 kernel once, and compares 1,024 sampled outputs with a double-precision dot product. Only then does it time
 the kernel with GPU timestamps: the best of 5 runs of back-to-back dispatches. M, N and K are compiled into each
 shader as constants. On this driver, passing them as Vulkan specialization constants instead makes some kernels
-2x slower ([Part 5](BLOG-ABLAS.md#specialization-constants-and-a-spir-v-rewrite) has the details).
+2x slower ([Part 5](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md#specialization-constants-and-a-spir-v-rewrite) has the details).
 
 **The phone gets hot.** Under sustained load the Adreno 850 throttles, and a throttled run can come out at half
 speed. So [`run.sh`](gemm_worklog/run.sh) waits before every kernel until the GPU is below 45 °C with no thermal
@@ -65,7 +65,7 @@ table reports the median of three interleaved rounds (each round runs every kern
 
 ## What the hardware offers
 
-[Part 5](BLOG-ABLAS.md#step-1-measure-the-peak-and-dont-trust-the-first-number) measured the peaks with
+[Part 5](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md#step-1-measure-the-peak-and-dont-trust-the-first-number) measured the peaks with
 microbenchmarks:
 
 | Adreno 850, measured | |
@@ -247,7 +247,7 @@ show is how narrow the good region is: halving BK, swapping BM and BN, or one st
 from 40% to 98%. **About 4.4 TFLOP/s is 53% of the fp16 ALU peak.** Getting further on the ALUs means fighting
 operand bandwidth: an 8 x 8 register tile at peak needs more bytes per clock than shared memory or the texture
 path deliver. On the Adreno 840, hand-written assembly that respects a register-bank rule bought about 10% more
-([Part 5](BLOG-ABLAS.md#the-840-through-turnip-assembly-works-and-wins-by-10)). On the 850 there is a much
+([Part 5](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md#the-840-through-turnip-assembly-works-and-wins-by-10)). On the 850 there is a much
 bigger lever.
 
 ## Kernel 10: the matrix units
@@ -345,7 +345,7 @@ symmetrically: 1 x 2 is slower than a single subgroup.
 
 ## Kernel 15: K contiguous inside each tile
 
-Kernel 14's compiled loop has **8 texture reads** for its two tile loads per K step. [Part 5](BLOG-ABLAS.md#step-9-read-the-loop-then-fix-the-tiles)
+Kernel 14's compiled loop has **8 texture reads** for its two tile loads per K step. [Part 5](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md#step-9-read-the-loop-then-fix-the-tiles)
 disassembled the same kind of loop and found narrow scalar loads. On the 850, each lane of the matrix unit holds
 one row of A and one column of B along K. In a column-major A tile, a lane's 16 halves sit 128 bytes apart, so the
 compiler fetches them piece by piece.
@@ -364,7 +364,7 @@ of the measured matrix peak.** With one subgroup per workgroup the same change g
 start to cost once four subgroups share a core.
 
 This kernel is the one AdrenoBLAS's tuner picked for this shape. Its generated version
-([`ablas/gen.py`](ablas/gen.py), configuration `gRC_w2x2_t1x1_n64`) runs at the same speed in this harness:
+([`ablas/gen.py`](https://github.com/adityaGoCT/adrenoblas/blob/main/ablas/gen.py), configuration `gRC_w2x2_t1x1_n64`) runs at the same speed in this harness:
 16.77 TFLOP/s.
 
 ## What's left
@@ -374,7 +374,7 @@ reaches 97% at 4096 x 4096 x 8192, where each output tile does twice the work pe
 workgroup writes its 32 KB of C at about the same moment, and nothing overlaps that burst. Persistent
 workgroups, the usual cure, ran 3x slower on this driver even though their inner loop compiles to the same
 instructions. The obvious remaining tricks either didn't help or hung the GPU
-([Part 5](BLOG-ABLAS.md#what-did-not-work) has the list):
+([Part 5](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md#what-did-not-work) has the list):
 - software prefetch;
 - K unrolling into two accumulators;
 - staging the tiles through shared memory;
@@ -411,6 +411,6 @@ One kernel by hand: `./bench spv/15_kminor_2x2.spv 4096 4096 4096 32 32 R C` (gr
 ## Further reading
 
 - Simon Boehm, [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM), the model for this post.
-- [Part 5: AdrenoBLAS](BLOG-ABLAS.md): how these kernels became a library, the eleven driver bugs found along the
+- [Part 5: AdrenoBLAS](https://github.com/adityaGoCT/adrenoblas/blob/main/BLOG-ABLAS.md): how these kernels became a library, the eleven driver bugs found along the
   way, the attempt at hand-written assembly, and Llama 3.2 3B prefill at 2,600 tokens/s on the same phone.
 - [`gemm_worklog/README.md`](gemm_worklog/README.md): the files, the layouts and the raw results.

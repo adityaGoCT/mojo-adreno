@@ -1,5 +1,0 @@
-PP  4096x 4096x 4096  gRC_w4x2_t1x1_n64_f16_k1            16.35 TFLOP/s    8408.3 us  err 4.3e-03 PASS  (first call 59 ms incl. pipeline)   [waited 0s, start 36200mC, 8/10 clock samples at 1.45 GHz]
-PP  4096x 4096x 8192  gRC_w4x2_t1x1_n64_f16_k1            16.99 TFLOP/s   16174.7 us  err 2.2e-03 PASS  (first call 51 ms incl. pipeline)   [waited 2s, start 38700mC, 8/11 clock samples at 1.45 GHz]
-PP  4096x 4096x16384  gRC_w4x2_t1x1_n64_f16_k1            16.82 TFLOP/s   32691.5 us  err 4.4e-03 PASS  (first call 57 ms incl. pipeline)   [waited 2s, start 40300mC, 5/12 clock samples at 1.45 GHz]
-PP  8192x 8192x 2048  gRC_w4x2_t1x1_n64_f16_k1            15.05 TFLOP/s   18263.7 us  err 3.2e-03 PASS  (first call 35 ms incl. pipeline)   [waited 2s, start 40900mC, 7/10 clock samples at 1.45 GHz]
-PP  8192x 8192x 4096  gRC_w4x2_t1x1_n64_f16_k1            15.74 TFLOP/s   34922.0 us  err 8.4e-04 PASS  (first call 70 ms incl. pipeline)   [waited 2s, start 41200mC, 8/10 clock samples at 1.45 GHz]

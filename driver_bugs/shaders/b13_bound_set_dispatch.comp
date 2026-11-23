@@ -1,6 +1,0 @@
-// Bug 13 helper (not a test): the "other" dispatch, recorded with its own pipeline layout (an ordinary descriptor
-// set at set 0, no push descriptors), like llama.cpp's ggml-vulkan kernels. It writes a scratch buffer only.
-#version 450
-layout(local_size_x = 64) in;
-layout(std430, binding = 0) buffer J { uint j[]; };
-void main() { j[gl_GlobalInvocationID.x] += 1u; }

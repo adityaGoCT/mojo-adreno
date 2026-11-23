@@ -1,6 +1,0 @@
-// A llama.cpp-style kernel for f32out_test (BOUND_SET_*): its own layout, an ordinary descriptor set, 128 bytes of push constants.
-#version 450
-layout(local_size_x = 64) in;
-layout(push_constant) uniform P { uint a[32]; } pc;
-layout(std430, binding = 0) buffer J { float j[]; };
-void main() { j[gl_GlobalInvocationID.x] = float(pc.a[gl_GlobalInvocationID.x % 32u]); }

@@ -25,7 +25,7 @@ run 0 : vision 529.9 ms, projector+embed 2.6 ms, prefix 2560.7 ms, 10 steps 778.
 With Gemma 2B's prefix on the phone's Hexagon NPU instead, a chunk takes **2.05–2.16 s instead of 3.6 s**, with the
 actions within 3.2e-3 of PyTorch's ([below](#the-prefix-on-the-hexagon-npu)). On an Adreno 850 phone, through
 AdrenoBLAS's matrix-unit kernels, the whole chunk runs on the GPU in **447 ms** (prefix 230 ms; random weights, timing
-only): [`../ablas/pi0`](../ablas/pi0). On a Snapdragon X2 Elite laptop, the same
+only): [`../ablas/pi0`](https://github.com/adityaGoCT/adrenoblas/tree/main/ablas/pi0). On a Snapdragon X2 Elite laptop, the same
 split takes **1.82–1.85 s instead of 3.1–3.9 s** ([below](#the-chunk-with-the-npu-prefix)).
 
 **The action chunk matches PyTorch fp32 within 1.1e-5.** The stated tolerance is 2e-5 absolute on the actions.

@@ -1,6 +1,6 @@
 """Llama 3.2 3B's prompt prefill on the Hexagon NPU (HTP) as ONNX graphs for ONNX Runtime's QNN execution provider,
 run by npu/graph.cpp (graph_tool chain). Written for the Adreno 850 phone (SM8975, Hexagon V85) to compare its NPU
-with AdrenoBLAS's prefill on its GPU (../ablas/llama3b).
+with AdrenoBLAS's prefill on its GPU (ablas/llama3b in github.com/adityaGoCT/adrenoblas).
 
 The weights are the F16 GGUF's own bytes (llama.cpp's convert_hf_to_gguf --outtype f16): every initializer is
 external data at the tensor's offset in the GGUF, which sits next to the graphs on the phone. So nothing but the
@@ -17,27 +17,30 @@ Graphs (graph.cpp feeds fp32 / int32 inputs and reads fp32 outputs):
   p<i>.onnx    layers of part i over R rows (positions 0 .. R - 1; a shorter prompt is padded at the end and the
                causal mask keeps the padding out of real rows). In: x [R, 3072]. Out: x_out [R, 3072].
   head.onnx    the final RMSNorm and the tied LM head in 4 chunks. In: x [R, 3072], sel [1] int32 (the last real
-               row). Out: hidden [R, 3072] (the normed rows, for checking against ../ablas/llama3b/ref.py), logits
+               row). Out: hidden [R, 3072] (the normed rows, for checking against AdrenoBLAS's ablas/llama3b/ref.py), logits
                [1, V] of row sel.
-No K/V outputs: the prefill is timed like ../ablas/llama3b's, which keeps no KV cache either.
+No K/V outputs: the prefill is timed like AdrenoBLAS's ablas/llama3b's, which keeps no KV cache either.
 
 Measured 2026-11-22 on a QDC SM8975 QRD (Hexagon V85, QNN 2.52, ONNX Runtime 1.29), 512 tokens, phone started at
 40 C: 299-305 ms (1,710 tok/s), 40-42 ms a part of 4 layers (~10 TFLOP/s, the HTP's fp16 matmul rate) and 14-17 ms
-for the head; logits cos 1.00000 and KL 0.0000 against ../ablas/llama3b/ref.py's fp32 reference. Compiling takes
+for the head; logits cos 1.00000 and KL 0.0000 against AdrenoBLAS's ablas/llama3b/ref.py's fp32 reference. Compiling takes
 ~9 min a part on the phone (run_llama3b.sh compile).
 
   PYTHONPATH=build/npu/pydeps:~/runix/llama.cpp/gguf-py .venv-iree312/bin/python npu/export_llama3b.py \\
       --gguf ~/runix/llama.cpp-gguf/Llama-3.2-3B-Instruct-F16.gguf --out build/npu/llama3b
-also writes x.bin (the embedding rows of ../ablas/llama3b/ref/tokens.bin's first R tokens) and sel.bin.
+also writes x.bin (the embedding rows of AdrenoBLAS's ablas/llama3b/ref/tokens.bin's first R tokens) and sel.bin.
 """
 
 import argparse
 import math
+import os
 import pathlib
 
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# AdrenoBLAS's Llama 3.2 3B prefill (weights, tokens): github.com/adityaGoCT/adrenoblas, checked out next to this repo
+ABLAS = pathlib.Path(os.environ.get("ADRENOBLAS", ROOT.parent / "adrenoblas")) / "ablas"
 D, L, H, KVH, HD, F, V = 3072, 28, 24, 8, 128, 8192, 128256
 EPS, NEG = 1e-5, -30000.0
 
@@ -154,8 +157,8 @@ def manifest(gguf_path):
 
 def rope_table(R):
     """cos / sin [R, 128] of position * inv_freq, each half the same (Llama 3's scaled frequencies, as
-    ../ablas/llama3b/export.py stored them: its weights' inv_freq)."""
-    wdir = ROOT / "ablas/llama3b/weights"
+    AdrenoBLAS's ablas/llama3b/export.py stored them: its weights' inv_freq)."""
+    wdir = ABLAS / "llama3b/weights"
     for line in (wdir / "llama3b_f16.idx").read_text().splitlines():
         name, off, nbytes = line.split()
         if name == "inv_freq":
@@ -230,7 +233,7 @@ def main():
         print(f"p{i}.onnx: layers {bounds[i]} .. {bounds[i + 1] - 1}", flush=True)
     head(man, a.gguf.name, a.rows).save(a.out / "head.onnx", "llama3b_head")
     # inputs: the embedding rows of the benchmark's tokens (fp16 GGUF rows as fp32), and the last row
-    tok = np.fromfile(ROOT / "ablas/llama3b/ref/tokens.bin", np.int32)[: a.rows]
+    tok = np.fromfile(ABLAS / "llama3b/ref/tokens.bin", np.int32)[: a.rows]
     off, _, shape, _ = man["token_embd.weight"]
     emb = np.memmap(a.gguf, np.float16, "r", offset=off, shape=tuple(shape))
     emb[tok].astype(np.float32).tofile(a.out / "x.bin")

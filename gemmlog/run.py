@@ -8,10 +8,11 @@ Results: results_<size>.json (merged: a rerun of a kernel replaces its entry).
 Before every kernel the phone must be at most 45 C on gpuss-0 with no thermal cap, and no llama.cpp process may
 be running (another session shares this phone).
 """
-import argparse, json, pathlib, subprocess, sys
+import argparse, json, os, pathlib, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "ablas"))
+# AdrenoBLAS (gen.py, sweep.py): a checkout of github.com/adityaGoCT/adrenoblas next to this one, or $ADRENOBLAS
+sys.path.insert(0, str(pathlib.Path(os.environ.get("ADRENOBLAS", HERE.parent.parent / "adrenoblas")) / "ablas"))
 sys.path.insert(0, str(HERE))
 import gen  # noqa: E402
 from sweep import make_shape  # noqa: E402
@@ -19,7 +20,7 @@ import alu_kernels  # noqa: E402
 
 BENCH = HERE.parent / "asm/peak/vk_gemm_bench"
 DEV = "/data/local/tmp/gemmlog"
-PICKS = {  # the best configurations from AdrenoBLAS's sweeps (ablas/results), re-measured here
+PICKS = {  # the best configurations from AdrenoBLAS's sweeps (adrenoblas: ablas/results), re-measured here
     "tn": ["gTN_w1x2_t1x2_n32_f16_k1", "gTN_w2x4_t1x2_n32_f16_k1", "gTN_w1x4_t1x2_n32_f16_k1"],
     "pp": ["gPP_w1x1_t1x2_n32_f16_k1", "gPP_w1x2_t1x2_n32_f16_k1"],
     "pq": ["gPQ_w2x2_t1x1_n64_f16_k1", "gPQ_w4x2_t1x1_n64_f16_k1", "gPQ_w2x4_t1x1_n64_f16_k1"],

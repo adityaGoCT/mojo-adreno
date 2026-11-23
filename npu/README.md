@@ -84,7 +84,7 @@ costs no token on this prompt. With int4 decode weights it flips the near-tie at
 ## Llama 3.2 3B on the Adreno 850 phone's NPU (Hexagon V85)
 
 The same question on a Qualcomm Device Cloud SM8975 QRD (Adreno 850, Hexagon **V85**; 2026-11-22), with Llama 3.2 3B
-and the 512 tokens of `../ablas/llama3b`'s benchmark:
+and the 512 tokens of AdrenoBLAS's `ablas/llama3b` benchmark:
 - `export_llama3b.py`: fp16 graphs that read the F16 GGUF's weights in place, 7 parts of 4 layers plus a head;
 - `run_llama3b.sh`: compile and chain.
 
@@ -93,7 +93,7 @@ V85 needs QNN 2.52 (Maven `qnn-runtime:2.52.0` has `libQnnHtpV85Skel.so`; 2.42 s
 | Llama 3.2 3B, 512-token prefill, same phone model | time | tokens/s | logits vs fp32 reference |
 |---|---|---|---|
 | **NPU (HTP V85), fp16** | **299-305 ms** | **1,710** | cos 1.00000, KL 0.0000 |
-| GPU, AdrenoBLAS (`../ablas/llama3b`), fp16 | 214-221 ms | 2,318-2,395 | cos 0.99994, KL 4e-4 |
+| GPU, AdrenoBLAS (`ablas/llama3b`), fp16 | 214-221 ms | 2,318-2,395 | cos 0.99994, KL 4e-4 |
 | GPU, AdrenoBLAS, Q4_0 | 197-198 ms | 2,586-2,602 | cos 0.99993, KL 5e-4 |
 
 - **On this phone the GPU now prefills 1.4-1.5x faster than the NPU.** On the S26 Ultra the 1B's NPU prefill was

@@ -3,7 +3,7 @@
   python3 alu_kernels.py M N K outdir   -> outdir/<kernel>.comp, .spv and manifest lines on stdout
 
 Bindings follow asm/peak/vk_bench.c: 0 = A, 1 = B, 2 = C. M, N and K are literals (#define), because the
-Adreno 850's driver runs specialization constants up to 2x slower (BLOG-ABLAS.md, Step 6).
+Adreno 850's driver runs specialization constants up to 2x slower (AdrenoBLAS's BLOG-ABLAS.md, Step 6).
 """
 import pathlib, subprocess, sys
 

@@ -7,7 +7,7 @@ PI0Pytorch compute the same thing on the GPU and in PyTorch.
 
 --random needs no checkpoint: the same graphs with random weights (recipe.txt's `rand` lines make pi0_f16 write a
 random gemma.bin; RMSNorm scales random around 1), and prefix.f32 / rope.f32 / lang_mask.i32 inputs for
-pi0npu_tool in the same shapes as pi0/reference.py's: for timing the architecture (../ablas/pi0 compares it with
+pi0npu_tool in the same shapes as pi0/reference.py's: for timing the architecture (AdrenoBLAS's ablas/pi0 compares it with
 the GPU).
 
 The graphs carry no matrices. Each one points into gemma.bin, an fp16 copy of Gemma's 18 layers that npu/pi0_f16.c

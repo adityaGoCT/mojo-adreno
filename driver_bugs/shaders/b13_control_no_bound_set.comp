@@ -1,7 +1,0 @@
-// Bug 13 control: the same three push-descriptor dispatches, without the ordinary-descriptor-set dispatches between
-// them. Expected and observed: buffer t holds t * 65536 + i.
-#version 450
-layout(local_size_x = 64) in;
-layout(push_constant) uniform P { uint tag; } pc;
-layout(std430, binding = 0) buffer O { uint o[]; };
-void main() { o[gl_GlobalInvocationID.x] += pc.tag * 65536u + gl_GlobalInvocationID.x; }

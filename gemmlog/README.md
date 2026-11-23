@@ -24,7 +24,7 @@ Raw results: `results_4096.json` (best of 5 runs each; `t0` = GPU temperature at
 
 ```
 alu_kernels.py   kernels 1-6 (GLSL, generated per shape: python3 alu_kernels.py M N K outdir)
-run.py           builds every kernel (7-12 via ../ablas/gen.py), pushes, runs one process per kernel, cooled
+run.py           builds every kernel (7-12 via AdrenoBLAS's ablas/gen.py), pushes, runs one process per kernel, cooled
 results_4096.json
 k4096/           generated GLSL and SPIR-V (not needed to reproduce)
 ```
@@ -37,5 +37,5 @@ python3 run.py alu nn tn pp pq rc k1slice f16loose
 ```
 
 The harness is `../asm/peak/vk_bench.c` (built as `../asm/peak/vk_gemm_bench`); shapes and references come from
-`../ablas/sweep.py`'s `make_shape` (operand layouts N, T, P, Q, R, C). The runner waits for any `llama-*` or `bench`
+AdrenoBLAS's `ablas/sweep.py` `make_shape` (operand layouts N, T, P, Q, R, C). The runner waits for any `llama-*` or `bench`
 process on the phone before each kernel, so it can share the phone with other benchmarks.

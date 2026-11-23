@@ -1,4 +1,0 @@
-u32 sh_copy 64 1 diag/u32.spv 1 1 1
-f16 sh_copy 64 1 diag/f16.spv 1 1 1
-f16v sh_copy 64 1 diag/f16v.spv 1 1 1
-coopstage sh_copy 64 1 diag/coopstage.spv 1 1 1

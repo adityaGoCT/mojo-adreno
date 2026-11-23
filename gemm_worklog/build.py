@@ -52,8 +52,9 @@ for name, src, d, gx, gy, la, lb, chunks in runs:
     if r.returncode:
         print(name, "compile error:", r.stderr[:300]); continue
     lines.append(f"{name} {gx} {gy} {la} {lb} {chunks}")
-# AdrenoBLAS's own generated kernel for this shape (ablas/gen.py), as a cross-check of kernel 15
-sys.path.insert(0, str(HERE.parent / "ablas"))
+# AdrenoBLAS's own generated kernel for this shape (its ablas/gen.py: a checkout of github.com/adityaGoCT/adrenoblas
+# next to this one, or $ADRENOBLAS), as a cross-check of kernel 15
+sys.path.insert(0, str(pathlib.Path(os.environ.get("ADRENOBLAS", HERE.parent.parent / "adrenoblas")) / "ablas"))
 import gen
 cfg = dict(la="R", lb="C", wm=2, wn=2, tm=1, tn=1, nt=64, acc="f16", ku=1, pf=0, sw=0, sa=0, sb=0, kc=0, dual=0)
 (out / "ablas_gen.comp").write_text(gen.glsl(cfg, M, N, K))
