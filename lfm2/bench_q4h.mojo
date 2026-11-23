@@ -3,9 +3,10 @@
 # fp16 cooperative matrices from memory, K in chunks; sum_parts: the chunks added in fp32). At Qwen3-4B's shapes and a
 # 512-row prompt: q|k|v (6144 x 2560), o (2560 x 4096), gate|up (19456 x 2560), down (2560 x 9728). Each variant is
 # checked against gemm_q4's output (the largest difference over the largest output, and NaNs) and timed with and
-# without pack_x and deq_w.
+# without pack_x and deq_w. Variants 9 on are lkh.gemm_hq, which unpacks the int4 rows into shared memory inside the
+# product (no deq_w; "without" leaves out pack_x).
 #
-#   bench_q4h [reps] [shape] [variant]     shape: 0 q|k|v, 1 o, 2 gate|up, 3 down; variant: 0-8; all by default
+#   bench_q4h [reps] [shape] [variant]     shape: 0 q|k|v, 1 o, 2 gate|up, 3 down; variant: 0-24; all by default
 from std.sys import argv
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
@@ -53,7 +54,20 @@ def h[WM: Int, WN: Int, TN: Int, CH: Int](ctx: DeviceContext, b: Bufs, n: Int, k
                                         block_dim=256)
 
 
-comptime NV = 9
+def hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool](ctx: DeviceContext, b: Bufs, n: Int, k: Int,
+                                                                   prep: Bool) raises:
+    if prep:
+        ctx.enqueue_function[lkh.pack_x](b.x, b.xa.create_sub_buffer[DType.uint32](0, ROWS * k // 2), Int32(k), Int32(ROWS * k // 8),
+                                         grid_dim=(ROWS * k // 8 + 255) // 256, block_dim=256)
+    var chunks = (k + CH - 1) // CH
+    ctx.enqueue_function[lkh.gemm_hq[WM, WN, CH, BKS, RG, ALONG_K]](
+        b.xa, b.wq, b.ws, b.part, Int32(n), Int32(k), Int32(ROWS), grid_dim=Dim(n // (64 * WN), ROWS // (64 * WM), chunks),
+        block_dim=64 * WM * WN)
+    ctx.enqueue_function[lkh.sum_parts](b.part, b.y, Int32(ROWS * n), Int32(chunks), grid_dim=(ROWS * n // 8 + 255) // 256,
+                                        block_dim=256)
+
+
+comptime NV = 25
 
 
 def launch(ctx: DeviceContext, v: Int, b: Bufs, n: Int, k: Int, prep: Bool) raises:
@@ -76,11 +90,49 @@ def launch(ctx: DeviceContext, v: Int, b: Bufs, n: Int, k: Int, prep: Bool) rais
         h[2, 2, 2, 1024](ctx, b, n, k, prep)
     elif v == 8:
         h[4, 1, 2, 2048](ctx, b, n, k, prep)
+    elif v == 9:
+        hq[4, 1, 2048, 64, 4, True](ctx, b, n, k, prep)
+    elif v == 10:
+        hq[4, 1, 2048, 64, 4, False](ctx, b, n, k, prep)
+    elif v == 11:
+        hq[4, 1, 2048, 64, 2, True](ctx, b, n, k, prep)
+    elif v == 12:
+        hq[4, 1, 2048, 64, 8, True](ctx, b, n, k, prep)
+    elif v == 13:
+        hq[4, 1, 2048, 32, 4, True](ctx, b, n, k, prep)
+    elif v == 14:
+        hq[4, 2, 2048, 64, 2, True](ctx, b, n, k, prep)
+    elif v == 15:
+        hq[4, 2, 2048, 32, 4, True](ctx, b, n, k, prep)
+    elif v == 16:
+        hq[2, 2, 2048, 64, 2, True](ctx, b, n, k, prep)
+    elif v == 17:
+        hq[2, 2, 2048, 16, 2, True](ctx, b, n, k, prep)
+    elif v == 18:
+        hq[4, 1, 2048, 32, 4, False](ctx, b, n, k, prep)
+    elif v == 19:
+        hq[4, 1, 2048, 128, 4, False](ctx, b, n, k, prep)
+    elif v == 20:
+        hq[4, 1, 2048, 64, 2, False](ctx, b, n, k, prep)
+    elif v == 21:
+        hq[4, 1, 2048, 64, 8, False](ctx, b, n, k, prep)
+    elif v == 22:
+        hq[2, 1, 2048, 64, 4, False](ctx, b, n, k, prep)
+    elif v == 23:
+        hq[8, 1, 2048, 64, 4, False](ctx, b, n, k, prep)
+    elif v == 24:
+        hq[4, 1, 1024, 64, 4, False](ctx, b, n, k, prep)
 
 
 def label(v: Int) -> String:
     var names: List[String] = ["lk.gemm_q4 (fp32 coopmat)", "h w2x2 t1 c2048", "h w2x2 t2 c2048", "h w2x4 t1 c2048",
-                               "h w4x2 t1 c2048", "h w1x2 t2 c2048", "h w2x2 t1 c1024", "h w2x2 t2 c1024", "h w4x1 t2 c2048"]
+                               "h w4x2 t1 c2048", "h w1x2 t2 c2048", "h w2x2 t1 c1024", "h w2x2 t2 c1024", "h w4x1 t2 c2048",
+                               "hq w4x1 k64 rg4 alongK", "hq w4x1 k64 rg4 alongN", "hq w4x1 k64 rg2 alongK",
+                               "hq w4x1 k64 rg8 alongK", "hq w4x1 k32 rg4 alongK", "hq w4x2 k64 rg2 alongK",
+                               "hq w4x2 k32 rg4 alongK", "hq w2x2 k64 rg2 alongK", "hq w2x2 k16 rg2 alongK",
+                               "hq w4x1 k32 rg4 alongN", "hq w4x1 k128 rg4 alongN", "hq w4x1 k64 rg2 alongN",
+                               "hq w4x1 k64 rg8 alongN", "hq w2x1 k64 rg4 alongN", "hq w8x1 k64 rg4 alongN",
+                               "hq w4x1 c1024 k64 rg4 alongN"]
     return names[v]
 
 

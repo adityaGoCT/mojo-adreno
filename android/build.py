@@ -13,6 +13,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py lfm2        # build/android/lfm2/: lfm2/lfm2.mojo (LFM2.5-2.6B), lfm2_convert
   python3 android/build.py lfm2bench   # build/android/lfm2bench/: lfm2/bench_rows.mojo (few-row product kernels)
   python3 android/build.py lfm2q4h     # build/android/lfm2q4h/: lfm2/bench_q4h.mojo (fp16 cooperative-matrix int4 GEMM)
+  python3 android/build.py smempack    # build/android/smempack/: coopmat/smem_pack.mojo (fp16 tiles packed in shared memory)
   python3 android/build.py qwen3_4b    # build/android/qwen3_4b/: qwen3_4b/qwen3_4b.mojo (Qwen3-4B), qwen3_4b_convert
   python3 android/build.py qwen3_5_4b  # build/android/qwen3_5_4b/: qwen3_5_4b/qwen3_5_4b.mojo (Qwen3.5-4B), its convert
 
@@ -213,6 +214,14 @@ def lfm2q4h():
     link(out, "bench_q4h", [out / "bench_q4h.o"])
 
 
+def smempack():
+    """coopmat/smem_pack.mojo: fp16 tiles written to shared memory by packed stores and read by cooperative loads."""
+    out = BUILD / "smempack"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "coopmat/smem_pack.mojo", out / "smem_pack.o")
+    link(out, "smem_pack", [out / "smem_pack.o"])
+
+
 def qwen3_4b():
     """qwen3_4b/qwen3_4b.mojo: qwen3_4b/model.mojo's forward pass on lfm2's int4 kernels, qwen3's attention kernels,
     gemma4's prefill attention and qwen3_4b/kernels; and qwen3_4b_convert (qwen3_4b/convert.c), which writes the
@@ -264,7 +273,7 @@ def bonsai():
 
 def main():
     steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
-             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h,
+             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "smempack": smempack,
              "qwen3_4b": qwen3_4b, "qwen3_5_4b": qwen3_5_4b}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:

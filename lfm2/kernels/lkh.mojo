@@ -8,17 +8,18 @@
 #      (pack_x writes them from lk's fp32 rows).
 #   B  W^T in fp16 as 16 x 64 tiles with N contiguous, the K tiles of a column block adjacent, [n/64][k/16][16][64]
 #      (deq_w writes them from lk's int4 rows before each product, so the int4 rows stay the only copy of the weights,
-#      shared with decode's gemv_q4).
+#      shared with decode's gemv_q4); or gemm_hq unpacks lk's int4 rows into shared memory inside the product, B rows
+#      along N, a K step at a time, with no fp16 copy of W at all.
 # The 840 rounds every partial sum of an fp16 cooperative product to fp16 (2.7% error over 4096 products), so K is split
 # into chunks of CH: grid z = chunk, each writing its fp16 partial C, and sum_parts adds them in fp32.
 #
-# B goes through global memory, not shared memory, because this backend cannot build an fp16 tile in shared memory for a
-# cooperative load on the 840: it stores fp16 shared arrays one element at a time (a uint32 store too, as two halves),
-# and the 840's driver places single fp16 elements of shared memory 4 bytes apart, so only every other packed element
-# can be written (the odd columns of B came out as NaN). In GLSL, with f16vec4 shared arrays, unpacking int4 into shared
-# memory inside the product works (5.0-5.7 TFLOP/s at these shapes).
-from std.memory import bitcast
-from max.gpu import block_idx, global_idx, thread_idx
+# gemm_hq needs the fork's SPIR-V backend from 2026-11-23 or later: before, it addressed shared arrays with
+# OpInBoundsAccessChain, which the 840's driver resolves for 16-bit types as if each element took twice its size (every
+# other half of a tile written with plain stores went missing); it now emits OpAccessChain, and types a shared array of
+# halves written 8 bytes at a time as <4 x half> (one store per 4 halves). See coopmat/smem_pack.mojo.
+from std.memory import bitcast, stack_allocation
+from max.gpu import barrier, block_idx, global_idx, thread_idx
+from max.gpu.memory import AddressSpace
 from max.gpu.compute.arch.mma_spirv import CoopMatrix, MATRIX_A, MATRIX_B, ACCUMULATOR
 
 comptime F32 = UnsafePointer[Float32, MutAnyOrigin]
@@ -96,6 +97,64 @@ def gemm_h[WM: Int, WN: Int, TN: Int, CH: Int](xa: F16, wd: F16, part: F16, n: I
     c0.store(out, nn)
     comptime if TN == 2:
         c1.store(out + 64, nn)
+
+
+def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool](
+    xa: F16, wq: U32, ws: F16, part: F16, n: Int32, k: Int32, rows: Int32
+):
+    """part[z] (rows x n, fp16) = X[:, z CH .. z CH + CH] W[:, same]^T with W unpacked from lk's int4 rows inside the
+    product: a workgroup of WM x WN subgroups, each computing 64 x 64 of C, unpacks the workgroup's BKS x 64 WN slice of
+    W^T into shared memory (fp16, rows along N) a K step at a time, then each subgroup multiplies its A tiles (loaded
+    from xa's R tiles) by its 16 x 64 B tiles from shared memory. An unpack unit is RG rows of W x 8 k (one word a row):
+    RG fp16 scale and word loads, then 8 stores of RG halves (one k each, along N). Neighbouring threads take
+    neighbouring words of the same rows (ALONG_K: the loads coalesce) or neighbouring rows (the stores do). Launch with
+    grid (n / (64 WN), rows / (64 WM), ceil(k / CH)) and 64 WM WN threads; CH and k multiples of BKS."""
+    comptime BN = 64 * WN
+    comptime T = 64 * WM * WN
+    comptime KW = BKS // 8  # words of a row a K step
+    comptime UNITS = (BN // RG) * KW
+    comptime PER = (UNITS + T - 1) // T
+    var sb = stack_allocation[BKS * BN, DType.float16, address_space=AddressSpace.SHARED]()
+    var kk = Int(k)
+    var nn = Int(n)
+    var t = Int(thread_idx.x)
+    var sg = t // 64
+    var row0 = Int(block_idx.y) * 64 * WM + (sg // WN) * 64
+    var colw = Int(block_idx.x) * BN
+    var sc = (sg % WN) * 64
+    var k_lo = Int(block_idx.z) * CH
+    var k_hi = min(k_lo + CH, kk)
+    var abase = xa + (row0 // 64) * (kk // 16) * 1024
+    var c0 = CoopMatrix[DType.float16, 64, 64, ACCUMULATOR].zero()
+    for kb in range(k_lo, k_hi, BKS):
+        comptime for i in range(PER):
+            var u = i * T + t
+            if UNITS % T == 0 or u < UNITS:
+                var kw: Int
+                var rg: Int
+                comptime if ALONG_K:
+                    kw = u % KW
+                    rg = u // KW
+                else:
+                    rg = u % (BN // RG)
+                    kw = u // (BN // RG)
+                var r = colw + rg * RG  # the first row of W (column of C)
+                var kx = kb + 8 * kw
+                var w = SIMD[DType.uint32, RG]()
+                var sv = SIMD[DType.float16, RG]()
+                comptime for j in range(RG):
+                    w[j] = wq[(r + j) * (kk // 8) + kx // 8]
+                    sv[j] = ws[(r + j) * (kk // G) + kx // G]
+                comptime for e in range(8):
+                    var q = (((w >> UInt32(4 * e)) & 15) ^ 8).cast[DType.int32]() - 8
+                    sb.unsafe_store((8 * kw + e) * BN + rg * RG, q.cast[DType.float16]() * sv)
+        barrier()
+        comptime for s in range(BKS // 16):
+            var at = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(abase + (kb // 16 + s) * 1024, 16)
+            var bt = CoopMatrix[DType.float16, 16, 64, MATRIX_B].load(sb.unsafe_offset(16 * s * BN + sc), BN)
+            c0 = at.multiply_add(bt, c0)
+        barrier()
+    c0.store(part + Int(block_idx.z) * Int(rows) * nn + row0 * nn + colw + sc, nn)
 
 
 def sum_parts(part: F16, y: F32, total: Int32, chunks: Int32):

@@ -22,6 +22,8 @@ comptime PAD = 128  # cache rows past the context: prefill's matrix-unit attenti
 # W's int4 rows unpacked into fp16 B tiles before each product, K in chunks of GCH added in fp32; a workgroup of 4 x 2
 # subgroups (2 x 2 when the padded rows are not a multiple of 256), one 64 x 64 tile each (lfm2/bench_q4h's best on the
 # Fold at Qwen3-4B's shapes); batches of fewer than 256 padded rows stay on lk.gemm_q4
+# QWEN3_GEMM=q: the same, but lkh.gemm_hq unpacks the int4 rows into shared memory inside the product (no deq_w): 2 x 1
+# subgroups, 64-deep K steps, 4 rows of W per unpack unit, threads along N (lfm2/bench_q4h's best on the Fold)
 comptime GCH = 2048
 comptime HD = 128
 
@@ -67,6 +69,7 @@ struct Qwen3(Movable):
     var mark: Float64
     var skip: String  # decode: kinds of launch left out (QWEN3_SKIP=qkv,attn,o,gu,down,norm,head: timing ablations)
     var gemmh: Bool  # QWEN3_GEMM=h: prefill projections on lkh's kernels
+    var gemmq: Bool  # QWEN3_GEMM=q: with lkh.gemm_hq (int4 unpacked inside the product)
     var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k (F)
     var wd: DeviceBuffer[DType.float16]  # lkh's B: the projection's weights in fp16 tiles (the largest: gate|up)
     var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
@@ -125,6 +128,7 @@ struct Qwen3(Movable):
         self.mark = 0
         self.skip = ""
         self.gemmh = False
+        self.gemmq = False
         self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F)
         self.wd = ctx.enqueue_create_buffer[DType.float16](2 * self.F * self.D)
         self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * 2 * (2 * self.F))
@@ -200,6 +204,18 @@ struct Qwen3(Movable):
         """y[rows, n] = x[rows, k] W^T (rows: a multiple of 128) on the matrix units."""
         # Below 256 rows the int4 -> fp16 unpacking of every weight (about 12.5 ms a layer) costs more than the faster
         # product saves: gemm_q4 there.
+        if self.gemmq and rows >= 256:
+            var chunks = groups(k, GCH)
+            if chunks * rows * n > PMAX * 4 * self.F:
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2), Int32(k),
+                                                  Int32(rows * k // 8), grid_dim=groups(rows * k // 8, 256), block_dim=256)
+            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
+                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k), Int32(rows),
+                grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
+                                                     grid_dim=groups(rows * n // 8, 256), block_dim=256)
+            return
         if self.gemmh and rows >= 256:
             var chunks = groups(k, GCH)
             if chunks * rows * n > PMAX * 4 * self.F or n * k > 2 * self.F * self.D:

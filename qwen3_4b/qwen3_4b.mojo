@@ -82,6 +82,7 @@ def main() raises:
     var model = Qwen3(ctx, String(args[1]), String(args[2]), Int(getenv("QWEN3_CTX", "2048")))
     model.skip = getenv("QWEN3_SKIP")
     model.gemmh = getenv("QWEN3_GEMM") == "h"
+    model.gemmq = getenv("QWEN3_GEMM") == "q"
     model.chunked = getenv("QWEN3_ATTN") != "qwen3k"
     print("weights:", round(Float64(model.bytes) / 1e9, 3), "GB in", round((now_ms() - t_load) / 1e3, 1), "s;",
           model.L, "layers, hidden", model.D, ", context", model.CAP)

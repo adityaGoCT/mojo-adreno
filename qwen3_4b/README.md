@@ -161,15 +161,20 @@ Against transformers on the same int4 weights, the long prompt's 64 tokens all m
 (`pack_x` + `deq_w`, about 12.5 ms a layer) costs more than the faster products save. The 19-token prompt takes 506 ms
 either way.
 
-What holds it back is that unpacking pass. The products alone run at 5.1-5.6 TFLOP/s, about 2.6× `gemm_q4`. A GLSL
-version that unpacks the int4 weights into shared memory inside the product kept most of that. The fork's SPIR-V
-backend cannot do it yet:
-- it writes an fp16 shared array one half at a time (a 32-bit store too, as two halves);
-- the 840's driver places single fp16 elements of shared memory 4 bytes apart;
-- so half of a packed tile is never written.
+What holds it back is that unpacking pass. The products alone run at 5.1-5.6 TFLOP/s, about 2.6× `gemm_q4`.
+`QWEN3_GEMM=q` drops it: `lkh.gemm_hq` unpacks the int4 rows into shared memory inside the product, a 64-deep K step at
+a time (2 x 1 subgroups, 4 rows of W per unpack unit, 8-byte stores along N). That needs the fork's SPIR-V backend from
+2026-11-23 on. Before, it addressed shared arrays with `OpInBoundsAccessChain`, which the 840's driver resolves for
+16-bit types as if each element took twice its size, so half of a packed tile was never written. It now emits
+`OpAccessChain` for them, and types an fp16 tile written 8 bytes at a time as `<4 x half>`.
 
-For the same reason, `deq_w` and `pack_x` write their fp16 output as 32-bit words: that took `deq_w` from 7.8 ms to
-1.5 ms on o's shape.
+At 512 rows (`lfm2/bench_q4h`, with `pack_x`) `gemm_hq` takes 3.3 / 2.4 / 9.6 / 7.5-8.3 ms on q|k|v / o / gate|up /
+down, against 4.6 / 3.5 / 14.2 / 8.2-9.0 for `deq_w` + `gemm_h` and 7.6 / 6.2 / 24.6 / 13.9 for `gemm_q4`. The 404-token
+prompt takes 1262 ms (320 tokens/s), against 1571 ms with `QWEN3_GEMM=h` and 2272 ms with `gemm_q4`. Its logits are
+bit-identical to `QWEN3_GEMM=h`'s: the same fp16 weights reach the same products.
+
+`deq_w` and `pack_x` write their fp16 output as 32-bit words because the backend splits vector stores to buffers into
+single elements: that took `deq_w` from 7.8 ms to 1.5 ms on o's shape.
 
 ## Checks
 
@@ -234,6 +239,8 @@ The program's switches (`qwen3_4b.mojo`):
 - `QWEN3_SKIP=qkv,attn,o,gu,down,norm,head`: leave kinds of launch out, for timing ablations.
 - `QWEN3_GEMM=h`: prefill projections on `../lfm2/kernels/lkh.mojo`'s fp16 cooperative matrices (batches of 256 rows
   or more).
+- `QWEN3_GEMM=q`: the same, with the int4 weights unpacked into shared memory inside the product (`lkh.gemm_hq`; needs
+  the fork's backend from 2026-11-23 on).
 
 ## Lessons
 
@@ -263,9 +270,8 @@ The program's switches (`qwen3_4b.mojo`):
 - **fp16 K/V cache**: half the attention's bytes at long contexts (5-6 ms → ~3 at 1,100 positions).
 - **Prefill padding**: a 64-row tile for the batch's last rows would take a 404-token prompt from 512 rows of work
   to 448.
-- **In-kernel int4 unpack for `QWEN3_GEMM=h`**: once the fork's backend keeps 32-bit stores to fp16 shared memory
-  packed, `deq_w`'s pass can go (about 450 ms of the 1,540). The same switch fits LFM2 and Qwen3.5, which share
-  `gemm_q4`.
+- **`QWEN3_GEMM=q` for LFM2 and Qwen3.5**, which share `gemm_q4`; and `pack_x` fused into the producer of X (the
+  SwiGLU for `down`, where it takes about 2 ms of 7.5 at 512 rows).
 
 ## Files
 

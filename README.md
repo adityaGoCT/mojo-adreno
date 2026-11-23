@@ -580,15 +580,17 @@ subgroups share them instead of each reading its own from the buffers. At 2048x2
 | fp16 | 2.01-2.12 TFLOP/s | **3.45-3.70 TFLOP/s** |
 | fp32 | 1.31-1.34 TFLOP/s | **2.48-2.49 TFLOP/s** |
 
-fp16 in shared memory needed three workarounds for the 840's driver (512.842.19), each found with a
-small kernel on the phone:
-- single fp16 elements of a shared array behave as if 4 bytes apart in a 2-byte-per-element
-  allocation: of a 2048-element array, only the first 1024 elements are usable (a round trip through
-  it was wrong for the rest), so fp16 tiles are copied as cooperative matrices, not element by element;
-- a cooperative-matrix load or store of fp16 in shared memory starts at byte 4 e for element e, while
-  packing the matrix 2 bytes per element: `f16_smem_offset` halves the offset
-  (`-D COOPMAT_F16_SMEM_QUIRK=0` turns that off for a driver that addresses fp16 correctly);
-- fp32 works as written (copied 4 elements per thread, 15% faster than copying as matrices).
+fp16 in shared memory first looked as if the 840's driver (512.842.19) placed single fp16 elements 4
+bytes apart, and started a cooperative-matrix access at byte 4 e for element e while packing the matrix
+2 bytes per element. The cause was narrower: the driver resolves an `OpInBoundsAccessChain` into a
+shared array of 16-bit types (half, f16vec2, f16vec4) as if each element took twice its size, and the
+fork's backend addressed shared arrays with it; `OpAccessChain`, which glslang emits, is addressed
+correctly. The backend now emits `OpAccessChain` for 16-bit shared arrays (32-bit ones keep the
+inbounds form, which is 13-17% faster for `lk.gemm_q4`'s fp32 tiles), so fp16 tiles can be written
+with plain stores ([coopmat/smem_pack.mojo](coopmat/smem_pack.mojo)), and `f16_smem_offset`'s halving
+is off by default (`-D COOPMAT_F16_SMEM_QUIRK=1` for a compiler from before). One real driver bug
+remains: an fp16 matrix loaded from a shared array of 32-bit integers has its stride counted in halves.
+fp32 works as written (copied 4 elements per thread, 15% faster than copying as matrices).
 
 The batched prefill of [Llama](llama/README.md) is built on the fp32 kernel: a 431-token prompt in
 0.63 s on the S26 Ultra instead of 17.7 s one token at a time (28x). With 4-bit weights (`--quant q4`)

@@ -19,7 +19,7 @@ comptime N = get_defined_int["COOPMAT_N", 64]()
 comptime WM = get_defined_int["COOPMAT_WM", 2]()
 comptime WN = get_defined_int["COOPMAT_WN", 2]()
 comptime THREADS = 64 * WM * WN
-comptime F16_SMEM_QUIRK = get_defined_int["COOPMAT_F16_SMEM_QUIRK", 1]() == 1
+comptime F16_SMEM_QUIRK = get_defined_int["COOPMAT_F16_SMEM_QUIRK", 0]() == 1
 
 
 def matmul_coopmat_f32(a: UnsafePointer[Float32, MutAnyOrigin], b: UnsafePointer[Float32, MutAnyOrigin],
@@ -72,10 +72,11 @@ def matmul_coopmat_bt_f16(a: UnsafePointer[Float16, MutAnyOrigin], b: UnsafePoin
 def f16_smem_offset(e: Int) -> Int:
     """The offset to pass for element `e` of an fp16 shared array in a cooperative-matrix load or store.
 
-    The 840's driver (512.842.19) starts such an access at byte 4 e instead of 2 e (it lays out
-    single fp16 elements of shared memory 4 bytes apart, and the matrix access inherits that base),
-    while packing the matrix itself 2 bytes per element. Halving even offsets lands it at byte 2 e;
-    -D COOPMAT_F16_SMEM_QUIRK=0 turns this off for a driver that addresses fp16 correctly.
+    The 840's driver (512.842.19) resolves an OpInBoundsAccessChain into an fp16 shared array as if
+    each element were 4 bytes, so a matrix access through one started at byte 4 e instead of 2 e,
+    while packing the matrix itself 2 bytes per element; halving even offsets landed it at byte 2 e.
+    The fork's backend now emits OpAccessChain, which the driver addresses correctly, so this is off
+    by default; -D COOPMAT_F16_SMEM_QUIRK=1 turns it back on for a compiler from before that change.
     """
     comptime if F16_SMEM_QUIRK:
         return e // 2
