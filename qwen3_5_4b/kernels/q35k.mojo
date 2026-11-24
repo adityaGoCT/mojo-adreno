@@ -206,6 +206,35 @@ def deq_aff[HI: Bool](wq: U32, wh: U32, wd: F32, wc: F32, dst: U32, n: Int32, k:
             dst.store((base + (kx // 16) * 1024 + (kx % 16) * 64) // 2, bitcast[DType.uint32, 4](h))
 
 
+def deq_aff_rows[HI: Bool](wq: U32, wh: U32, wd: F32, wc: F32, dst: U32, n: Int32, k: Int32):
+    """deq_aff for the Adreno 850's lkh.gemm_k (FP16): the affine storage as plain fp16 rows (n x k), so the product
+    reads them K-minor; a thread per row and block of 32 k, its 32 halves written as 16 words (grid: n k / 32 / 256,
+    256 threads)."""
+    var v = global_idx.x
+    var kk = Int(k)
+    var blocks = kk // 32
+    if v >= Int(n) * blocks:
+        return
+    var r = v // blocks
+    var kb = v % blocks
+    var w4 = wq.load[width=4](r * (kk // 8) + 4 * kb)
+    var d = wd[r * blocks + kb]
+    var c = wc[r * blocks + kb]
+    var hb = UInt32(0)
+    comptime if HI:
+        hb = wh[r * blocks + kb]
+    comptime for i in range(4):
+        var sh = SIMD[DType.uint32, 8](0, 4, 8, 12, 16, 20, 24, 28)
+        var q = (((SIMD[DType.uint32, 8](w4[i]) >> sh) & 15) ^ 8).cast[DType.int32]() - 8
+        comptime if HI:
+            var hs = SIMD[DType.uint32, 8](0, 1, 2, 3, 4, 5, 6, 7) + UInt32(8 * i)
+            q += 16 * ((SIMD[DType.uint32, 8](hb) >> hs) & 1).cast[DType.int32]()
+        var h = (q.cast[DType.float32]() * d + c).cast[DType.float16]()
+        var o = bitcast[DType.uint32, 4](h)
+        comptime for e in range(4):
+            dst[(r * kk + 32 * kb + 8 * i) // 2 + e] = o[e]
+
+
 def gemm64[KIND: Int](wq: U32, ws: F16, wh: U32, wd: F32, wc: F32, x: F32, y: F32, n: Int64, k: Int64, row0: Int64):
     """The batch's last 64 rows (from row0) of Y[rows, n] = X[rows, k] W^T, so a prompt is padded to 64 rows rather than
     gemm_q4's 128: a 128-thread workgroup (2 subgroups) computes a 64 x 128 block. KIND 0: W Q4_0 (lk's words + fp16

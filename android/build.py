@@ -14,6 +14,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py lfm2        # build/android/lfm2/: lfm2/lfm2.mojo (LFM2.5-2.6B), lfm2_convert
   python3 android/build.py lfm2bench   # build/android/lfm2bench/: lfm2/bench_rows.mojo (few-row product kernels)
   python3 android/build.py lfm2q4h     # build/android/lfm2q4h/: lfm2/bench_q4h.mojo (fp16 cooperative-matrix int4 GEMM)
+  python3 android/build.py llamak      # build/android/llamak/: llama/bench_k.mojo (Llama 3.2 3B's products on the 850)
   python3 android/build.py llamahq     # build/android/llamahq/: llama/bench_hq.mojo (the same, scales per 64, int4/int8/fp16)
   python3 android/build.py moebench    # build/android/moebench/: qwen3moe/bench_moe.mojo (Qwen3-30B-A3B's experts, grouped)
   python3 android/build.py smempack    # build/android/smempack/: coopmat/smem_pack.mojo (fp16 tiles packed in shared memory)
@@ -188,6 +189,16 @@ def llama3():
     link(out, "llama3", [out / "llama3.o"])
 
 
+def llamak():
+    """llama/bench_k.mojo: Llama 3.2 3B's int4 prefill products on the Adreno 850, lkh.gemm_hq (840-tuned) against
+    lkh.gemm_k (B K-minor, one accumulator over the whole K)."""
+    out = BUILD / "llamak"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "llama/bench_k.mojo", out / "bench_k.o",
+                includes=[ROOT / "llama/kernels/prefill", ROOT / "lfm2/kernels"])
+    link(out, "bench_k", [out / "bench_k.o"])
+
+
 def gemma4():
     """gemma4/gemma4.mojo: gemma4/model.mojo's forward pass on gemma4/kernels (one program for E2B and E4B); and
     gemma4_convert (gemma4/convert.c), which writes gemma4.bin on the phone from the downloaded checkpoint."""
@@ -205,7 +216,7 @@ def lfm2():
     lfm2_convert (lfm2/convert.c), which writes the weight files on the phone from the downloaded GGUF."""
     out = BUILD / "lfm2"
     out.mkdir(parents=True, exist_ok=True)
-    mojo_object(ROOT / "lfm2/lfm2.mojo", out / "lfm2.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels", ROOT / "gemma4/kernels"])
+    mojo_object(ROOT / "lfm2/lfm2.mojo", out / "lfm2.o", includes=[ROOT / "lfm2", ROOT / "lfm2/kernels", ROOT / "gemma4/kernels", ROOT / "llama/kernels"])
     link(out, "lfm2", [out / "lfm2.o"])
     sh(NDK_BIN / "aarch64-linux-android33-clang", "-O2", "-ffp-contract=off", "-o", out / "lfm2_convert",
        ROOT / "lfm2/convert.c")
@@ -306,7 +317,7 @@ def bonsai():
 
 
 def main():
-    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "llama3": llama3, "qwen3": qwen3, "bonsai": bonsai,
+    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "llama3": llama3, "llamak": llamak, "qwen3": qwen3, "bonsai": bonsai,
              "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "llamahq": llamahq, "moebench": moebench, "smempack": smempack,
              "qwen3_4b": qwen3_4b, "qwen3_5_4b": qwen3_5_4b}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]

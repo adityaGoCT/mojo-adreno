@@ -6,11 +6,16 @@
 #     LLAMA_EOS=128001,128009   stop tokens          LLAMA_LOGITS=<file>   logits after the prompt (fp32)
 #     LLAMA_PREFILL=<anything>  the whole prompt at once (Llama3.prefill); otherwise a token at a time
 #     LLAMA_GEMM=q              the prefill's products on fp16 cooperative matrices (lfm2/kernels/lkh.mojo)
+#     LLAMA_GEMM=k              the same with the Adreno 850's layouts (lkh.gemm_k: B K-minor, one K chunk), the
+#                               int4 weights repacked into panels and dequantized in registers (LLAMA_REG=0: B
+#                               through shared memory instead), flash attention, fused epilogues (model3.layer_k)
 #     LLAMA_PROFILE=1           the prompt waits after each kind of launch: its time per kind
 #     LLAMA_SYNTH=1             no weights.bin: synthetic weights filled on the GPU (timing only; the output is noise)
 #     LLAMA_FUSE=0              LLAMA_GEMM=q without the fused glue (each projection packed, multiplied, summed alone)
 #     LLAMA_NORM=row            the fused path's norms a row a workgroup (lg.rmsnorm_pack) instead of tiled
 #     LLAMA_CH=2048             the fused path's products in K chunks of 2048 instead of 1024 (faster, less accurate)
+#     LLAMA_QKV=0|21|22|42      LLAMA_GEMM=k: q|k|v without the RoPE epilogue (0), or its tiling (subgroups WM WN)
+#     LLAMA_PREFILL_REPS=<r>    before the run: a warm-up prefill, then r timed prefills (and the best of them)
 #
 # Then up to <max new> tokens are generated greedily (argmax on the CPU). Output: "tok <id> <ms>" for each.
 from std.os import getenv
@@ -46,11 +51,17 @@ def main() raises:
     var ctx = DeviceContext(api="vulkan")
     print("device:", ctx.name())
     var t_load = now_ms()
-    var model = Llama3(ctx, String(args[1]), gemmq=getenv("LLAMA_GEMM") == "q", synth=getenv("LLAMA_SYNTH") == "1")
+    var model = Llama3(ctx, String(args[1]), gemmq=getenv("LLAMA_GEMM") == "q" or getenv("LLAMA_GEMM") == "k", synth=getenv("LLAMA_SYNTH") == "1")
     model.prof = getenv("LLAMA_PROFILE") == "1"
     model.fuse = getenv("LLAMA_FUSE") != "0"
     model.norm_tiled = getenv("LLAMA_NORM") != "row"
     model.ch2 = getenv("LLAMA_CH") == "2048"
+    model.k850 = getenv("LLAMA_GEMM") == "k"
+    model.qkvt = Int(getenv("LLAMA_QKV", "22"))
+    if model.k850 and getenv("LLAMA_REG") != "0":
+        var t_pan = now_ms()
+        model.make_panels()
+        print("panels in", Int(now_ms() - t_pan), "ms")
     print("loaded in", round((now_ms() - t_load) / 1e3, 1), "s")
     if len(prompt) + max_new > model.CAP:
         raise Error("prompt + new tokens > " + String(model.CAP))
@@ -58,6 +69,21 @@ def main() raises:
     var logits = List[Float32](length=V, fill=0)
 
     var prefill = getenv("LLAMA_PREFILL") != ""
+    var preps = Int(getenv("LLAMA_PREFILL_REPS", "0"))
+    if prefill and preps > 0:  # a warm-up (pipelines are created at their first launch), then preps timed prefills
+        model.prefill(prompt)
+        ctx.synchronize()
+        var best = 1e30
+        for r in range(preps):
+            var tr = now_ms()
+            model.prefill(prompt)
+            ctx.enqueue_copy(logits.unsafe_ptr(), model.logits)
+            ctx.synchronize()
+            var ms = now_ms() - tr
+            best = min(best, ms)
+            print("prefill run", r, ":", round(ms, 1), "ms")
+        print("prefill best of", preps, ":", round(best, 1), "ms,", round(Float64(len(prompt)) * 1e3 / best, 1),
+              "tokens/s")
     var tok = prompt[0]
     var ngen = 0
     var t0 = now_ms()

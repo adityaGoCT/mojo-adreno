@@ -19,6 +19,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 import g4k
 import lk
 import lkh
+import lk850
 import mk
 
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of 128)
@@ -109,11 +110,14 @@ struct LFM2Moe(Movable):
     var times: Dict[String, Float64]
     var mark: Float64
 
+    var pan: lk850.Panels  # the Adreno 850's int4 panels (lk850.make_panels; LKH_850=1)
+
     def __init__(out self, ctx: DeviceContext, dir: String, bin: String, gemmq: Bool = False) raises:
         """dir: export.py's q4/manifest.txt (rope.f32 in its parent); bin: convert's weight file (on the executor's
         side when remote). gemmq: prefill products on lkh's fp16 cooperative matrices (the fp32 grouped buffers are
         then left out)."""
         self.ctx = ctx
+        self.pan = lk850.Panels()
         var lines = open(dir + "/manifest.txt", "r").read().splitlines()
         var head = lines[0].split(" ")
         if len(head) < 2 or head[0] != "lfm2moe":
@@ -204,6 +208,7 @@ struct LFM2Moe(Movable):
         self.mark = 0
         self.reset()
         self.load(dir, bin)
+        self.pan = lk850.make_panels[32](self.ctx, self.words, self.halves, dir + "/manifest.txt")
 
     def reset(self) raises:
         """A new sequence: zero conv states, caches, ids and the padding rows the matrix products read."""
@@ -305,9 +310,13 @@ struct LFM2Moe(Movable):
             self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2),
                                                   Int32(k), Int32(rows * k // 8),
                                                   grid_dim=groups(rows * k // 8, 256), block_dim=256)
-            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
-                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
-                Int32(rows), grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
+            if lk850.on850():
+                chunks = lk850.gemm_p[32](self.ctx, self.pan, name, self.xa, self.words[name + ".q"], self.halves[name + ".s"],
+                                               self.part, n, k, rows)
+            else:
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
+                    self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                    Int32(rows), grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
             self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
                                                      grid_dim=groups(rows * n // 8, 256), block_dim=256)
             return
@@ -538,8 +547,8 @@ struct LFM2Moe(Movable):
         var FE = self.FE
         var G = self.MAXG
         var tm = Int32(mk.TM)
-        var c1 = groups(D, GCH)
-        var c2 = groups(FE, GCH)
+        var c1 = 1 if lk850.on850() else groups(D, GCH)  # the 850: one K chunk (lkh.gemm_kg)
+        var c2 = 1 if lk850.on850() else groups(FE, GCH)
         if G * max(D, FE) > len(self.xa) or G * max(c1 * 2 * FE, c2 * D) > len(self.part):
             raise Error("lkh: a buffer is too small")
         self.src.enqueue_fill(-1)
@@ -551,16 +560,27 @@ struct LFM2Moe(Movable):
         self.tick("p: router + grouping")
         if self.skip.find(",eprod,") >= 0:
             return
-        ctx.enqueue_function[lkh.gemm_hqg[GWN, GCH, GBK, 4, False]](
-            self.xa, self.words[n + "egu.q"], self.halves[n + "egu.s"], self.part, Int32(2 * FE), Int32(D), Int32(G),
-            self.tiles, self.ntiles, grid_dim=Dim(2 * FE // (64 * GWN), G // mk.TM, c1), block_dim=64 * GWN)
+        if lk850.on850():
+            ctx.enqueue_function[lkh.gemm_kg[2, 64]](
+                self.xa, self.words[n + "egu.q"], self.halves[n + "egu.s"], self.part, Int32(2 * FE), Int32(D),
+                Int32(G), self.tiles, self.ntiles, grid_dim=Dim(2 * FE // 128, G // mk.TM), block_dim=128)
+        else:
+            ctx.enqueue_function[lkh.gemm_hqg[GWN, GCH, GBK, 4, False]](
+                self.xa, self.words[n + "egu.q"], self.halves[n + "egu.s"], self.part, Int32(2 * FE), Int32(D),
+                Int32(G), self.tiles, self.ntiles, grid_dim=Dim(2 * FE // (64 * GWN), G // mk.TM, c1),
+                block_dim=64 * GWN)
         ctx.enqueue_function[lkh.swiglu_pack](self.part, Int32(c1), Int32(G), Int32(FE),
                                               self.xa.create_sub_buffer[DType.uint32](0, G * FE // 2), self.ntiles, tm,
                                               grid_dim=groups(G * FE // 8, 256), block_dim=256)
         self.tick("p: experts gate/up")
-        ctx.enqueue_function[lkh.gemm_hqg[GWN, GCH, GBK, 4, False]](
-            self.xa, self.words[n + "edown.q"], self.halves[n + "edown.s"], self.part, Int32(D), Int32(FE), Int32(G),
-            self.tiles, self.ntiles, grid_dim=Dim(D // (64 * GWN), G // mk.TM, c2), block_dim=64 * GWN)
+        if lk850.on850():
+            ctx.enqueue_function[lkh.gemm_kg[2, 64]](
+                self.xa, self.words[n + "edown.q"], self.halves[n + "edown.s"], self.part, Int32(D), Int32(FE),
+                Int32(G), self.tiles, self.ntiles, grid_dim=Dim(D // 128, G // mk.TM), block_dim=128)
+        else:
+            ctx.enqueue_function[lkh.gemm_hqg[GWN, GCH, GBK, 4, False]](
+                self.xa, self.words[n + "edown.q"], self.halves[n + "edown.s"], self.part, Int32(D), Int32(FE),
+                Int32(G), self.tiles, self.ntiles, grid_dim=Dim(D // (64 * GWN), G // mk.TM, c2), block_dim=64 * GWN)
         self.tick("p: experts down")
         ctx.enqueue_function[lkh.combine[mk.K, False]](self.part, Int32(c2), Int32(G), self.slot, self.rwts, self.tmp,
                                                        Int32(count), Int32(D), grid_dim=groups(count * D, 64),

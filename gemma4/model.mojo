@@ -15,6 +15,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
 import lkh
+import lk850
 import p_gemm_q4
 import p_gemm_q8
 
@@ -94,9 +95,12 @@ struct Gemma4(Movable):
     var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k
     var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
 
+    var pan: lk850.Panels  # the Adreno 850's int4 panels (lk850.make_panels; LKH_850=1)
+
     def __init__(out self, ctx: DeviceContext, dir: String, checkpoint: String) raises:
         """dir: export.py's manifest.txt, rope tables and convert's gemma4.bin; checkpoint: model.safetensors."""
         self.ctx = ctx
+        self.pan = lk850.Panels()
         self.checkpoint = checkpoint
         var lines = open(dir + "/manifest.txt", "r").read().splitlines()
         var head = lines[0].split(" ")
@@ -182,6 +186,7 @@ struct Gemma4(Movable):
         self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * max(
             groups(D, GCH) * max(2 * maxf, self.L * PL, maxq), groups(max(maxf, self.H * maxhd), GCH) * D))
         self.load(dir)
+        self.pan = lk850.make_panels[64](self.ctx, self.words, self.halves, dir + "/manifest.txt")
 
     def load(mut self, dir: String) raises:
         """gemma4.bin's tensors, as the manifest lists them ("<name> <offset> <bytes> <dtype> <shape>"), each in a
@@ -364,7 +369,13 @@ struct Gemma4(Movable):
                                                   Int32(k), Int32(rows * k // 8),
                                                   grid_dim=groups(rows * k // 8, 256), block_dim=256)
             var grid = Dim(n // 64, rows // 128, chunks)
-            if name in self.int8:
+            if lk850.on850() and name in self.int8:
+                chunks = lk850.gemm[64, lkh.Q8](self.ctx, self.xa, self.words[name + ".q"], self.halves[name + ".s"],
+                                               self.part, n, k, rows)
+            elif lk850.on850():
+                chunks = lk850.gemm_p[64](self.ctx, self.pan, name, self.xa, self.words[name + ".q"], self.halves[name + ".s"],
+                                               self.part, n, k, rows)
+            elif name in self.int8:
                 self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.Q8]](
                     self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
                     Int32(rows), grid_dim=grid, block_dim=128)

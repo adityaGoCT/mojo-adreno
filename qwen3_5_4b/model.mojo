@@ -17,6 +17,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 import g4k
 import lk
 import lkh
+import lk850
 import q4bk
 import q35k
 
@@ -88,16 +89,20 @@ struct Qwen35(Movable):
     var prof: Bool  # wait after each launch and add its time to times[kind] (QWEN35_PROFILE)
     var gemmq: Bool  # QWEN35_GEMM=q
     var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k (F)
+    var xb: DeviceBuffer[DType.float16]  # the Adreno 850's MLP: silu(gate) up packed for down (lk850.mlp)
     var wd: DeviceBuffer[DType.float16]  # the affine weights unpacked into fp16 tiles (the largest: down, D x F)
     var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
     var times: Dict[String, Float64]
     var mark: Float64
     var dnc: Int  # prefill: value columns a 16-lane group of the delta rule takes (1, 2 or 4; QWEN35_DNC)
 
+    var pan: lk850.Panels  # the Adreno 850's int4 panels (lk850.make_panels; LKH_850=1)
+
     def __init__(out self, ctx: DeviceContext, dir: String, bin: String, cap: Int) raises:
         """dir: export.py's manifest.txt (q4/) with rope.f32 one level up; bin: convert.c's weight file; cap: the
         context (positions) the K/V cache holds."""
         self.ctx = ctx
+        self.pan = lk850.Panels()
         var lines = open(dir + "/manifest.txt", "r").read().split("\n")
         var head = lines[0].split(" ")
         if len(head) < 2 or head[0] != "qwen35":
@@ -163,6 +168,7 @@ struct Qwen35(Movable):
         self.prof = False
         self.gemmq = False
         self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F)
+        self.xb = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F if lk850.on850() else 1)
         self.wd = ctx.enqueue_create_buffer[DType.float16](self.D * self.F)
         self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * part_cols(self.D, self.F, self.QKVZ, self.QKVG, self.H))
         self.times = Dict[String, Float64]()
@@ -170,6 +176,7 @@ struct Qwen35(Movable):
         self.dnc = 2
         self.reset()
         self.load(dir, bin)
+        self.pan = lk850.make_panels[32](self.ctx, self.words, self.halves, dir + "/manifest.txt")
 
     def linear(self, l: Int) -> Bool:
         return self.types.as_bytes()[l] == UInt8(ord("L"))
@@ -259,6 +266,8 @@ struct Qwen35(Movable):
         """y[rows, n] = x[rows, k] W^T on the matrix units, W as gemv() reads it. rows: a multiple of 64; whole 128s
         through lk.gemm_q4 / q35k.gemm_aff, a last 64 through q35k.gemm64."""
         var full = rows // 128 * 128
+        if self.gemmq and lk850.on850() and rows <= PMAX:  # the 850: whole 128-row blocks (the buffers hold PMAX
+            full = (rows + 127) // 128 * 128  # rows), no gemm64 tail; padding rows never reach real ones (causal)
         var q4 = name + ".s" in self.halves
         var hi = name + ".h" in self.words
         if self.gemmq and full >= GQ_ROWS:
@@ -268,10 +277,26 @@ struct Qwen35(Movable):
             self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, full * k // 2), Int32(k),
                                                   Int32(full * k // 8), grid_dim=(full * k // 8 + 255) // 256,
                                                   block_dim=256)
-            if q4:
+            if q4 and lk850.on850():
+                chunks = lk850.gemm_p[32](self.ctx, self.pan, name, self.xa, self.words[name + ".q"], self.halves[name + ".s"],
+                                               self.part, n, k, full)
+            elif q4:
                 self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
                     self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
                     Int32(full), grid_dim=Dim(n // 64, full // 128, chunks), block_dim=128)
+            elif lk850.on850():  # the affine storage as fp16 rows, then the 850's K-minor product in one chunk
+                var wq = self.words[name + ".q"]
+                var wdu = self.wd.create_sub_buffer[DType.uint32](0, n * k // 2)
+                var g = (n * k // 32 + 255) // 256
+                if hi:
+                    self.ctx.enqueue_function[q35k.deq_aff_rows[True]](wq, self.words[name + ".h"], self.floats[name + ".d"],
+                                                                       self.floats[name + ".c"], wdu, Int32(n), Int32(k),
+                                                                       grid_dim=g, block_dim=256)
+                else:
+                    self.ctx.enqueue_function[q35k.deq_aff_rows[False]](wq, wq, self.floats[name + ".d"],
+                                                                        self.floats[name + ".c"], wdu, Int32(n),
+                                                                        Int32(k), grid_dim=g, block_dim=256)
+                chunks = lk850.gemm[32, lkh.FP16](self.ctx, self.xa, wdu, self.wd, self.part, n, k, full)
             else:
                 var wq = self.words[name + ".q"]
                 var wdu = self.wd.create_sub_buffer[DType.uint32](0, n * k // 2)
@@ -456,11 +481,19 @@ struct Qwen35(Movable):
             self.tick("mlp: gate/up + SiLU")
             self.gemv(n + "down", self.act, self.tmp, self.F, D)
         else:
-            self.gemm(n + "gu", self.xn, self.gu, 2 * self.F, D, rows)
-            ctx.enqueue_function[lk.silu_mul](self.gu, self.act, Int32(self.F), Int32(count),
-                                              grid_dim=groups(count * self.F, 64), block_dim=64)
-            self.tick("mlp: gate/up + SiLU")
-            self.gemm(n + "down", self.act, self.tmp, D, self.F, rows)
+            var r128 = (rows + 127) // 128 * 128
+            if (lk850.on850() and self.gemmq and r128 <= PMAX and r128 >= GQ_ROWS and n + "gu.s" in self.halves
+                    and n + "down.s" in self.halves):  # gate|up with SiLU in its epilogue, then down
+                lk850.mlp[32](self.ctx, self.pan, n + "gu", self.xn, self.xa, self.xb, self.words[n + "gu.q"],
+                              self.halves[n + "gu.s"], self.words[n + "down.q"], self.halves[n + "down.s"], n + "down",
+                              self.part, self.tmp, self.F, D, r128)
+                self.tick("mlp: gate/up + SiLU")
+            else:
+                self.gemm(n + "gu", self.xn, self.gu, 2 * self.F, D, rows)
+                ctx.enqueue_function[lk.silu_mul](self.gu, self.act, Int32(self.F), Int32(count),
+                                                  grid_dim=groups(count * self.F, 64), block_dim=64)
+                self.tick("mlp: gate/up + SiLU")
+                self.gemm(n + "down", self.act, self.tmp, D, self.F, rows)
         self.tick("mlp: down")
 
     def layer(mut self, l: Int, p0: Int, count: Int, rows: Int) raises:

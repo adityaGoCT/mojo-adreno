@@ -13,6 +13,7 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 import g4k
 import lk
 import lkh
+import lk850
 import q4bk
 import qwen3k
 
@@ -71,13 +72,17 @@ struct Qwen3(Movable):
     var gemmh: Bool  # QWEN3_GEMM=h: prefill projections on lkh's kernels
     var gemmq: Bool  # QWEN3_GEMM=q: with lkh.gemm_hq (int4 unpacked inside the product)
     var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to PMAX rows of the widest k (F)
+    var xb: DeviceBuffer[DType.float16]  # the Adreno 850's MLP: silu(gate) up packed for down (lk850.mlp)
     var wd: DeviceBuffer[DType.float16]  # lkh's B: the projection's weights in fp16 tiles (the largest: gate|up)
     var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
+
+    var pan: lk850.Panels  # the Adreno 850's int4 panels (lk850.make_panels; LKH_850=1)
 
     def __init__(out self, ctx: DeviceContext, dir: String, bin: String, cap: Int) raises:
         """dir: export.py's manifest.txt (q4/) with rope.f32 one level up; bin: convert.c's weight file; cap: the
         context (positions) the K/V cache holds."""
         self.ctx = ctx
+        self.pan = lk850.Panels()
         var lines = open(dir + "/manifest.txt", "r").read().split("\n")
         var head = lines[0].split(" ")
         if len(head) < 2 or head[0] != "qwen3":
@@ -130,10 +135,12 @@ struct Qwen3(Movable):
         self.gemmh = False
         self.gemmq = False
         self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F)
+        self.xb = ctx.enqueue_create_buffer[DType.float16](PMAX * self.F if lk850.on850() else 1)
         self.wd = ctx.enqueue_create_buffer[DType.float16](2 * self.F * self.D)
         self.part = ctx.enqueue_create_buffer[DType.float16](PMAX * 2 * (2 * self.F))
         self.reset()
         self.load(dir, bin)
+        self.pan = lk850.make_panels[32](self.ctx, self.words, self.halves, dir + "/manifest.txt")
 
     def reset(self) raises:
         """A new sequence: zero the caches (prefill's P V reads rows past the prompt), ids and the padding rows the
@@ -204,15 +211,19 @@ struct Qwen3(Movable):
         """y[rows, n] = x[rows, k] W^T (rows: a multiple of 128) on the matrix units."""
         # Below 256 rows the int4 -> fp16 unpacking of every weight (about 12.5 ms a layer) costs more than the faster
         # product saves: gemm_q4 there.
-        if self.gemmq and rows >= 256:
+        if self.gemmq and (rows >= 256 or lk850.on850()):
             var chunks = groups(k, GCH)
             if chunks * rows * n > PMAX * 4 * self.F:
                 raise Error("lkh: a buffer is too small")
             self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2), Int32(k),
                                                   Int32(rows * k // 8), grid_dim=groups(rows * k // 8, 256), block_dim=256)
-            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
-                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k), Int32(rows),
-                grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
+            if lk850.on850():
+                chunks = lk850.gemm_p[32](self.ctx, self.pan, name, self.xa, self.words[name + ".q"], self.halves[name + ".s"],
+                                               self.part, n, k, rows)
+            else:
+                self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
+                    self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                    Int32(rows), grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
             self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
                                                      grid_dim=groups(rows * n // 8, 256), block_dim=256)
             return
@@ -391,13 +402,19 @@ struct Qwen3(Movable):
             ctx.enqueue_function[q4bk.add_norm](self.x, self.tmp, self.floats[n + "post_norm"], self.xn, Int32(D),
                                                 Int32(1), grid_dim=count, block_dim=64)
             self.tick("p: adds + norms")
-            self.gemm(n + "gu", self.xn, self.gu, 2 * self.F, D, Rr)
-            self.tick("p: gate/up")
-            ctx.enqueue_function[lk.silu_mul](self.gu, self.act, Int32(self.F), c,
-                                              grid_dim=groups(count * self.F, 64), block_dim=64)
-            self.tick("p: SiLU product")
-            self.gemm(n + "down", self.act, self.tmp, D, self.F, Rr)
-            self.tick("p: down")
+            if lk850.on850() and self.gemmq:  # gate|up with SiLU in its epilogue, then down
+                lk850.mlp[32](ctx, self.pan, n + "gu", self.xn, self.xa, self.xb, self.words[n + "gu.q"],
+                              self.halves[n + "gu.s"], self.words[n + "down.q"], self.halves[n + "down.s"], n + "down",
+                              self.part, self.tmp, self.F, D, Rr)
+                self.tick("p: MLP")
+            else:
+                self.gemm(n + "gu", self.xn, self.gu, 2 * self.F, D, Rr)
+                self.tick("p: gate/up")
+                ctx.enqueue_function[lk.silu_mul](self.gu, self.act, Int32(self.F), c,
+                                                  grid_dim=groups(count * self.F, 64), block_dim=64)
+                self.tick("p: SiLU product")
+                self.gemm(n + "down", self.act, self.tmp, D, self.F, Rr)
+                self.tick("p: down")
             ctx.enqueue_function[q4bk.add_norm](self.x, self.tmp, self.floats[self.next_norm(l)], self.xn, Int32(D),
                                                 Int32(1), grid_dim=count, block_dim=64)
             self.tick("p: adds + norms")

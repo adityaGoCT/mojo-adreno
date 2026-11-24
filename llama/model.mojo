@@ -13,6 +13,7 @@ import gemv_add
 import gemv_add_q4
 import gemv_q4
 import lkh
+import lk850
 import p_add
 import p_attention
 import p_attention_scalar
@@ -192,7 +193,14 @@ struct Llama(Movable):
                                                   Int32(k), Int32(rows * k // 8),
                                                   grid_dim=(rows * k // 8 + 255) // 256, block_dim=256)
             var g = Dim(n // 64, rows // 128, chunks)
-            if self.q4:
+            if lk850.on850() and self.q4:
+                chunks = lk850.gemm[64, lkh.Q4](self.ctx, self.xa, self.words[name + ".q"], self.halves[name + ".s"],
+                                               self.part, n, k, rows)
+            elif lk850.on850():
+                var w = self.halves[name]
+                chunks = lk850.gemm[64, lkh.FP16](self.ctx, self.xa, w.create_sub_buffer[DType.uint32](0, n * k // 2), w,
+                                                 self.part, n, k, rows)
+            elif self.q4:
                 self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.Q4]](
                     self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
                     Int32(rows), grid_dim=g, block_dim=128)

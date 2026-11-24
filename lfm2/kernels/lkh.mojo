@@ -445,3 +445,381 @@ def sum_parts_add(part: F16, y: F32, total: Int32, chunks: Int32, stride: Int32)
     for z in range(Int(chunks)):
         acc += part.load[width=8](z * Int(stride) + e).cast[DType.float32]()
     y.store(e, acc)
+
+
+# ---- the Adreno 850 (matrix units): K-minor B, one accumulator over the whole K ---------------------------------------
+# On the 850 a 16 x 64 B matrix holds column n in lane n and its 16 k in that lane's elements (adrenoblas
+# probe/map.comp), so B wants K contiguous inside each column (column-major), A K contiguous inside each row (the R
+# tiles): 4 vector loads a lane a K step instead of 16 scalar ones (adreno-gemm-worklog, K-minor tiles). Its matrix
+# units round once per 16-deep product, not per multiply-add as the 840's ALUs do, so one fp16 accumulator holds the
+# whole K (AdrenoBLAS does the same): no K chunks, and C is written once.
+
+
+@always_inline
+def unpack_wk[BN: Int, T: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int, FMT: Int, LD: Int, SPLIT: Bool = False](
+    sb: SH16, wq: U32, ws: F16, wrow0: Int, kb: Int, kk: Int, t: Int, split: Int = 0
+):
+    """unpack_w with W^T stored K-minor: column c of the K step (W row wrow0 + c) has its BKS k contiguous at
+    sb[c LD ..] (LD >= BKS halves, a multiple of 8: padding against bank conflicts). A unit is RG rows x 8 k; each row's
+    8 values go to shared memory in one 16-byte store. SPLIT: columns 64 .. take W rows `split` further on (gate|up:
+    a workgroup's 64 gate rows, then the matching 64 up rows)."""
+    comptime KW = BKS // 8
+    comptime UNITS = (BN // RG) * KW
+    comptime PER = (UNITS + T - 1) // T
+    comptime assert FMT == Q4 or FMT == Q8 or FMT == FP16, "FMT: Q4, Q8 or FP16"
+    comptime for i in range(PER):
+        var u = i * T + t
+        if UNITS % T == 0 or u < UNITS:
+            var kw: Int
+            var rg: Int
+            comptime if ALONG_K:
+                kw = u % KW
+                rg = u // KW
+            else:
+                rg = u % (BN // RG)
+                kw = u // (BN // RG)
+            var r = wrow0 + rg * RG
+            comptime if SPLIT:
+                if rg * RG >= 64:
+                    r += split
+            var kx = kb + 8 * kw
+            comptime for j in range(RG):
+                var h: SIMD[DType.float16, 8]
+                comptime if FMT == Q4:
+                    var w = wq[(r + j) * (kk // 8) + kx // 8]
+                    var s = ws[(r + j) * (kk // GS) + kx // GS]
+                    var sh = SIMD[DType.uint32, 8](0, 4, 8, 12, 16, 20, 24, 28)
+                    var q = (((SIMD[DType.uint32, 8](w) >> sh) & 15) ^ 8).cast[DType.int32]() - 8
+                    h = q.cast[DType.float16]() * SIMD[DType.float16, 8](s)
+                elif FMT == Q8:
+                    var wv = wq.load[width=2]((r + j) * (kk // 4) + kx // 4)
+                    var s = ws[(r + j) * (kk // GS) + kx // GS]
+                    var we = SIMD[DType.uint32, 8](wv[0], wv[0], wv[0], wv[0], wv[1], wv[1], wv[1], wv[1])
+                    var sh = SIMD[DType.uint32, 8](0, 8, 16, 24, 0, 8, 16, 24)
+                    var q = (((we >> sh) & 255) ^ 128).cast[DType.int32]() - 128
+                    h = q.cast[DType.float16]() * SIMD[DType.float16, 8](s)
+                else:
+                    var wv = wq.load[width=4]((r + j) * (kk // 2) + kx // 2)
+                    h = bitcast[DType.float16, 8](wv)
+                sb.unsafe_store((rg * RG + j) * LD + 8 * kw, h)
+
+
+comptime LDS = 68  # the epilogues' staging tiles: 64 rows 17 x 8 bytes apart (no bank conflicts), two at a time
+comptime STAGE = 2 * 64 * LDS
+
+
+@always_inline
+def sb_size[BN: Int, LD: Int, REG: Bool = False]() -> Int:
+    comptime if REG:
+        return STAGE
+    return BN * LD if BN * LD > STAGE else STAGE
+
+
+@always_inline
+def k_loop[WM: Int, WN: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int, FMT: Int, LD: Int, SPLIT: Bool = False,
+           REG: Bool = False, PANEL: Bool = False](
+    sb: SH16, xa: F16, wq: U32, ws: F16, kk: Int, row0: Int, colw: Int, sc: Int, t: Int, split: Int = 0
+) -> CoopMatrix[DType.float16, 64, 64, ACCUMULATOR]:
+    """gemm_k's product: this subgroup's 64 x 64 of X W^T over the whole K (rows row0 .., shared-memory columns sc ..
+    of the workgroup's W rows colw ..). REG (int4 only, BKS <= GS): no shared memory; each lane dequantizes its own
+    W row (the C column it holds in a B matrix on the 850) in registers, 16 k a B matrix, and builds the matrix with
+    CoopMatrix.construct (AdrenoBLAS's Q4_0 kernel: (nibble | 0x6400) - 1032 is exact in fp16, then one rounding by
+    the scale)."""
+    comptime BN = 64 * WN
+    comptime T = 64 * WM * WN
+    var abase = xa + (row0 // 64) * (kk // 16) * 1024
+    var c0 = CoopMatrix[DType.float16, 64, 64, ACCUMULATOR].zero()
+    comptime if REG:
+        comptime assert FMT == Q4 and BKS <= GS and BKS >= 16, "REG: int4, 16 <= BKS <= GS"
+        var wrow = colw + sc + t % 64
+        comptime if SPLIT:
+            if sc >= 64:
+                wrow += split
+        var wp = wq + wrow * (kk // 8)
+        var sp = ws + wrow * (kk // GS)
+        comptime if PANEL:  # repack_q4's panels: a lane's BKS / 8 words of a K step next to its neighbours'
+            var lane = t % 64
+            wp = wq + ((wrow // 64) * (kk // BKS) * 64 + lane) * (BKS // 8)
+            sp = ws + (wrow // 64) * (kk // GS) * 64 + lane
+        var off = SIMD[DType.float16, 2](1032)
+        for kb in range(0, kk, BKS):
+            var wv: SIMD[DType.uint32, BKS // 8]
+            var s2: SIMD[DType.float16, 2]
+            comptime if PANEL:
+                wv = wp.load[width=BKS // 8]((kb // BKS) * 64 * (BKS // 8))
+                s2 = SIMD[DType.float16, 2](sp[(kb // GS) * 64])
+            else:
+                wv = wp.load[width=BKS // 8](kb // 8)
+                s2 = SIMD[DType.float16, 2](sp[kb // GS])
+            comptime for st in range(BKS // 16):
+                var at = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(abase + (kb // 16 + st) * 1024, 16)
+                var e = SIMD[DType.float16, 16]()
+                comptime for h in range(2):
+                    var u = wv[2 * st + h] ^ 0x88888888
+                    comptime for j in range(4):
+                        var x = ((u >> UInt32(4 * j)) & 0x000F000F) | 0x64006400
+                        var pr = (bitcast[DType.float16, 2](x) - off) * s2
+                        e[8 * h + j] = pr[0]
+                        e[8 * h + j + 4] = pr[1]
+                var bt = CoopMatrix[DType.float16, 16, 64, MATRIX_B].construct(e)
+                c0 = at.multiply_add(bt, c0)
+        barrier()
+        return c0
+    for kb in range(0, kk, BKS):
+        unpack_wk[BN, T, BKS, RG, ALONG_K, GS, FMT, LD, SPLIT](sb, wq, ws, colw, kb, kk, t, split)
+        barrier()
+        comptime for s in range(BKS // 16):
+            var at = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(abase + (kb // 16 + s) * 1024, 16)
+            var bt = CoopMatrix[DType.float16, 16, 64, MATRIX_B].load[row_major=False](
+                sb.unsafe_offset(sc * LD + 16 * s), LD)
+            c0 = at.multiply_add(bt, c0)
+        barrier()
+    return c0
+
+
+def gemm_k[WM: Int, WN: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int = 64, FMT: Int = Q4, PAD: Int = 8,
+            REG: Bool = False, PANEL: Bool = False](
+    xa: F16, wq: U32, ws: F16, c: F16, n: Int32, k: Int32, rows: Int32
+):
+    """C (rows x n, fp16) = X W^T on the 850: gemm_hq with B K-minor in shared memory (unpack_wk, loaded column-major)
+    and one 64 x 64 fp16 accumulator a subgroup over the whole K. Launch with grid (n / (64 WN), rows / (64 WM)) and
+    64 WM WN threads; k a multiple of BKS (and of GS); 64 WN (BKS + PAD) halves of shared memory."""
+    comptime BN = 64 * WN
+    comptime LD = BKS + PAD
+    var sb = stack_allocation[16 if REG else BN * LD, DType.float16, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var sg = t // 64
+    var row0 = Int(block_idx.y) * 64 * WM + (sg // WN) * 64
+    var colw = Int(block_idx.x) * BN
+    var sc = (sg % WN) * 64
+    var c0 = k_loop[WM, WN, BKS, RG, ALONG_K, GS, FMT, LD, REG=REG, PANEL=PANEL](sb, xa, wq, ws, Int(k), row0, colw,
+                                                                                 sc, t)
+    var nn = Int(n)
+    c0.store(c + row0 * nn + colw + sc, nn)
+
+
+def gemm_k_add[WM: Int, WN: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int = 64, FMT: Int = Q4, PAD: Int = 8,
+                REG: Bool = False, PANEL: Bool = False](
+    xa: F16, wq: U32, ws: F16, y: F32, ss: F32, n: Int32, k: Int32, count: Int32
+):
+    """gemm_k with the residual add fused (AdrenoBLAS's 'a' epilogue): y (rows x n, fp32) += X W^T for rows < count,
+    and ss[r (n / 64) + c / 64] = the sum of squares of row r of the updated y over the 64 columns c .. (0 for rows >=
+    count), for the next RMSNorm (l85.norm_pack_ss). The accumulators go through shared memory two subgroups at a
+    time; then every thread of the workgroup takes 4 columns of a staged row (16 threads a row: y read and written
+    256 bytes at a time) and the row's sum of squares is reduced in shared memory."""
+    comptime BN = 64 * WN
+    comptime LD = BKS + PAD
+    comptime T = 64 * WM * WN
+    comptime NR = (WM * WN + 1) // 2  # rounds of two staged tiles
+    comptime TILES = 2 if WM * WN > 1 else 1
+    comptime ITER = TILES * 64 * 16 // T  # staged rows x 16 column groups, T at a time
+    var sb = stack_allocation[sb_size[BN, LD, REG](), DType.float16, address_space=AddressSpace.SHARED]()
+    var red = stack_allocation[T, DType.float32, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var sg = t // 64
+    var row0 = Int(block_idx.y) * 64 * WM + (sg // WN) * 64
+    var colw = Int(block_idx.x) * BN
+    var sc = (sg % WN) * 64
+    var c0 = k_loop[WM, WN, BKS, RG, ALONG_K, GS, FMT, LD, REG=REG, PANEL=PANEL](sb, xa, wq, ws, Int(k), row0, colw,
+                                                                                 sc, t)
+    var nn = Int(n)
+    var cnt = Int(count)
+    comptime for rd in range(NR):
+        if sg // 2 == rd:
+            c0.store(sb.unsafe_offset((sg % 2) * 64 * LDS), LDS)
+        barrier()
+        comptime for it in range(ITER):
+            var e = it * T + t  # (staged row, column group of 4)
+            var tr = e // 16
+            var cg = (e % 16) * 4
+            var s2 = 2 * rd + tr // 64  # the subgroup whose tile this row is
+            var r = Int(block_idx.y) * 64 * WM + (s2 // WN) * 64 + tr % 64
+            var col = colw + (s2 % WN) * 64 + cg
+            var part = Float32(0)
+            if r < cnt:
+                var v = y.load[width=4](r * nn + col) + sb.load[width=4](tr * LDS + cg).cast[DType.float32]()
+                y.store(r * nn + col, v)
+                part = (v * v).reduce_add()
+            red[t] = part
+            barrier()
+            if t % 16 == 0:
+                var tot = Float32(0)
+                comptime for j in range(16):
+                    tot += red[t + j]
+                ss[r * (nn // 64) + col // 64] = tot
+            barrier()
+
+
+def gemm_k_swiglu[WM: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int = 64, FMT: Int = Q4, PAD: Int = 8,
+                   REG: Bool = False, PANEL: Bool = False](
+    xa: F16, wq: U32, ws: F16, xo: U32, f: Int32, k: Int32
+):
+    """gate|up with SwiGLU fused (AdrenoBLAS's 'g' epilogue, without interleaving the weights): a workgroup of WM x 2
+    subgroups takes gate rows 64 block_idx.x .. and the matching up rows (f further on, W = [gate; up]), subgroup
+    column 0 the gate, 1 the up; silu(gate) up goes to xo as R tiles with k = f (the down product's X). Grid
+    (f / 64, rows / (64 WM)), 128 WM threads."""
+    comptime BN = 128
+    comptime LD = BKS + PAD
+    var sb = stack_allocation[sb_size[BN, LD, REG](), DType.float16, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var sg = t // 64
+    var l = t % 64
+    var row0 = Int(block_idx.y) * 64 * WM + (sg // 2) * 64
+    var colw = Int(block_idx.x) * 64
+    var sc = (sg % 2) * 64
+    var ff = Int(f)
+    var c0 = k_loop[WM, 2, BKS, RG, ALONG_K, GS, FMT, LD, True, REG, PANEL](sb, xa, wq, ws, Int(k), row0, colw, sc,
+                                                                            t, ff - 64)
+    comptime for rd in range(WM):
+        if sg // 2 == rd:
+            c0.store(sb.unsafe_offset((sg % 2) * 64 * LDS), LDS)
+        barrier()
+        if sg // 2 == rd:  # the gate subgroup's lanes take columns 0 .. 31 of their row, the up subgroup's 32 .. 63
+            var cb = (sg % 2) * 32
+            var dst = xo + (r_tile(row0 + l, colw + cb, ff)) // 2
+            comptime for tl in range(2):
+                comptime for hh in range(2):
+                    var o = cb + 16 * tl + 8 * hh
+                    var g = sb.load[width=8](l * LDS + o).cast[DType.float32]()
+                    var u = sb.load[width=8](64 * LDS + l * LDS + o).cast[DType.float32]()
+                    var a = g / (1 + exp(-g)) * u
+                    var w = bitcast[DType.uint32, 4](a.cast[DType.float16]())
+                    comptime for e in range(4):
+                        dst[tl * 512 + hh * 4 + e] = w[e]
+        barrier()
+
+
+def repack_q4[CKW: Int, GS: Int = 64](wq: U32, ws: F16, wp: U32, sp: F16, n: Int32, k: Int32, perm: Int32 = 0,
+                                     hd: Int32 = 128):
+    """int4 rows (n x k / 8 words, a scale per GS) -> AdrenoBLAS-style panels for k_loop's REG + PANEL path: per
+    64-row panel and K step of 8 CKW, the 64 rows' CKW words side by side ([n / 64][k / (8 CKW)][64][CKW]); scales
+    [n / 64][k / GS][64]. A thread per (row, K step); one-time, at load."""
+    var i = global_idx.x
+    var kk = Int(k)
+    var steps = kk // (8 * CKW)
+    if i >= Int(n) * steps:
+        return
+    var r = i // steps
+    var st = i % steps
+    var src = r  # perm: the first `perm` rows, heads of hd, in the order 0, hd / 2, 1, hd / 2 + 1, .. of each head
+    if r < Int(perm):
+        var d = Int(hd)
+        src = (r // d) * d + (r % d) // 2 + (d // 2) * (r % 2)
+    var dst = ((r // 64) * steps + st) * 64 * CKW + (r % 64) * CKW
+    comptime for j in range(CKW):
+        wp[dst + j] = wq[src * (kk // 8) + st * CKW + j]
+    comptime if GS % (8 * CKW) == 0:
+        if (st * 8 * CKW) % GS == 0:
+            var g = st * 8 * CKW // GS
+            sp[((r // 64) * (kk // GS) + g) * 64 + r % 64] = ws[src * (kk // GS) + g]
+
+
+def gemm_k_rope[WM: Int, WN: Int, BKS: Int, GS: Int = 64, REG: Bool = True, PANEL: Bool = True, PAD: Int = 8,
+                 HD: Int = 128](
+    xa: F16, wq: U32, ws: F16, qt: U32, kt: U32, vt: U32, kc: F32, vc: F32, cos: F32, sin: F32, h: Int32,
+    kvh: Int32, k: Int32, rows: Int32, scale: Float32
+):
+    """The prompt's q|k|v product with RoPE and the attention layouts in the epilogue (AdrenoBLAS's qkv_rope kernel).
+    W's q and k rows come permuted to 0, 64, 1, 65, .. within each 128-wide head (repack_q4's perm), so each 64-column
+    tile holds 32 whole rotation pairs (dims i and i + 64 side by side) and each subgroup finishes its own tile: q
+    (rotated, scaled) and k (rotated) go to l85's tiles in the permuted dim order (q k^T is the same) and k also to
+    the fp32 cache in the true order; v (rows unpermuted) is staged column-major, so lane d reads its dim's 64
+    positions contiguously, and goes to the V^T tiles and the fp32 cache. Two subgroups stage at a time. rows: the
+    padded prompt (M). Grid ((h + 2 kvh) 128 / (64 WN), rows / (64 WM)), 64 WM WN threads; head dim 128."""
+    comptime BN = 64 * WN
+    comptime LD = BKS + PAD
+    comptime HALF = HD // 2
+    comptime assert HD == 64 or HD == 128, "gemm_k_rope: head dim 64 or 128"
+    var sb = stack_allocation[sb_size[BN, LD, REG](), DType.float16, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var sg = t // 64
+    var l = t % 64
+    var row0 = Int(block_idx.y) * 64 * WM + (sg // WN) * 64
+    var colw = Int(block_idx.x) * BN
+    var sc = (sg % WN) * 64
+    var c0 = k_loop[WM, WN, BKS, 1, True, GS, Q4, LD, REG=REG, PANEL=PANEL](sb, xa, wq, ws, Int(k), row0, colw, sc, t)
+    comptime assert WN == 1 or WN == 2, "gemm_k_rope: a workgroup within one kind of head (q, k or v)"
+    var nh = Int(h)
+    var nkv = Int(kvh)
+    var M = Int(rows)
+    var col0 = colw + sc
+    # The workgroup's kind of head decides the epilogue (uniform: the two epilogues must not share a store, or LLVM
+    # merges the two matrix stores into one with a run-time layout, which SPIR-V forbids); hh: this subgroup's head.
+    var kind = colw // HD
+    var hh = col0 // HD
+    var half = (col0 % HD) // 64
+    var st = (sg % 2) * 64 * LDS
+    if kind >= nh + nkv:  # v: staged column-major; lane = dim d, its 64 positions are row l of the stage
+        var g = hh - nh - nkv
+        var d = 64 * half + l
+        var vb = g * HD * M
+        comptime for rd in range((WM * WN + 1) // 2):
+            if sg // 2 == rd:
+                c0.store[row_major=False](sb.unsafe_offset(st), LDS)
+            barrier()
+            if sg // 2 == rd:
+                comptime for r4 in range(4):
+                    var v = sb.load[width=16](st + l * LDS + 16 * r4)
+                    var vf = v.cast[DType.float32]()
+                    comptime for e in range(16):
+                        vc[(row0 + 16 * r4 + e) * nkv * HD + g * HD + d] = vf[e]
+                    var w = bitcast[DType.uint32, 8](v)
+                    var ev = (vb + r_tile(d, row0 + 16 * r4, M)) // 2
+                    comptime for e in range(8):
+                        vt[ev + e] = w[e]
+            barrier()
+    else:  # q or k: lane = position; 16 permuted columns (8 rotation pairs) at a time
+        var isq = kind < nh
+        var g = hh if isq else hh - nh
+        var base = g * M * HD
+        var dt = qt if isq else kt
+        comptime for rd in range((WM * WN + 1) // 2):
+            if sg // 2 == rd:
+                c0.store(sb.unsafe_offset(st), LDS)
+            barrier()
+            if sg // 2 == rd:
+                var pos = row0 + l
+                comptime for j in range(4):
+                    var x = sb.load[width=16](st + l * LDS + 16 * j).cast[DType.float32]()
+                    var ab = x.deinterleave()
+                    var a = ab[0]
+                    var b = ab[1]
+                    var i = 32 * half + 8 * j  # the pairs' true dims i .. i + 7 (and + HALF)
+                    var c = cos.load[width=8](pos * HALF + i)
+                    var s = sin.load[width=8](pos * HALF + i)
+                    var ra = a * c - b * s
+                    var rb = b * c + a * s
+                    if isq:
+                        ra *= scale
+                        rb *= scale
+                    else:
+                        var dst = pos * nkv * HD + g * HD + i
+                        kc.store(dst, ra)
+                        kc.store(dst + HALF, rb)
+                    var w = bitcast[DType.uint32, 8](ra.interleave(rb).cast[DType.float16]())
+                    var e0 = (base + r_tile(pos, 64 * half + 16 * j, HD)) // 2
+                    comptime for e in range(8):
+                        dt[e0 + e] = w[e]
+            barrier()
+
+
+def gemm_kg[WN: Int, BKS: Int, GS: Int = G, FMT: Int = Q4, PAD: Int = 8](
+    xa: F16, wq: U32, ws: F16, part: F16, n: Int32, k: Int32, rows: Int32, tiles: I32, ntiles: I32
+):
+    """gemm_hqg on the 850: the grouped products (work tile block y = (expert e, grouped rows r0 .. r0 + 63) times
+    expert e's rows e n ..) with gemm_k's product: B K-minor in shared memory, one fp16 accumulator over the whole K,
+    so part holds one chunk. Grid (n / (64 WN), the most tiles), 64 WN threads."""
+    var it = Int(block_idx.y)
+    if it >= Int(ntiles[0]):
+        return
+    comptime BN = 64 * WN
+    comptime LD = BKS + PAD
+    var sb = stack_allocation[BN * LD, DType.float16, address_space=AddressSpace.SHARED]()
+    var e = Int(tiles[2 * it])
+    var row0 = Int(tiles[2 * it + 1])
+    var nn = Int(n)
+    var t = Int(thread_idx.x)
+    var sc = (t // 64) * 64
+    var colw = Int(block_idx.x) * BN
+    var c0 = k_loop[1, WN, BKS, 1, True, GS, FMT, LD](sb, xa, wq, ws, Int(k), row0, e * nn + colw, sc, t)
+    c0.store(part + row0 * nn + colw + sc, nn)
