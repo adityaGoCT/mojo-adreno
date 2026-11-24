@@ -169,17 +169,19 @@ def unpack_w[BN: Int, T: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int, FMT: In
                 sb.unsafe_store((8 * kw + e) * BN + rg * RG, h)
 
 
-def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int = G, FMT: Int = Q4](
+def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int = G, FMT: Int = Q4, TN: Int = 1](
     xa: F16, wq: U32, ws: F16, part: F16, n: Int32, k: Int32, rows: Int32
 ):
     """part[z] (rows x n, fp16) = X[:, z CH .. z CH + CH] W[:, same]^T with W unpacked from its rows (int4, int8 or
-    fp16: FMT) inside the product: a workgroup of WM x WN subgroups, each computing 64 x 64 of C, unpacks the
-    workgroup's BKS x 64 WN slice of W^T into shared memory (fp16, rows along N) a K step at a time (unpack_w), then
-    each subgroup multiplies its A tiles (loaded from xa's R tiles) by its 16 x 64 B tiles from shared memory. Launch
-    with grid (n / (64 WN), rows / (64 WM), ceil(k / CH)) and 64 WM WN threads; CH and k multiples of BKS, and of GS
-    for int4 and int8."""
-    comptime BN = 64 * WN
+    fp16: FMT) inside the product: a workgroup of WM x WN subgroups, each computing 64 x 64 TN of C (TN accumulators,
+    so each A tile it loads feeds TN products), unpacks the workgroup's BKS x 64 WN TN slice of W^T into shared memory
+    (fp16, rows along N) a K step at a time (unpack_w), then each subgroup multiplies its A tiles (loaded from xa's R
+    tiles) by its 16 x 64 B tiles from shared memory. Launch with grid (n / (64 WN TN), rows / (64 WM), ceil(k / CH))
+    and 64 WM WN threads; CH and k multiples of BKS, and of GS for int4 and int8; BKS x 64 WN TN halves of shared
+    memory at most 16 KB."""
+    comptime BN = 64 * WN * TN
     comptime T = 64 * WM * WN
+    comptime assert TN == 1 or TN == 2, "TN: 1 or 2"
     var sb = stack_allocation[BKS * BN, DType.float16, address_space=AddressSpace.SHARED]()
     var kk = Int(k)
     var nn = Int(n)
@@ -187,11 +189,12 @@ def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int
     var sg = t // 64
     var row0 = Int(block_idx.y) * 64 * WM + (sg // WN) * 64
     var colw = Int(block_idx.x) * BN
-    var sc = (sg % WN) * 64
+    var sc = (sg % WN) * 64 * TN
     var k_lo = Int(block_idx.z) * CH
     var k_hi = min(k_lo + CH, kk)
     var abase = xa + (row0 // 64) * (kk // 16) * 1024
     var c0 = CoopMatrix[DType.float16, 64, 64, ACCUMULATOR].zero()
+    var c1 = CoopMatrix[DType.float16, 64, 64, ACCUMULATOR].zero()
     for kb in range(k_lo, k_hi, BKS):
         unpack_w[BN, T, BKS, RG, ALONG_K, GS, FMT](sb, wq, ws, colw, kb, kk, t)
         barrier()
@@ -199,8 +202,14 @@ def gemm_hq[WM: Int, WN: Int, CH: Int, BKS: Int, RG: Int, ALONG_K: Bool, GS: Int
             var at = CoopMatrix[DType.float16, 64, 16, MATRIX_A].load(abase + (kb // 16 + s) * 1024, 16)
             var bt = CoopMatrix[DType.float16, 16, 64, MATRIX_B].load(sb.unsafe_offset(16 * s * BN + sc), BN)
             c0 = at.multiply_add(bt, c0)
+            comptime if TN == 2:
+                var b1 = CoopMatrix[DType.float16, 16, 64, MATRIX_B].load(sb.unsafe_offset(16 * s * BN + sc + 64), BN)
+                c1 = at.multiply_add(b1, c1)
         barrier()
-    c0.store(part + Int(block_idx.z) * Int(rows) * nn + row0 * nn + colw + sc, nn)
+    var out = part + Int(block_idx.z) * Int(rows) * nn + row0 * nn + colw + sc
+    c0.store(out, nn)
+    comptime if TN == 2:
+        c1.store(out + 64, nn)
 
 
 # ---- mixtures of experts: the batch's (token, choice) pairs grouped by expert ----------------------------------------
@@ -327,6 +336,69 @@ def swiglu_pack(part: F16, chunks: Int32, rows: Int32, fe: Int32, xa: U32, ntile
         u += part.load[width=8](base + f + c).cast[DType.float32]()
     var a = g / (1 + exp(-g)) * u
     xa.store(r_tile(r, c, f) // 2, bitcast[DType.uint32, 4](a.cast[DType.float16]()))
+
+
+# ---- the same, tiled: a workgroup writes whole R tiles ---------------------------------------------------------------
+# pack_x and swiglu_pack give each thread 8 values of a row, so neighbouring threads write 32-byte pieces of R tiles
+# 2 KB apart. These take a 64-row x 64-column block a workgroup (256 threads): they read its rows coalesced, stage the
+# fp16 block in shared memory, and write its four 64 x 16 R tiles (8 KB) contiguously. Grid: (k / 64, rows / 64).
+
+comptime SH32 = UnsafePointer[UInt32, MutUntrackedOrigin, address_space=AddressSpace.SHARED]
+
+
+@always_inline
+def _block_out(sb: SH32, xa: U32, rb: Int, cb: Int, kk: Int, t: Int):
+    """The staged 64 x 64 fp16 block (sb: rows of 32 words) as its four R tiles: thread t writes words t + 256 j."""
+    var dst = xa + ((rb * (kk // 16) + cb * 4) * 1024) // 2
+    comptime for j in range(8):
+        var q = t + 256 * j  # a word of the block's 2048, in R-tile order
+        var tile = q // 512
+        var r = (q % 512) // 8
+        var c2 = q % 8  # a pair of halves within the tile's 16 columns
+        dst[q] = sb[r * 32 + tile * 8 + c2]
+
+
+def pack_t(x: F32, xa: U32, k: Int32):
+    """pack_x, tiled: X (rows of k fp32) into fp16 R tiles. Grid (k / 64, rows / 64), 256 threads."""
+    var sb = stack_allocation[2048, DType.uint32, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var kk = Int(k)
+    var cb = Int(block_idx.x)
+    var rb = Int(block_idx.y)
+    comptime for half in range(2):
+        var r = t // 8 + 32 * half
+        var c = (t % 8) * 8
+        var v = x.load[width=8]((64 * rb + r) * kk + 64 * cb + c).cast[DType.float16]()
+        var w = bitcast[DType.uint32, 4](v)
+        comptime for e in range(4):
+            sb[r * 32 + c // 2 + e] = w[e]
+    barrier()
+    _block_out(sb, xa, rb, cb, kk, t)
+
+
+def swiglu_pack_t(part: F16, chunks: Int32, rows: Int32, fe: Int32, xa: U32):
+    """swiglu_pack for a dense layer, tiled: silu(gate) up from the gate|up partials (part: rows x 2 fe a chunk, added
+    in fp32) into fp16 R tiles with k = fe. Grid (fe / 64, rows / 64), 256 threads."""
+    var sb = stack_allocation[2048, DType.uint32, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var f = Int(fe)
+    var cb = Int(block_idx.x)
+    var rb = Int(block_idx.y)
+    comptime for half in range(2):
+        var r = t // 8 + 32 * half
+        var c = (t % 8) * 8
+        var g = SIMD[DType.float32, 8](0)
+        var u = SIMD[DType.float32, 8](0)
+        for z in range(Int(chunks)):
+            var base = (z * Int(rows) + 64 * rb + r) * 2 * f + 64 * cb + c
+            g += part.load[width=8](base).cast[DType.float32]()
+            u += part.load[width=8](base + f).cast[DType.float32]()
+        var a = g / (1 + exp(-g)) * u
+        var w = bitcast[DType.uint32, 4](a.cast[DType.float16]())
+        comptime for e in range(4):
+            sb[r * 32 + c // 2 + e] = w[e]
+    barrier()
+    _block_out(sb, xa, rb, cb, f, t)
 
 
 def combine[K: Int, ADD: Bool](part: F16, chunks: Int32, rows: Int32, slot: I32, wts: F32, y: F32, count: Int32,

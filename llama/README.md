@@ -266,6 +266,48 @@ prompt, and "The sky appears blue because of a phenomenon called Rayleigh scatte
 use chunks of 1024, as the 1B's do. A decode step reads the int4 weights, 1.71 GB of the 2.50 (the fp16 embedding
 gives only a row), in 34 ms: about 50 GB/s, as for the 1B. The switch does not change decode.
 
+#### Faster: the glue fused, attention reworked
+
+Profiling the switch's prompt (`LLAMA_PROFILE=1`) showed the products already at 4–5.5 TFLOP/s and 40% of the time
+around them: packing X into fp16 tiles, adding the K chunks' partial products, SiLU, the residual adds and
+attention. `model3.mojo`'s `layer_q` now fuses that glue:
+- **The norms write the next product's fp16 tiles directly.** `lg.norm_scale` computes each row's scale, and
+  `lg.norm_pack_t` writes the normed rows as whole tiles. So q/k/v and gate/up have no `pack_x`.
+- **gate/up's partials go straight to the down product's input.** `lkh.swiglu_pack_t` adds them, applies
+  silu(gate) × up and writes the packed tiles. A workgroup stages a 64 × 64 block in shared memory and writes whole
+  2 KB tiles; a thread writing its own 8 values scattered 32-byte pieces 2 KB apart.
+- **o's and down's partials are added straight into the residual stream** (`lkh.sum_parts_add`).
+- **Attention** (`lg.p_scores_packed`, `lg.p_softmax`, `lg.p_values`): one 64 × 64 score tile per workgroup, 8× the
+  workgroups. The scores are laid out [head][row][key], so P V's operand rows are 2 KB apart, not 48 KB. RoPE also
+  writes q as contiguous 64 × 8 tiles (`lg.rope_pack`). Writing k transposed as well cost more in scattered stores
+  than it saved.
+- **down** (k = 8192) runs 128-deep K steps, 6% faster for it (`llama/bench_hq.mojo` shapes 8–11).
+
+`LLAMA_FUSE=0` runs the switch as committed before this, and `LLAMA_SYNTH=1` runs with synthetic weights filled on
+the GPU (only the manifest on the phone). The synthetic weights time within 1% of the real ones. On a Galaxy Z Fold
+with the real weights, three rounds each, each run after the GPU cooled to 45 °C:
+
+| Llama 3.2 3B, int4, prompt | 431 tokens | 46 tokens (synthetic weights) |
+|---|---|---|
+| fp32 products | 1,610–1,617 ms (267 tokens/s) | 411–416 ms |
+| `LLAMA_GEMM=q`, each projection alone (`LLAMA_FUSE=0`) | 870–877 ms (493 tokens/s) | 207–209 ms |
+| **`LLAMA_GEMM=q`** | **748–756 ms (570–576 tokens/s, 2.15×)** | **184–195 ms** |
+| `LLAMA_GEMM=q LLAMA_CH=2048` | 672–676 ms (638–641 tokens/s, 2.4×) | 178–181 ms |
+
+Against `reference3.py`, `LLAMA_GEMM=q` gives 48 of 48 tokens on both prompts: logits within 0.13, KL 1.7e-4
+(431 tokens) and 5.1e-5 (46). `LLAMA_CH=2048` puts the products' K in chunks of 2048, half as many fp16 partial
+planes. It is 11% faster but less accurate: KL 4.2e-4 and 6.4e-4, and 47 of 48 tokens on the long prompt. At
+position 43 it picks " This" where the reference picks " Matrix" (logits 24.00 vs 24.19). So 1024 stays the default.
+
+Where the 750 ms go (`LLAMA_PROFILE=1`, which waits after each kind of launch): the four products about 580 (gate/up
+260, down 170, q/k/v 90, o 60; up to 5.6 TFLOP/s); attention, the norms, RoPE and the fused glue the other 170.
+
+**Against AdrenoBLAS.** AdrenoBLAS's Llama 3.2 3B prefill (2,602 tokens/s at 512 tokens, Q4_0) runs on the Adreno 850,
+whose matrix units reach 17.5 TFLOP/s. The 840 has none: its fp16 cooperative matrices run on the ALUs, at most about
+7.3 TFLOP/s, 7.0 in the best GEMM so far (the GEMM worklog's Adreno 840 companion,
+[adreno-gemm-worklog](https://github.com/adityaGoCT/adreno-gemm-worklog)). On the 840, AdrenoBLAS's own GEMMs (an fp16 ALU backend)
+reach 3.1–3.6 TFLOP/s, below these products' 4–5.6. The remaining gap here is to the 840's own ceiling.
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the

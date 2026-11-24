@@ -6,6 +6,11 @@
 #     LLAMA_EOS=128001,128009   stop tokens          LLAMA_LOGITS=<file>   logits after the prompt (fp32)
 #     LLAMA_PREFILL=<anything>  the whole prompt at once (Llama3.prefill); otherwise a token at a time
 #     LLAMA_GEMM=q              the prefill's products on fp16 cooperative matrices (lfm2/kernels/lkh.mojo)
+#     LLAMA_PROFILE=1           the prompt waits after each kind of launch: its time per kind
+#     LLAMA_SYNTH=1             no weights.bin: synthetic weights filled on the GPU (timing only; the output is noise)
+#     LLAMA_FUSE=0              LLAMA_GEMM=q without the fused glue (each projection packed, multiplied, summed alone)
+#     LLAMA_NORM=row            the fused path's norms a row a workgroup (lg.rmsnorm_pack) instead of tiled
+#     LLAMA_CH=2048             the fused path's products in K chunks of 2048 instead of 1024 (faster, less accurate)
 #
 # Then up to <max new> tokens are generated greedily (argmax on the CPU). Output: "tok <id> <ms>" for each.
 from std.os import getenv
@@ -41,7 +46,11 @@ def main() raises:
     var ctx = DeviceContext(api="vulkan")
     print("device:", ctx.name())
     var t_load = now_ms()
-    var model = Llama3(ctx, String(args[1]), gemmq=getenv("LLAMA_GEMM") == "q")
+    var model = Llama3(ctx, String(args[1]), gemmq=getenv("LLAMA_GEMM") == "q", synth=getenv("LLAMA_SYNTH") == "1")
+    model.prof = getenv("LLAMA_PROFILE") == "1"
+    model.fuse = getenv("LLAMA_FUSE") != "0"
+    model.norm_tiled = getenv("LLAMA_NORM") != "row"
+    model.ch2 = getenv("LLAMA_CH") == "2048"
     print("loaded in", round((now_ms() - t_load) / 1e3, 1), "s")
     if len(prompt) + max_new > model.CAP:
         raise Error("prompt + new tokens > " + String(model.CAP))

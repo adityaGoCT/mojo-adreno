@@ -196,12 +196,16 @@ def recipe(snap, model_dir, out):
     return shards
 
 
-def push_weights(model_dir):
+def push_weights(model_dir, push):
+    """The phone's copy of the export: pushed only with --push (2.5 GB through a remote lab's bridge can take an
+    hour; --recipe has the phone build it from the checkpoint instead)."""
     remote = f"{DEV}/{model_dir.name}"
     sh("adb", "shell", f"mkdir -p {remote}")
     for f in ("weights.bin", "manifest.txt"):
         size = sh("adb", "shell", f"stat -c %s {remote}/{f} 2>/dev/null", check=False).stdout.strip()
         if size != str((model_dir / f).stat().st_size):
+            if not push and f == "weights.bin":
+                sys.exit(f"the phone has no {remote}/{f} of this size: run with --push, or build it there (--recipe)")
             print(f"push {f} ({(model_dir / f).stat().st_size / 1e9:.2f} GB) ...", flush=True)
             sh("adb", "push", model_dir / f, f"{remote}/")
 
@@ -215,6 +219,7 @@ def main():
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--env", nargs="*", default=[], help="extra LLAMA_* settings for the phone (e.g. LLAMA_GEMM=q)")
     ap.add_argument("--export-only", action="store_true")
+    ap.add_argument("--push", action="store_true", help="push weights.bin when the phone's differs")
     ap.add_argument("--recipe", action="store_true",
                     help="also write build/llama/<name>-conv: st2bin's recipe and RoPE tables, for the phone to build "
                          "weights.bin from the checkpoint's shards itself (when adb is slow)")
@@ -236,7 +241,7 @@ def main():
     ids = tok.apply_chat_template([{"role": "user", "content": a.prompt}], add_generation_prompt=True)
     ids = list(ids["input_ids"] if hasattr(ids, "keys") else ids)
     eos = [128001, 128008, 128009]
-    push_weights(model_dir)
+    push_weights(model_dir, a.push)
     if not a.no_build:
         sh(sys.executable, ROOT / "android/build.py", "llama3")
         sh("adb", "shell", f"mkdir -p {DEV}/mojo3")

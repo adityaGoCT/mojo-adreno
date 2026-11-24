@@ -7,6 +7,7 @@
 # cache is position-major ([position][KVH HD]), as those attention kernels read it.
 from std.collections import Dict
 from std.math import sqrt
+from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
@@ -58,8 +59,17 @@ struct Llama3(Movable):
     var vc: List[DeviceBuffer[DType.float32]]
     var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles of up to CAP rows of the widest k
     var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
+    var nsc: DeviceBuffer[DType.float32]  # lg.norm_scale's per-row scales (CAP rows)
+    var fuse: Bool  # LLAMA_GEMM=q's prompt layers with the glue fused (layer_q; LLAMA_FUSE=0: each projection alone)
+    var norm_tiled: Bool  # layer_q's norms: lg.norm_scale + lg.norm_pack_t (LLAMA_NORM=row: lg.rmsnorm_pack)
+    var ch2: Bool  # LLAMA_CH=2048: layer_q's products in K chunks of 2048 (faster, less accurate: GCH's comment)
+    var prof: Bool  # LLAMA_PROFILE=1: the prompt waits after each kind of launch and adds its time to times[kind]
+    var times: Dict[String, Float64]
+    var mark: Float64
 
-    def __init__(out self, ctx: DeviceContext, dir: String, gemmq: Bool = False) raises:
+    def __init__(out self, ctx: DeviceContext, dir: String, gemmq: Bool = False, synth: Bool = False) raises:
+        """dir: run3.py's manifest.txt and weights.bin. synth: no weights.bin, every tensor filled on the GPU with
+        random int4 words and plain fp16 scales, norms and embeddings (LLAMA_SYNTH: timing without the weights)."""
         self.ctx = ctx
         var lines = open(dir + "/manifest.txt", "r").read().split("\n")
         var h = lines[0].split(" ")
@@ -111,7 +121,17 @@ struct Llama3(Movable):
         var nmax = max(groups(D, GCH) * max(self.QKV, 2 * self.F), groups(max(self.F, self.H * self.HD), GCH) * D)
         self.xa = ctx.enqueue_create_buffer[DType.float16](self.CAP * kmax if gemmq else 1)
         self.part = ctx.enqueue_create_buffer[DType.float16](self.CAP * nmax if gemmq else 1)
-        self.load(dir)
+        self.nsc = ctx.enqueue_create_buffer[DType.float32](self.CAP)
+        self.fuse = True
+        self.norm_tiled = True
+        self.ch2 = False
+        self.prof = False
+        self.times = Dict[String, Float64]()
+        self.mark = 0
+        if synth:
+            self.synthesize(dir)
+        else:
+            self.load(dir)
 
     def load(mut self, dir: String) raises:
         """weights.bin's tensors, as manifest.txt lists them ("<name> <offset> <bytes>"), each in a device buffer of
@@ -147,6 +167,51 @@ struct Llama3(Movable):
         print("weights:", len(self.halves) + len(self.words) + len(self.floats), "tensors,",
               Float64(total) / 1e9, "GB;", self.L, "layers, hidden", self.D, ", heads", self.H, "/", self.KVH, "of",
               self.HD, "(int4 projections and head)" if self.q4 else "")
+
+    def synthesize(mut self, dir: String) raises:
+        """The manifest's tensors, each filled on the GPU (lg.fill) instead of read from weights.bin: int4 words
+        random, scales 0.01, norm weights 1, embedding rows random in 2^-7 .. 2^-6, RoPE tables 0.5."""
+        var lines = open(dir + "/manifest.txt", "r").read().split("\n")
+        var total = 0
+        var seed = UInt32(1)
+        for i in range(1, len(lines)):
+            var f = lines[i].split(" ")
+            if len(f) != 3:
+                continue
+            var name = String(f[0])
+            var bytes = Int(f[2])
+            var w: DeviceBuffer[DType.uint32]
+            var mask = UInt32(0)
+            var bits = UInt32(0)
+            if name.endswith(".q"):
+                w = self.ctx.enqueue_create_buffer[DType.uint32](bytes // 4)
+                self.words[name] = w
+                self.q4 = True
+                mask = 0xFFFFFFFF
+            elif name.startswith("rope."):
+                var b = self.ctx.enqueue_create_buffer[DType.float32](bytes // 4)
+                self.floats[name] = b
+                w = b.create_sub_buffer[DType.uint32](0, bytes // 4)
+                bits = 0x3F000000
+            else:
+                var b = self.ctx.enqueue_create_buffer[DType.float16](bytes // 2)
+                self.halves[name] = b
+                w = b.create_sub_buffer[DType.uint32](0, bytes // 4)
+                if name.endswith(".s"):
+                    bits = 0x211F211F
+                elif name.startswith("embed."):
+                    mask = 0x03FF03FF
+                    bits = 0x20002000
+                else:
+                    bits = 0x3C003C00
+            var n = bytes // 4
+            self.ctx.enqueue_function[lg.fill](w, Int32(n), seed, mask, bits, grid_dim=groups(n, 256),
+                                               block_dim=256)
+            seed += 1
+            total += bytes
+        self.ctx.synchronize()
+        print("weights: synthetic,", Float64(total) / 1e9, "GB;", self.L, "layers, hidden", self.D, ", heads", self.H,
+              "/", self.KVH, "of", self.HD)
 
     # ---- a token --------------------------------------------------------------------------------------------------
 
@@ -230,8 +295,25 @@ struct Llama3(Movable):
 
     # ---- the prompt -------------------------------------------------------------------------------------------------
 
-    def pproj(self, n: Int, k: Int, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
-              rows: Int) raises:
+    def tick(mut self, kind: String) raises:
+        """LLAMA_PROFILE: wait for what is enqueued and add the time since the last tick to times[kind]."""
+        if not self.prof:
+            return
+        self.ctx.synchronize()
+        var now = Float64(perf_counter_ns()) / 1e6
+        self.times[kind] = self.times.get(kind, 0.0) + now - self.mark
+        self.mark = now
+
+    def report(self) raises:
+        var total = 0.0
+        for e in self.times.items():
+            total += e.value
+        for e in self.times.items():
+            print("profile:", e.key, round(e.value, 1), "ms (" + String(round(100 * e.value / total, 1)) + "%)")
+        print("profile: total", round(total, 1), "ms")
+
+    def pproj(mut self, n: Int, k: Int, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32],
+              rows: Int, kind: String) raises:
         """Y = X W^T for `rows` rows (a multiple of 128), W the tensor `name` (n x k) in fp16 or int4: kernels/prefill's
         fp32 cooperative products, or with LLAMA_GEMM=q lkh's fp16 ones (pack_x, gemm_hq, sum_parts)."""
         if self.gemmq:
@@ -241,6 +323,7 @@ struct Llama3(Movable):
             self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2),
                                                   Int32(k), Int32(rows * k // 8), grid_dim=groups(rows * k // 8, 256),
                                                   block_dim=256)
+            self.tick("pack_x")
             var g = Dim(n // 64, rows // 128, chunks)
             if self.q4:
                 self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.Q4]](
@@ -251,8 +334,10 @@ struct Llama3(Movable):
                 self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False, 64, lkh.FP16]](
                     self.xa, w.create_sub_buffer[DType.uint32](0, n * k // 2), w, self.part, Int32(n), Int32(k),
                     Int32(rows), grid_dim=g, block_dim=128)
+            self.tick(kind)
             self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
                                                      grid_dim=groups(rows * n // 8, 256), block_dim=256)
+            self.tick("sum_parts")
             return
         var grid = Dim(n // 128, rows // 128)
         if self.q4:
@@ -261,6 +346,123 @@ struct Llama3(Movable):
         else:
             self.ctx.enqueue_function[p_gemm.p_gemm](self.halves[name], x, y, Int64(n), Int64(k), grid_dim=grid,
                                                      block_dim=256)
+        self.tick(kind)
+
+    def gemm_q(mut self, n: Int, k: Int, name: String, rows: Int, kind: String) raises -> Int:
+        """LLAMA_GEMM=q's product alone: part (k / chunk fp16 partials of rows x n) = xa (X, already packed) W^T, W the
+        int4 or fp16 tensor `name` (n x k). Returns the number of chunks."""
+        var chunks: Int
+        if self.ch2:
+            chunks = self.gemm_c[2 * GCH](n, k, name, rows)
+        else:
+            chunks = self.gemm_c[GCH](n, k, name, rows)
+        self.tick(kind)
+        return chunks
+
+    def gemm_c[CH: Int](mut self, n: Int, k: Int, name: String, rows: Int) raises -> Int:
+        var chunks = groups(k, CH)
+        if rows * k > len(self.xa) or chunks * rows * n > len(self.part):
+            raise Error("lkh: a buffer is too small")
+        var g = Dim(n // 64, rows // 128, chunks)
+        if self.q4 and k > 4 * GCH:  # down (k 8192): 128-deep K steps, 6% faster there (64 elsewhere)
+            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, CH, 128, 4, False, 64, lkh.Q4]](
+                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                Int32(rows), grid_dim=g, block_dim=128)
+        elif self.q4:
+            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, CH, 64, 4, False, 64, lkh.Q4]](
+                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                Int32(rows), grid_dim=g, block_dim=128)
+        else:
+            var w = self.halves[name]
+            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, CH, 64, 4, False, 64, lkh.FP16]](
+                self.xa, w.create_sub_buffer[DType.uint32](0, n * k // 2), w, self.part, Int32(n), Int32(k),
+                Int32(rows), grid_dim=g, block_dim=128)
+        return chunks
+
+    def norm_q(mut self, xr: DeviceBuffer[DType.float32], w: String, rows: Int) raises:
+        """xa = the packed fp16 X of RMSNorm(xr) w, for the projection that follows."""
+        var xa32 = self.xa.create_sub_buffer[DType.uint32](0, len(self.xa) // 2)
+        if self.norm_tiled:
+            self.ctx.enqueue_function[lg.norm_scale](xr, self.nsc, Int32(self.D), grid_dim=rows, block_dim=lg.T)
+            self.ctx.enqueue_function[lg.norm_pack_t](xr, self.halves[w], self.nsc, xa32, Int32(self.D),
+                                                      grid_dim=Dim(self.D // 64, rows // 64), block_dim=256)
+        else:
+            self.ctx.enqueue_function[lg.rmsnorm_pack](xr, self.halves[w], xa32, Int32(self.D), grid_dim=rows,
+                                                       block_dim=lg.T)
+        self.tick("norms")
+
+    def layer_q(mut self, l: Int, n: Int, rows: Int, xr: DeviceBuffer[DType.float32],
+                qkvr: DeviceBuffer[DType.float32], attr: DeviceBuffer[DType.float32],
+                pscores: DeviceBuffer[DType.float32], qp: DeviceBuffer[DType.float32]) raises:
+        """A layer of the prompt with LLAMA_GEMM=q, the glue fused: the norms write the projections' packed fp16 X
+        (lg.rmsnorm_pack), o's and down's partials are added into the residual stream (lkh.sum_parts_add), and gate|up's
+        into silu(gate) up packed for down (lkh.swiglu_pack_t); q and k^T also go to p_scores_packed's layouts
+        (lg.rope_pack)."""
+        var ctx = self.ctx
+        var D = self.D
+        var H = self.H
+        var p = "l" + String(l) + "."
+        var xa32 = self.xa.create_sub_buffer[DType.uint32](0, len(self.xa) // 2)
+        self.norm_q(xr, p + "attn_norm", rows)
+        var c = self.gemm_q(self.QKV, D, p + "wqkv", rows, "q/k/v")
+        ctx.enqueue_function[lkh.sum_parts](self.part, qkvr, Int32(rows * self.QKV), Int32(c),
+                                            grid_dim=groups(rows * self.QKV // 8, 256), block_dim=256)
+        self.tick("sum_parts")
+        var scale = Float32(1.0 / sqrt(Float64(self.HD)))
+        var g = Dim(groups((H + self.KVH) * self.HD // 2, 64), n)
+        if self.HD == 64:
+            ctx.enqueue_function[lg.rope_pack[64]](qkvr, self.floats["rope.cos"], self.floats["rope.sin"], self.kc[l],
+                                                   self.vc[l], qp, Int32(H), Int32(self.KVH), Int32(self.QKV),
+                                                   Int32(rows), scale, grid_dim=g, block_dim=64)
+        else:
+            ctx.enqueue_function[lg.rope_pack[128]](qkvr, self.floats["rope.cos"], self.floats["rope.sin"], self.kc[l],
+                                                    self.vc[l], qp, Int32(H), Int32(self.KVH), Int32(self.QKV),
+                                                    Int32(rows), scale, grid_dim=g, block_dim=64)
+        self.tick("rope")
+        self.attention_p(l, n, rows, qp, attr, pscores)
+        self.tick("attention")
+        ctx.enqueue_function[lkh.pack_t](attr, xa32, Int32(H * self.HD), grid_dim=Dim(H * self.HD // 64, rows // 64),
+                                         block_dim=256)
+        self.tick("pack_x")
+        c = self.gemm_q(D, H * self.HD, p + "wo", rows, "o")
+        ctx.enqueue_function[lkh.sum_parts_add](self.part, xr, Int32(n * D), Int32(c), Int32(rows * D),
+                                                grid_dim=groups(n * D // 8, 256), block_dim=256)
+        self.tick("sum_parts + add")
+        self.norm_q(xr, p + "mlp_norm", rows)
+        c = self.gemm_q(2 * self.F, D, p + "wgu", rows, "gate/up")
+        ctx.enqueue_function[lkh.swiglu_pack_t](self.part, Int32(c), Int32(rows), Int32(self.F), xa32,
+                                                grid_dim=Dim(self.F // 64, rows // 64), block_dim=256)
+        self.tick("swiglu_pack")
+        c = self.gemm_q(D, self.F, p + "wdown", rows, "down")
+        ctx.enqueue_function[lkh.sum_parts_add](self.part, xr, Int32(n * D), Int32(c), Int32(rows * D),
+                                                grid_dim=groups(n * D // 8, 256), block_dim=256)
+        self.tick("sum_parts + add")
+
+    def attention_p(mut self, l: Int, n: Int, rows: Int, qp: DeviceBuffer[DType.float32],
+                    attr: DeviceBuffer[DType.float32], pscores: DeviceBuffer[DType.float32]) raises:
+        """The prompt's attention on the matrix units (lg's p_scores, p_softmax, p_values: gemma4's kernels with the
+        scores [head][row][key] and a workgroup a score tile): S = Q K^T, each row's softmax, then P V, into attr."""
+        var ctx = self.ctx
+        var H = self.H
+        var nq = Int32(H // self.KVH)
+        var cap = Int32(self.CAP)
+        var r = Int32(rows)
+        if self.HD == 64:
+            ctx.enqueue_function[lg.p_scores_packed[64]](qp, self.kc[l], pscores, nq, Int32(self.KVH), r, cap,
+                                                         grid_dim=Dim(rows // 64, H, rows // 64), block_dim=64)
+        else:
+            ctx.enqueue_function[lg.p_scores_packed[128]](qp, self.kc[l], pscores, nq, Int32(self.KVH), r, cap,
+                                                          grid_dim=Dim(rows // 64, H, rows // 64), block_dim=64)
+        self.tick("attention: Q K^T")
+        ctx.enqueue_function[lg.p_softmax](pscores, Int32(n), r, cap, grid_dim=Dim(H, rows), block_dim=64)
+        self.tick("attention: softmax")
+        if self.HD == 64:
+            ctx.enqueue_function[lg.p_values[64]](pscores, self.vc[l], attr, nq, Int32(self.KVH), Int32(H), r, cap,
+                                                  grid_dim=Dim(rows // 64, H), block_dim=64)
+        else:
+            ctx.enqueue_function[lg.p_values[128]](pscores, self.vc[l], attr, nq, Int32(self.KVH), Int32(H), r, cap,
+                                                   grid_dim=Dim(rows // 64, H * 2), block_dim=64)
+        self.tick("attention: P V")
 
     def prefill(mut self, tokens: List[Int]) raises:
         """Enqueues the whole prompt at once, at positions 0 .. len(tokens) - 1 (padded to 128 rows): per layer the
@@ -281,6 +483,10 @@ struct Llama3(Movable):
         var actr = ctx.enqueue_create_buffer[DType.float32](rows * self.F)
         var yr = ctx.enqueue_create_buffer[DType.float32](rows * D)
         var pscores = ctx.enqueue_create_buffer[DType.float32](rows * H * self.CAP)
+        var qp = ctx.enqueue_create_buffer[DType.float32](rows * H * HD if self.gemmq else 1)  # lg.rope_pack's q
+        if self.prof:
+            ctx.synchronize()
+            self.mark = Float64(perf_counter_ns()) / 1e6
         xr.enqueue_fill(0)  # the padding rows
         for t in range(n):
             ctx.enqueue_function[lg.embed](self.halves["embed." + String(tokens[t] // self.CROWS)],
@@ -289,11 +495,17 @@ struct Llama3(Movable):
                                            block_dim=64)
         var nq = Int32(H // self.KVH)
         var cap = Int32(self.CAP)
+        self.tick("embed")
         for l in range(self.L):
+            if self.gemmq and self.fuse:
+                self.layer_q(l, n, rows, xr, qkvr, attr, pscores, qp)
+                continue
             var p = "l" + String(l) + "."
             self.norm(xr, p + "attn_norm", xnr, rows)
-            self.pproj(self.QKV, D, p + "wqkv", xnr, qkvr, rows)
+            self.tick("norms")
+            self.pproj(self.QKV, D, p + "wqkv", xnr, qkvr, rows, "q/k/v")
             self.rope(qkvr, l, 0, n)
+            self.tick("rope")
             if HD == 64:
                 ctx.enqueue_function[g4k.p_scores_mma[64]](qkvr, self.kc[l], pscores, Int32(0), Int32(0), nq,
                                                            Int32(self.KVH), Int32(self.QKV), Int32(H), cap,
@@ -312,13 +524,21 @@ struct Llama3(Movable):
                 ctx.enqueue_function[g4k.p_values_mma[128]](pscores, self.vc[l], attr, Int32(0), Int32(0), nq,
                                                             Int32(self.KVH), Int32(H), cap,
                                                             grid_dim=Dim(rows // 64, H * 2), block_dim=64)
-            self.pproj(D, H * HD, p + "wo", attr, yr, rows)
+            self.tick("attention")
+            self.pproj(D, H * HD, p + "wo", attr, yr, rows, "o")
             ctx.enqueue_function[lg.p_add](xr, yr, Int32(n * D), grid_dim=groups(n * D, 256), block_dim=256)
+            self.tick("adds")
             self.norm(xr, p + "mlp_norm", xnr, rows)
-            self.pproj(2 * self.F, D, p + "wgu", xnr, gur, rows)
+            self.tick("norms")
+            self.pproj(2 * self.F, D, p + "wgu", xnr, gur, rows, "gate/up")
             ctx.enqueue_function[lk.silu_mul](gur, actr, Int32(self.F), Int32(rows),
                                               grid_dim=groups(rows * self.F, 64), block_dim=64)
-            self.pproj(D, self.F, p + "wdown", actr, yr, rows)
+            self.tick("silu")
+            self.pproj(D, self.F, p + "wdown", actr, yr, rows, "down")
             ctx.enqueue_function[lg.p_add](xr, yr, Int32(n * D), grid_dim=groups(n * D, 256), block_dim=256)
+            self.tick("adds")
         ctx.enqueue_copy(self.x, xr.create_sub_buffer[DType.float32]((n - 1) * D, D))  # the last prompt row
         self.head()
+        self.tick("head")
+        if self.prof:
+            self.report()

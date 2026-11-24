@@ -6,7 +6,8 @@
 # 12288 x 1536, down 1536 x 6144). Each variant is checked against the fp32 kernel's output (the largest difference
 # over the largest output, and NaNs) and timed with and without pack_x.
 #
-#   bench_hq [reps] [format] [shape] [variant]   format: 0 int4, 1 int8, 2 fp16; shape 0-7; variant 0-4
+#   bench_hq [reps] [format] [shape] [variant]   format: 0 int4, 1 int8, 2 fp16; shape 0-11 (8-11: Llama 3.2 3B);
+#                                                variant 0-7 (5-7: two accumulators a subgroup, TN = 2)
 from std.sys import argv
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
@@ -43,15 +44,16 @@ struct Bufs(Movable):
         self.part = ctx.enqueue_create_buffer[DType.float16]((k + 1023) // 1024 * ROWS * n)  # chunks of 1024 or more
 
 
-def hq[WM: Int, CH: Int, RG: Int, ALONG_K: Bool, FMT: Int](ctx: DeviceContext, b: Bufs, n: Int, k: Int,
-                                                         prep: Bool) raises:
+def hq[WM: Int, CH: Int, RG: Int, ALONG_K: Bool, FMT: Int, TN: Int = 1, BKS: Int = 64, WN: Int = 1](
+    ctx: DeviceContext, b: Bufs, n: Int, k: Int, prep: Bool
+) raises:
     if prep:
         ctx.enqueue_function[lkh.pack_x](b.x, b.xa.create_sub_buffer[DType.uint32](0, ROWS * k // 2), Int32(k),
                                          Int32(ROWS * k // 8), grid_dim=(ROWS * k // 8 + 255) // 256, block_dim=256)
     var chunks = (k + CH - 1) // CH
-    ctx.enqueue_function[lkh.gemm_hq[WM, 1, CH, 64, RG, ALONG_K, GS, FMT]](
-        b.xa, b.wq, b.ws, b.part, Int32(n), Int32(k), Int32(ROWS), grid_dim=Dim(n // 64, ROWS // (64 * WM), chunks),
-        block_dim=64 * WM)
+    ctx.enqueue_function[lkh.gemm_hq[WM, WN, CH, BKS, RG, ALONG_K, GS, FMT, TN]](
+        b.xa, b.wq, b.ws, b.part, Int32(n), Int32(k), Int32(ROWS),
+        grid_dim=Dim(n // (64 * TN * WN), ROWS // (64 * WM), chunks), block_dim=64 * WM * WN)
     ctx.enqueue_function[lkh.sum_parts](b.part, b.y, Int32(ROWS * n), Int32(chunks),
                                         grid_dim=(ROWS * n // 8 + 255) // 256, block_dim=256)
 
@@ -75,6 +77,22 @@ def variant[FMT: Int](ctx: DeviceContext, v: Int, b: Bufs, n: Int, k: Int, prep:
         hq[4, 2048, 4, False, FMT](ctx, b, n, k, prep)
     elif v == 4:
         hq[2, 1024, 4, False, FMT](ctx, b, n, k, prep)
+    elif v == 5:
+        hq[2, 1024, 4, False, FMT, 2](ctx, b, n, k, prep)
+    elif v == 6:
+        hq[4, 1024, 4, False, FMT, 2](ctx, b, n, k, prep)
+    elif v == 7:
+        hq[2, 2048, 4, False, FMT, 2](ctx, b, n, k, prep)
+    elif v == 8:
+        hq[2, 1024, 4, True, FMT](ctx, b, n, k, prep)
+    elif v == 9:
+        hq[2, 1024, 4, False, FMT, 1, 128](ctx, b, n, k, prep)
+    elif v == 10:
+        hq[2, 1024, 4, True, FMT, 1, 128](ctx, b, n, k, prep)
+    elif v == 11:
+        hq[2, 1024, 4, False, FMT, 1, 64, 2](ctx, b, n, k, prep)
+    elif v == 12:
+        hq[2, 1024, 8, True, FMT](ctx, b, n, k, prep)
 
 
 def launch(ctx: DeviceContext, fmt: Int, v: Int, b: Bufs, n: Int, k: Int, prep: Bool) raises:
@@ -86,7 +104,7 @@ def launch(ctx: DeviceContext, fmt: Int, v: Int, b: Bufs, n: Int, k: Int, prep: 
         variant[lkh.FP16](ctx, v, b, n, k, prep)
 
 
-comptime NV = 5
+comptime NV = 13
 
 
 def main() raises:
@@ -97,13 +115,16 @@ def main() raises:
     var onlyv = Int(args[4]) if len(args) > 4 else -1
     var fmts: List[String] = ["int4", "int8", "fp16"]
     var labels: List[String] = ["fp32 coopmat (the model's)", "hq w2 c2048 rg4 alongN", "hq w2 c2048 rg4 alongK",
-                                "hq w4 c2048 rg4 alongN", "hq w2 c1024 rg4 alongN"]
+                                "hq w4 c2048 rg4 alongN", "hq w2 c1024 rg4 alongN", "hq w2 c1024 TN2",
+                                "hq w4 c1024 TN2", "hq w2 c2048 TN2", "hq w2 c1024 alongK", "hq w2 c1024 k128 alongN",
+                                "hq w2 c1024 k128 alongK", "hq w2x2 c1024 alongN", "hq w2 c1024 rg8 alongK"]
     var ctx = DeviceContext(api="vulkan")
     print("device:", ctx.name(), "; rows:", ROWS, "; reps:", reps, "; weights:", fmts[fmt])
     var shapes: List[Tuple[Int, Int, String]] = [
         (3072, 2048, "llama q|k|v"), (2048, 2048, "llama o"), (16384, 2048, "llama gate|up"),
         (2048, 8192, "llama down"), (2560, 1536, "e2b q|k|v"), (1536, 2048, "e2b o"), (12288, 1536, "e2b gate|up"),
-        (1536, 6144, "e2b down")]
+        (1536, 6144, "e2b down"), (5120, 3072, "3b q|k|v"), (3072, 3072, "3b o"), (16384, 3072, "3b gate|up"),
+        (3072, 8192, "3b down")]
     for si in range(len(shapes)):
         if only >= 0 and si != only:
             continue
