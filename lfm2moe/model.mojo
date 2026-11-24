@@ -18,9 +18,18 @@ from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
 import lk
+import lkh
 import mk
 
 comptime PMAX = 512  # prompt rows a prefill batch holds (a multiple of 128)
+# LFM2MOE_GEMM=q: prefill products on fp16 cooperative matrices (lfm2/kernels/lkh.mojo) instead of lk.gemm_q4 and
+# mk.p_gemm_q4g's fp32 ones. Dense projections: X packed into fp16 R tiles (pack_x), the int4 rows unpacked into fp16
+# shared memory inside the product (gemm_hq), K in chunks of GCH added in fp32 (sum_parts). Experts: the grouped rows
+# packed by pack_gather, every work tile's product in one gemm_hqg launch (a 64-row tile by GWN x 64 columns),
+# swiglu_pack, gemm_hqg for down, then combine. The 840 rounds every partial sum of an fp16 product to fp16.
+comptime GCH = 2048
+comptime GWN = 2  # 128 columns a tile: 543-551 ms on the 414-token prompt, against 640-689 with 64 and 883 with 256
+comptime GBK = 64
 comptime PAD = 128  # cache rows past the context: prefill's matrix-unit attention reads up to a block's 64-aligned end
 comptime SCORE_MAX = 4096  # prompts up to this many positions use the matrix-unit prefill attention (g4k)
 
@@ -88,6 +97,9 @@ struct LFM2Moe(Movable):
     var wave: Bool  # scalar grouped products with one-subgroup workgroups (LFM2MOE_WAVE=1, tm 16)
     var tm: Int  # prefill: rows a grouped work tile (64 on the matrix units; LFM2MOE_TM=64, 32 or 16 scalar)
     var mma: Bool  # prefill products on the cooperative matrices (LFM2MOE_SCALAR=1: none, as the X1-85 has)
+    var gemmq: Bool  # LFM2MOE_GEMM=q: prefill products on lkh's fp16 cooperative matrices (set at construction)
+    var xa: DeviceBuffer[DType.float16]  # lkh's X: fp16 R tiles (a batch's rows, or the grouped rows)
+    var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
     var pscores: DeviceBuffer[DType.float32]
     var score_cap: Int
     var dump: String  # prefill: append each layer's residual stream rows (fp32) to this file (stage checks)
@@ -97,9 +109,10 @@ struct LFM2Moe(Movable):
     var times: Dict[String, Float64]
     var mark: Float64
 
-    def __init__(out self, ctx: DeviceContext, dir: String, bin: String) raises:
+    def __init__(out self, ctx: DeviceContext, dir: String, bin: String, gemmq: Bool = False) raises:
         """dir: export.py's q4/manifest.txt (rope.f32 in its parent); bin: convert's weight file (on the executor's
-        side when remote)."""
+        side when remote). gemmq: prefill products on lkh's fp16 cooperative matrices (the fp32 grouped buffers are
+        then left out)."""
         self.ctx = ctx
         var lines = open(dir + "/manifest.txt", "r").read().splitlines()
         var head = lines[0].split(" ")
@@ -161,10 +174,19 @@ struct LFM2Moe(Movable):
         self.src = ctx.enqueue_create_buffer[DType.int32](self.MAXG)
         self.tiles = ctx.enqueue_create_buffer[DType.int32](2 * (self.MAXG // mk.TM))
         self.ntiles = ctx.enqueue_create_buffer[DType.int32](1)
-        self.xg = ctx.enqueue_create_buffer[DType.float32](self.MAXG * D)
-        self.ggu = ctx.enqueue_create_buffer[DType.float32](self.MAXG * 2 * self.FE)
-        self.gact = ctx.enqueue_create_buffer[DType.float32](self.MAXG * self.FE)
-        self.gdown = ctx.enqueue_create_buffer[DType.float32](self.MAXG * D)
+        self.gemmq = gemmq
+        var g = 1 if gemmq else self.MAXG  # the fp32 path's grouped rows (none with gemmq)
+        self.xg = ctx.enqueue_create_buffer[DType.float32](g * D)
+        self.ggu = ctx.enqueue_create_buffer[DType.float32](g * 2 * self.FE)
+        self.gact = ctx.enqueue_create_buffer[DType.float32](g * self.FE)
+        self.gdown = ctx.enqueue_create_buffer[DType.float32](g * D)
+        var qkvw = (self.H + 2 * self.KVH) * lk.HD
+        var nxa = max(self.MAXG * max(D, self.FE), PMAX * max(D, self.F, self.H * lk.HD))
+        var npart = max(self.MAXG * max(groups(D, GCH) * 2 * self.FE, groups(self.FE, GCH) * D),
+                        PMAX * max(groups(D, GCH) * max(2 * self.F, 3 * D, qkvw),
+                                   groups(max(self.F, self.H * lk.HD), GCH) * D))
+        self.xa = ctx.enqueue_create_buffer[DType.float16](nxa if gemmq else 1)
+        self.part = ctx.enqueue_create_buffer[DType.float16](npart if gemmq else 1)
         self.logits = ctx.enqueue_create_buffer[DType.float32](self.V)
         self.attn_mma = True
         self.mma = True
@@ -276,6 +298,19 @@ struct LFM2Moe(Movable):
     def gemm(self, name: String, x: DeviceBuffer[DType.float32], y: DeviceBuffer[DType.float32], n: Int, k: Int,
              rows: Int) raises:
         """y[rows, n] = x[rows, k] W^T (rows: a multiple of 128)."""
+        if self.gemmq:
+            var chunks = groups(k, GCH)
+            if rows * k > len(self.xa) or chunks * rows * n > len(self.part):
+                raise Error("lkh: a buffer is too small")
+            self.ctx.enqueue_function[lkh.pack_x](x, self.xa.create_sub_buffer[DType.uint32](0, rows * k // 2),
+                                                  Int32(k), Int32(rows * k // 8),
+                                                  grid_dim=groups(rows * k // 8, 256), block_dim=256)
+            self.ctx.enqueue_function[lkh.gemm_hq[2, 1, GCH, 64, 4, False]](
+                self.xa, self.words[name + ".q"], self.halves[name + ".s"], self.part, Int32(n), Int32(k),
+                Int32(rows), grid_dim=Dim(n // 64, rows // 128, chunks), block_dim=128)
+            self.ctx.enqueue_function[lkh.sum_parts](self.part, y, Int32(rows * n), Int32(chunks),
+                                                     grid_dim=groups(rows * n // 8, 256), block_dim=256)
+            return
         if not self.mma and self.wave:
             self.ctx.enqueue_function[mk.gemm_q4w](self.words[name + ".q"], self.halves[name + ".s"], x, y, Int32(n),
                                                    Int32(k), grid_dim=Dim(n // 64, rows // 16), block_dim=64)
@@ -474,6 +509,9 @@ struct LFM2Moe(Movable):
         self.route(n, count)
         if self.skip.find(",group,") >= 0:
             return
+        if self.gemmq:
+            self.experts_q(n, count)
+            return
         self.src.enqueue_fill(-1)
         ctx.enqueue_function[mk.p_group](self.rids, self.slot, self.src, self.tiles, self.ntiles, Int32(count),
                                          Int32(self.E), Int32(self.tm), grid_dim=1, block_dim=64)
@@ -490,6 +528,43 @@ struct LFM2Moe(Movable):
         self.tick("p: experts down")
         ctx.enqueue_function[mk.p_combine](self.gdown, self.slot, self.rwts, self.tmp, Int32(count), Int32(D),
                                            grid_dim=groups(count * D, 64), block_dim=64)
+        self.tick("p: combine")
+
+    def experts_q(mut self, n: String, count: Int) raises:
+        """experts() on lkh's fp16 cooperative matrices (rids, rwts chosen): the grouped rows packed, both products
+        one gemm_hqg launch each, silu(gate) up packed between them, the outputs weighted and added into tmp."""
+        var ctx = self.ctx
+        var D = self.D
+        var FE = self.FE
+        var G = self.MAXG
+        var tm = Int32(mk.TM)
+        var c1 = groups(D, GCH)
+        var c2 = groups(FE, GCH)
+        if G * max(D, FE) > len(self.xa) or G * max(c1 * 2 * FE, c2 * D) > len(self.part):
+            raise Error("lkh: a buffer is too small")
+        self.src.enqueue_fill(-1)
+        ctx.enqueue_function[mk.p_group](self.rids, self.slot, self.src, self.tiles, self.ntiles, Int32(count),
+                                         Int32(self.E), tm, grid_dim=1, block_dim=64)
+        ctx.enqueue_function[lkh.pack_gather](self.xn, self.src, self.xa.create_sub_buffer[DType.uint32](0, G * D // 2),
+                                              Int32(D), self.ntiles, tm, grid_dim=groups(G * D // 8, 256),
+                                              block_dim=256)
+        self.tick("p: router + grouping")
+        if self.skip.find(",eprod,") >= 0:
+            return
+        ctx.enqueue_function[lkh.gemm_hqg[GWN, GCH, GBK, 4, False]](
+            self.xa, self.words[n + "egu.q"], self.halves[n + "egu.s"], self.part, Int32(2 * FE), Int32(D), Int32(G),
+            self.tiles, self.ntiles, grid_dim=Dim(2 * FE // (64 * GWN), G // mk.TM, c1), block_dim=64 * GWN)
+        ctx.enqueue_function[lkh.swiglu_pack](self.part, Int32(c1), Int32(G), Int32(FE),
+                                              self.xa.create_sub_buffer[DType.uint32](0, G * FE // 2), self.ntiles, tm,
+                                              grid_dim=groups(G * FE // 8, 256), block_dim=256)
+        self.tick("p: experts gate/up")
+        ctx.enqueue_function[lkh.gemm_hqg[GWN, GCH, GBK, 4, False]](
+            self.xa, self.words[n + "edown.q"], self.halves[n + "edown.s"], self.part, Int32(D), Int32(FE), Int32(G),
+            self.tiles, self.ntiles, grid_dim=Dim(D // (64 * GWN), G // mk.TM, c2), block_dim=64 * GWN)
+        self.tick("p: experts down")
+        ctx.enqueue_function[lkh.combine[mk.K, False]](self.part, Int32(c2), Int32(G), self.slot, self.rwts, self.tmp,
+                                                       Int32(count), Int32(D), grid_dim=groups(count * D, 64),
+                                                       block_dim=64)
         self.tick("p: combine")
 
     def prefill_batch(mut self, p0: Int, count: Int, last: Bool) raises:

@@ -15,6 +15,7 @@
 #     LFM2MOE_ATTN=scalar    prefill attention with lk.attention instead of the matrix units
 #     LFM2MOE_ROWS=4 / 8     decode products with that many weight rows a workgroup (mk.gemv_q4r); 1: lk's, a row
 #     LFM2MOE_SCALAR=1       no cooperative matrices at all (the X1-85 has none): tiled scalar int4 products
+#     LFM2MOE_GEMM=q         prefill products on fp16 cooperative matrices (lfm2/kernels/lkh.mojo; not with SCALAR)
 #     LFM2MOE_REPLAY=k       remote: then time a decode step on the server's clock (the server keeps the step's
 #                            requests and runs them k more times: vk_server's OP_RECORD / OP_REPLAY)
 #
@@ -85,7 +86,8 @@ def main() raises:
     var ctx = DeviceContext(api="vulkan")
     print("device:", ctx.name())
     var t_load = now_ms()
-    var model = LFM2Moe(ctx, String(args[1]), String(args[2]))
+    var model = LFM2Moe(ctx, String(args[1]), String(args[2]),
+                        gemmq=getenv("LFM2MOE_GEMM") == "q" and getenv("LFM2MOE_SCALAR") != "1")
     model.attn_mma = getenv("LFM2MOE_ATTN") != "scalar"
     model.mma = getenv("LFM2MOE_SCALAR") != "1"
     model.rows_r = Int(getenv("LFM2MOE_ROWS", "1"))

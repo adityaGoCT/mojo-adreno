@@ -28,8 +28,9 @@ only at 1-2 bits.
 - **Prefill** (`prefill_batch`): the batch's (token, choice) pairs are grouped by expert on the GPU (`p_group`), each
   expert's rows copied together and padded to 64 (`p_gather`), and every expert's product runs in one launch
   (`p_gemm_q4g`: a work tile = an expert and 64 of its rows), then each token's 4 outputs are summed with the router's
-  weights (`p_combine`). On the 840 the products use the cooperative matrices (fp32, 64 x 64 x 8); the X1-85 has none,
-  so there `LFM2MOE_SCALAR=1` uses tiled scalar int4 products (`gemm_q4s`, `p_gemm_q4gs`).
+  weights (`p_combine`). On the 840 the products use the cooperative matrices (fp32, 64 x 64 x 8), or fp16 ones with
+  `LFM2MOE_GEMM=q` ([below](#prefill-on-fp16-cooperative-matrices-lfm2moe_gemmq)); the X1-85 has none, so there
+  `LFM2MOE_SCALAR=1` uses tiled scalar int4 products (`gemm_q4s`, `p_gemm_q4gs`).
 - The rest is the dense LFM2's: short conv, attention, norms and the Q6_K head from `lfm2/kernels/lk.mojo`, the
   matrix-unit prefill attention from `gemma4/kernels`.
 - **The laptop**: Mojo has no Windows runtime, so `lfm2moe` runs on the Mac and drives the laptop's GPU through the
@@ -51,6 +52,32 @@ same argmax; the text is the model's (it thinks first: `<think> The user asks: .
 faster than 4 (18.9 vs 20.2 ms), the opposite of the X1-85. The 8B's 4.84 GB on the GPU is most of the phone's
 memory: the phone reports about 5.0 GB available with nothing running, so the prefill attention's score buffer grows
 with the prompt instead of being sized for 4096 positions (277 MB).
+
+### Prefill on fp16 cooperative matrices (`LFM2MOE_GEMM=q`)
+
+The 840 has no matrix unit, and its fp16 product (64 × 64 × 16) runs at twice its fp32 one's ceiling. With
+`LFM2MOE_GEMM=q` (`run.py --env LFM2MOE_GEMM=q`), the prompt's products use `lfm2/kernels/lkh.mojo`, as LFM2.5-2.6B's
+`LFM2_GEMM=q` does:
+- **Dense projections** (attention, short conv, layers 0 and 1's MLPs): `pack_x` packs X into fp16 tiles, and
+  `gemm_hq` unpacks the int4 rows into fp16 shared memory inside the product. K is split into chunks of 2048 that
+  `sum_parts` adds in fp32.
+- **Experts:** after `p_group`, `pack_gather` packs the grouped rows into fp16 tiles. One `gemm_hqg` launch multiplies
+  every work tile (an expert and 64 of its rows) by that expert's gate and up rows, in tiles of 64 rows × 128 columns.
+  `swiglu_pack` computes silu(gate) × up, already packed for the down product, and a second `gemm_hqg` does down.
+  `combine` adds each token's 4 outputs, weighted. The fp32 path's grouped buffers (153 MB) are not allocated.
+
+On the Fold, each run after the GPU cooled to 45 °C:
+
+| Prompt | fp32 products | `LFM2MOE_GEMM=q` | Generated tokens identical to the fp32 products' |
+|---|---|---|---|
+| 414 tokens (3 rounds) | 1,265–1,272 ms (327 tokens/s) | **542–544 ms (2.34×, 763 tokens/s)** | 64 of 64 |
+| The sky, 19 tokens (2 rounds) | 667–674 ms | **251 ms (2.67×)** | 64 of 64 |
+
+Decode is unchanged (18–19 ms a token). Against `reference.py` on the same GGUF weights, the logits after the prompt
+are within 1.47 (sky; max |logit| 46.2) and 1.03 (414 tokens; max 37.1), against 4e-5 to 9e-5 with fp32 products.
+That is because the 840 rounds every partial sum of an fp16 product to fp16. The argmax is the same, the KL is below
+1e-10, and the residual stream stays within 2.1% of its largest value at every layer. Expert tiles 64 columns wide
+took 640–689 ms on the 414-token prompt, and 256 columns wide 883 ms.
 
 ## LFM2.5-8B-A1B against Pipette (Liquid AI's on-device benchmark)
 
@@ -180,6 +207,7 @@ LFM2MOE=8b  $PY lfm2moe/reference.py --jobs build/lfm2moe/8b/ref/jobs.json
 python3 lfm2moe/build_android.py                 # build/android/lfm2moe (the phone)
 lfm2moe/build_mac.sh                             # build/lfm2moe/x2 (the Mac program, plugin, vk_server.exe, convert.exe)
 LFM2MOE=8b  $PY lfm2moe/run.py --target phone  --prompt sky --check
+LFM2MOE=8b  $PY lfm2moe/run.py --target phone  --prompt long --check --env LFM2MOE_GEMM=q   # fp16 cooperative matrices
 LFM2MOE=24b $PY lfm2moe/run.py --target laptop --prompt sky --check --env LFM2MOE_SCALAR=1
 # Pipette's protocol on a phone: Pipette's own Q4_0 GGUF, the programs and the q4 recipe in /data/local/tmp/lfm2/plain8b
 # (bin/: build/android/lfm2moe and lfm2_convert; rope.f32; q4/; lfm2moe_q4.bin written there by lfm2_convert)

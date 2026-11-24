@@ -17,7 +17,7 @@ clang++ -std=c++17 -O1 -shared -fPIC -I"$MOJO_SRC/SDK/include" -o $OUT/libM_driv
     driver/plugin.cpp remote/transport.cpp
 MODULAR_MAX_PACKAGE_ROOT=$PWD/.venv-mojo/lib/python3.12/site-packages/modular "$R/Mojo/tools/mojo/mojo" build \
     --emit object -O3 --target-accelerator adreno840 -I build/android/packages -I qwen3moe -I qwen3moe/kernels \
-    -I llama/kernels -o $OUT/qwen3moe.o qwen3moe/qwen3moe.mojo
+    -I llama/kernels -I lfm2/kernels -o $OUT/qwen3moe.o qwen3moe/qwen3moe.mojo
 clang++ -o $OUT/qwen3moe $OUT/qwen3moe.o -L"$R/Mojo" -lKGENCompilerRTShared -Wl,-rpath,"$R/Mojo" \
     -Wl,-rpath,"$R/AsyncRT" -Wl,-rpath,"$R/Support"
 ls -la $OUT

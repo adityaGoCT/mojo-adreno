@@ -8,6 +8,7 @@
 #   QWEN3MOE_SYNC=1          synchronize after every token (its time, with the transport's round trip)
 #   QWEN3MOE_PREFILL=0 / 1   the prompt a token at a time (decode steps) / in batches of up to 256 tokens; by
 #                            default batches from 32 tokens on (shorter prompts leave most of the GPU idle)
+#   QWEN3MOE_GEMM=q          the batches' products on fp16 cooperative matrices (lfm2/kernels/lkh.mojo)
 #   QWEN3MOE_REPLAY=<k>      then time a decode step on the server's own clock: the server keeps the step's requests
 #                            and runs them k more times (vla/x2's vk_server: OP_RECORD / OP_REPLAY), so the launches
 #                            do not stream through the transport
@@ -42,7 +43,7 @@ def main() raises:
     var ctx = DeviceContext(api="vulkan")
     print("device:", ctx.name())
     var t0 = now_ms()
-    var model = Qwen3Moe(ctx, manifest, weights)
+    var model = Qwen3Moe(ctx, manifest, weights, gemmq=getenv("QWEN3MOE_GEMM") == "q")
     print("weights:", len(model.words) + len(model.halves) + len(model.floats), "tensors,",
           round(Float64(model.bytes) / 1e9, 2), "GB read on the device's side in", round((now_ms() - t0) / 1e3, 1), "s")
 

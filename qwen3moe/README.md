@@ -120,6 +120,39 @@ on, batched is 2.3–3.1× faster. The batched logits are within 1.5e-5 of the t
 tokens. Below about 32 tokens
 most of the GPU stays idle, so short prompts run a token at a time (`QWEN3MOE_PREFILL=0 / 1` forces either).
 
+### On fp16 cooperative matrices (`QWEN3MOE_GEMM=q`): written, not yet run on the laptop
+
+`QWEN3MOE_GEMM=q` runs the batches' products on fp16 cooperative matrices with `lfm2/kernels/lkh.mojo`, as
+Qwen3-4B's `QWEN3_GEMM=q` does on the Adreno 840:
+- **q/k/v and o:** `pack_x` packs X into fp16 tiles, and `gemm_hq` unpacks the int4 rows into fp16 shared memory
+  inside the product. K is split into chunks of 2048 that `sum_parts` adds in fp32; o's sum is added into the
+  residual stream (`sum_parts_add`).
+- **Experts:** `lkh.group` sorts the batch's (token, choice) pairs by expert into tiles of 64 rows. `pack_gather`
+  packs those rows, and one `gemm_hqg` launch multiplies every tile by its expert's gate and up rows (tiles of 64 rows
+  × 128 columns; 64 columns took 21.5–24.9 ms in the benchmark below). Then
+  `swiglu_pack` computes silu(gate) × up, already packed for the down product, and a second `gemm_hqg` does down.
+  `combine` adds each token's 8 outputs, weighted, into the residual stream.
+
+A cooperative matrix is 64 rows tall, and a 256-token batch gives an expert about 16 rows, so most of each tile is
+padding. The path drops the fp32 path's expert buffers, so the GPU's heap holds it.
+
+The laptop was not available, so `qwen3moe/bench_moe.mojo` (`android/build.py moebench`) checks the expert layer on
+the Adreno 840 of a Galaxy Z Fold instead. That is the same SPIR-V the laptop runs. It uses random int4 experts of the
+model's sizes, a scale per 128, and the router's top 8 of random logits. Against the fp32 path above (`t_moe_gate_up`,
+`t_moe_down`, `p_moe_sum`), one layer's experts:
+
+| Batch | Tiles of 64 rows (pairs) | fp32 path | `QWEN3MOE_GEMM=q` | Largest difference / largest output |
+|---|---|---|---|---|
+| 32 tokens | 118 (256) | 39.5 ms | 17.4 ms (2.3×) | 1.3% |
+| 64 tokens | 127 (512) | 44.4 ms | 18.8 ms (2.4×) | 1.2% |
+| 128 tokens | 128 (1024) | 52.3 ms | 19.2 ms (2.7×) | 1.0% |
+| 256 tokens | 128 (2048) | 68.7 ms | 19.9 ms (3.45×) | 1.0% |
+
+The differences are the usual size for fp16 accumulation, and there are no NaNs. The 840 runs the fp32 path slower
+than the X2-90 does: on the laptop, a whole 256-token layer takes about 54 ms. So the laptop's speedup still has to be
+measured. Run it with `QWEN3MOE_GEMM=q build/vla/venv/bin/python qwen3moe/run.py ...`; `run.py` passes its
+environment on to the program.
+
 ## On the Hexagon NPU
 
 The laptop's NPU is the same V81 HTP as the phones' (`../npu`). `npu/` runs one real layer (layer 0, fp16) through ONNX
@@ -214,8 +247,8 @@ build/vla/venv/bin/python qwen3moe/run.py --prompt "..." --tokens 64 --check [--
 
 ## Follow-ups
 
-- **Prefill on the matrix units:** the batched products are fp32 FMAs on 8 tokens; cooperative-matrix tiles of 64
-  rows would read a prompt several times faster.
+- **Prefill on the matrix units:** `QWEN3MOE_GEMM=q` ([above](#on-fp16-cooperative-matrices-qwen3moe_gemmq-written-not-yet-run-on-the-laptop))
+  is written and checked on the 840; it still has to run, and be timed and checked, on the X2 laptop.
 - **Fusions:** the RMSNorms, router and top-8 are a quarter of a step as 192 small launches.
 - **The NPU with routing:** expert weights gathered by index in a QNN graph (or a graph per expert group), so it
   reads 8 experts, not 128.

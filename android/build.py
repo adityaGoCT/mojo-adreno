@@ -14,6 +14,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py lfm2bench   # build/android/lfm2bench/: lfm2/bench_rows.mojo (few-row product kernels)
   python3 android/build.py lfm2q4h     # build/android/lfm2q4h/: lfm2/bench_q4h.mojo (fp16 cooperative-matrix int4 GEMM)
   python3 android/build.py llamahq     # build/android/llamahq/: llama/bench_hq.mojo (the same, scales per 64, int4/int8/fp16)
+  python3 android/build.py moebench    # build/android/moebench/: qwen3moe/bench_moe.mojo (Qwen3-30B-A3B's experts, grouped)
   python3 android/build.py smempack    # build/android/smempack/: coopmat/smem_pack.mojo (fp16 tiles packed in shared memory)
   python3 android/build.py qwen3_4b    # build/android/qwen3_4b/: qwen3_4b/qwen3_4b.mojo (Qwen3-4B), qwen3_4b_convert
   python3 android/build.py qwen3_5_4b  # build/android/qwen3_5_4b/: qwen3_5_4b/qwen3_5_4b.mojo (Qwen3.5-4B), its convert
@@ -225,6 +226,16 @@ def llamahq():
     link(out, "bench_hq", [out / "bench_hq.o"])
 
 
+def moebench():
+    """qwen3moe/bench_moe.mojo: Qwen3-30B-A3B's expert layer in a prefill batch, its fp32 path against lkh's grouped
+    fp16 cooperative-matrix path, on random weights of the model's sizes."""
+    out = BUILD / "moebench"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "qwen3moe/bench_moe.mojo", out / "bench_moe.o",
+                includes=[ROOT / "qwen3moe/kernels", ROOT / "lfm2/kernels"])
+    link(out, "bench_moe", [out / "bench_moe.o"])
+
+
 def smempack():
     """coopmat/smem_pack.mojo: fp16 tiles written to shared memory by packed stores and read by cooperative loads."""
     out = BUILD / "smempack"
@@ -284,7 +295,7 @@ def bonsai():
 
 def main():
     steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
-             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "llamahq": llamahq, "smempack": smempack,
+             "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "llamahq": llamahq, "moebench": moebench, "smempack": smempack,
              "qwen3_4b": qwen3_4b, "qwen3_5_4b": qwen3_5_4b}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]
     for name in wanted:
