@@ -73,13 +73,21 @@ struct Panels(Movable):
         self.s = Dict[String, DeviceBuffer[DType.float16]]()
 
 
+def experts_reg_on() -> Bool:
+    """A mixture of experts' grouped products (lkh.gemm_kg) from panels, B in registers (LKH_REG_EXPERTS=0: B through
+    shared memory). A work tile is one expert's 64 rows, so B staged in shared memory serves one row block:
+    LFM2.5-8B-A1B's 414-token prefill went from 361 to 218 ms with the same logits (the panels add 4.3 GB)."""
+    return on850() and getenv("LKH_REG_EXPERTS") != "0"
+
+
 def make_panels[GS: Int](ctx: DeviceContext, words: Dict[String, DeviceBuffer[DType.uint32]],
                          halves: Dict[String, DeviceBuffer[DType.float16]], manifest: String) raises -> Panels:
     """Panels of every int4 matrix the manifest lists ("<name>.q <offset> <bytes> u32 <n>x<k/8>") that has a scale per
-    GS ("<name>.s"), 64 | n and 32 | k, except embeddings, heads and grouped experts (other kernels read those). Empty
-    unless reg_on()."""
+    GS ("<name>.s"), 64 | n and 32 | k, except embeddings and heads (other kernels read those): the dense ones with
+    reg_on(), the grouped experts' with experts_reg_on()."""
     var p = Panels()
-    if not reg_on():
+    var experts = experts_reg_on()
+    if not reg_on() and not experts:
         return p^
     for line in open(manifest, "r").read().splitlines():
         var f = line.split(" ")
@@ -87,8 +95,11 @@ def make_panels[GS: Int](ctx: DeviceContext, words: Dict[String, DeviceBuffer[DT
             continue
         var full = String(f[0])
         var name = String(full[byte=0:full.byte_length() - 2])
-        if (name.startswith("embed") or name.startswith("lm") or name.startswith("head") or name.find(".egu") >= 0
-                or name.find(".edown") >= 0 or not (name + ".q" in words) or not (name + ".s" in halves)):
+        var expert = name.find(".egu") >= 0 or name.find(".edown") >= 0
+        if (name.startswith("embed") or name.startswith("lm") or name.startswith("head") or (expert and not experts)
+                or not (name + ".q" in words) or not (name + ".s" in halves)):
+            continue
+        if not expert and not reg_on():
             continue
         var dims = f[4].split("x")
         var n = Int(dims[0])

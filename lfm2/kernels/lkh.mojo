@@ -803,7 +803,7 @@ def gemm_k_rope[WM: Int, WN: Int, BKS: Int, GS: Int = 64, REG: Bool = True, PANE
             barrier()
 
 
-def gemm_kg[WN: Int, BKS: Int, GS: Int = G, FMT: Int = Q4, PAD: Int = 8](
+def gemm_kg[WN: Int, BKS: Int, GS: Int = G, FMT: Int = Q4, PAD: Int = 8, REG: Bool = False, PANEL: Bool = False](
     xa: F16, wq: U32, ws: F16, part: F16, n: Int32, k: Int32, rows: Int32, tiles: I32, ntiles: I32
 ):
     """gemm_hqg on the 850: the grouped products (work tile block y = (expert e, grouped rows r0 .. r0 + 63) times
@@ -814,12 +814,13 @@ def gemm_kg[WN: Int, BKS: Int, GS: Int = G, FMT: Int = Q4, PAD: Int = 8](
         return
     comptime BN = 64 * WN
     comptime LD = BKS + PAD
-    var sb = stack_allocation[BN * LD, DType.float16, address_space=AddressSpace.SHARED]()
+    var sb = stack_allocation[16 if REG else BN * LD, DType.float16, address_space=AddressSpace.SHARED]()
     var e = Int(tiles[2 * it])
     var row0 = Int(tiles[2 * it + 1])
     var nn = Int(n)
     var t = Int(thread_idx.x)
     var sc = (t // 64) * 64
     var colw = Int(block_idx.x) * BN
-    var c0 = k_loop[1, WN, BKS, 1, True, GS, FMT, LD](sb, xa, wq, ws, Int(k), row0, e * nn + colw, sc, t)
+    var c0 = k_loop[1, WN, BKS, 1, True, GS, FMT, LD, REG=REG, PANEL=PANEL](sb, xa, wq, ws, Int(k), row0,
+                                                                             e * nn + colw, sc, t)
     c0.store(part + row0 * nn + colw + sc, nn)

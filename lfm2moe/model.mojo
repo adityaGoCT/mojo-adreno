@@ -560,7 +560,11 @@ struct LFM2Moe(Movable):
         self.tick("p: router + grouping")
         if self.skip.find(",eprod,") >= 0:
             return
-        if lk850.on850():
+        if lk850.on850() and n + "egu" in self.pan.w:  # B in registers from panels (LKH_REG_EXPERTS=1)
+            ctx.enqueue_function[lkh.gemm_kg[2, 32, REG=True, PANEL=True]](
+                self.xa, self.pan.w[n + "egu"], self.pan.s[n + "egu"], self.part, Int32(2 * FE), Int32(D),
+                Int32(G), self.tiles, self.ntiles, grid_dim=Dim(2 * FE // 128, G // mk.TM), block_dim=128)
+        elif lk850.on850():
             ctx.enqueue_function[lkh.gemm_kg[2, 64]](
                 self.xa, self.words[n + "egu.q"], self.halves[n + "egu.s"], self.part, Int32(2 * FE), Int32(D),
                 Int32(G), self.tiles, self.ntiles, grid_dim=Dim(2 * FE // 128, G // mk.TM), block_dim=128)
@@ -573,7 +577,11 @@ struct LFM2Moe(Movable):
                                               self.xa.create_sub_buffer[DType.uint32](0, G * FE // 2), self.ntiles, tm,
                                               grid_dim=groups(G * FE // 8, 256), block_dim=256)
         self.tick("p: experts gate/up")
-        if lk850.on850():
+        if lk850.on850() and n + "edown" in self.pan.w:  # B in registers from panels (LKH_REG_EXPERTS=1)
+            ctx.enqueue_function[lkh.gemm_kg[2, 32, REG=True, PANEL=True]](
+                self.xa, self.pan.w[n + "edown"], self.pan.s[n + "edown"], self.part, Int32(D), Int32(FE),
+                Int32(G), self.tiles, self.ntiles, grid_dim=Dim(D // 128, G // mk.TM), block_dim=128)
+        elif lk850.on850():
             ctx.enqueue_function[lkh.gemm_kg[2, 64]](
                 self.xa, self.words[n + "edown.q"], self.halves[n + "edown.s"], self.part, Int32(D), Int32(FE),
                 Int32(G), self.tiles, self.ntiles, grid_dim=Dim(D // 128, G // mk.TM), block_dim=128)
