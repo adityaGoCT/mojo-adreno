@@ -5,6 +5,7 @@ run on the Adreno through driver/libM_driver_vulkan.so.
   python3 android/build.py runtime     # MAX's runtime for Android (Bazel, --config=android-arm64)
   python3 android/build.py vecadd      # build/android/vecadd/: android/vecadd.mojo
   python3 android/build.py llama       # build/android/llama/: llama/llama.mojo (Llama 3.2 1B)
+  python3 android/build.py llama3      # build/android/llama3/: llama/llama3.mojo (Llama 3.x of any size, e.g. 3.2 3B)
   python3 android/build.py qwen3       # build/android/qwen3/: qwen3/qwen3.mojo (ternary Qwen3-8B), qwen3_convert
   python3 android/build.py bonsai      # build/android/bonsai/: the Android port's Bonsai model.mojo,
                                        # and bonsai_convert for its weights
@@ -176,6 +177,17 @@ def vla():
         link(out, name, [out / f"{name}.o"])
 
 
+def llama3():
+    """llama/llama3.mojo: llama/model3.mojo's forward pass (Llama 3.x of any size, from the manifest): llama/kernels'
+    matrix-vector products and prefill products, lg.mojo, gemma4's attention, lfm2's lk and lkh."""
+    out = BUILD / "llama3"
+    out.mkdir(parents=True, exist_ok=True)
+    mojo_object(ROOT / "llama/llama3.mojo", out / "llama3.o",
+                includes=[ROOT / "llama", ROOT / "llama/kernels", ROOT / "llama/kernels/prefill", ROOT / "lfm2/kernels",
+                          ROOT / "gemma4/kernels"])
+    link(out, "llama3", [out / "llama3.o"])
+
+
 def gemma4():
     """gemma4/gemma4.mojo: gemma4/model.mojo's forward pass on gemma4/kernels (one program for E2B and E4B); and
     gemma4_convert (gemma4/convert.c), which writes gemma4.bin on the phone from the downloaded checkpoint."""
@@ -294,7 +306,7 @@ def bonsai():
 
 
 def main():
-    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "qwen3": qwen3, "bonsai": bonsai,
+    steps = {"runtime": runtime, "vecadd": vecadd, "llama": llama, "llama3": llama3, "qwen3": qwen3, "bonsai": bonsai,
              "vla": vla, "gemma4": gemma4, "lfm2": lfm2, "lfm2bench": lfm2bench, "lfm2q4h": lfm2q4h, "llamahq": llamahq, "moebench": moebench, "smempack": smempack,
              "qwen3_4b": qwen3_4b, "qwen3_5_4b": qwen3_5_4b}
     wanted = sys.argv[1:] or ["runtime", "vecadd"]

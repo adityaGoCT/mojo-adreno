@@ -229,6 +229,43 @@ Each product alone (`bench_hq`, `android/build.py llamahq`; 512 rows, chunks of 
 | gate/up, 16384 × 2048 | 2.12 | 4.98 | 2.02 | 4.34 |
 | down, 2048 × 8192 | 1.73 | 2.94 | 1.52 | 2.58 |
 
+### Llama 3.2 3B (`llama3.mojo`)
+
+`model.mojo` and the kernels it shares with `llama_vk.c` have Llama 3.2 1B's shapes compiled in. `model3.mojo` is the
+same forward pass with every size read from the manifest, so it runs any Llama 3.x. Here that is
+[`unsloth/Llama-3.2-3B-Instruct`](https://huggingface.co/unsloth/Llama-3.2-3B-Instruct) (revision `006f5dcd`, the same
+weights as Meta's): 28 layers, hidden 3072, 24 query heads and 8 KV heads of 128, MLP 8192.
+- **Kernels:** the 1B's int4 matrix-vector and prefill products take their sizes as arguments already.
+  `kernels/lg.mojo` adds the rest with sizes as arguments: embedding, RMS norm, RoPE, and decode attention scores for
+  any number of query heads per KV head (3 here).
+- **Attention:** for the prompt, gemma4's kernels run it on the matrix units, as for Qwen3-4B. A token's attention
+  values are gemma4's too. Both read a position-major KV cache, and RoPE scales q by 1/√128 as it rotates it.
+- **`run3.py`** exports int4 a tensor at a time (2.50 GB), runs the program on the phone and checks it.
+  `reference3.py` is transformers' own `LlamaDecoderLayer`, a layer at a time in fp32, on the same int4 weights,
+  teacher-forced on the phone's tokens. The whole fp32 model would not fit next to everything else in the Mac's 17 GB.
+- **Weights:** the lab's bridge pushed at about 1 MB/s, so the phone downloaded the checkpoint's two shards itself
+  (6.4 GB at about 9 MB/s) and joined them. `st2bin` converted them with `run3.py --recipe`'s recipe, byte for byte
+  the Mac's export (SHA-256 `eb1ada05…`).
+
+On the Fold, three rounds each (two for the short prompt), each run after the GPU cooled to 45 °C:
+
+| Llama 3.2 3B, int4 | Prompt, fp32 products | Prompt, `LLAMA_GEMM=q` | Decode |
+|---|---|---|---|
+| 431 tokens (`prompts/long.txt`) | 1,604–1,615 ms (267–269 tokens/s) | **868–882 ms (489–497 tokens/s, 1.84×)** | 33.6–34.2 ms a token (29.5 tokens/s) |
+| 46 tokens (the sky) | 408 ms (113 tokens/s) | **200–205 ms (224–230 tokens/s, 2.0×)** | 29.9–30.1 ms a token |
+
+| Check against `reference3.py` | Max \|phone − reference\| after the prompt | KL | Greedy = reference |
+|---|---|---|---|
+| 431 tokens, fp32 products | 5.3e-5 (logits −9.2 … 27.0) | 2.3e-11 | 48 of 48 |
+| 431 tokens, `LLAMA_GEMM=q` | 0.19 | 1.1e-4 | 48 of 48 (the same tokens) |
+| 46 tokens, fp32 products | 5.2e-5 | 8.9e-12 | 48 of 48 |
+| 46 tokens, `LLAMA_GEMM=q` | 0.14 | 9.3e-5 | 48 of 48 |
+
+The answer starts "According to the passage, reading a prompt is faster than generating text because…" on the long
+prompt, and "The sky appears blue because of a phenomenon called Rayleigh scattering…" on the short one. The products
+use chunks of 1024, as the 1B's do. A decode step reads the int4 weights, 1.71 GB of the 2.50 (the fp16 embedding
+gives only a row), in 34 ms: about 50 GB/s, as for the 1B. The switch does not change decode.
+
 ### A/B against GLSL: what the route through LLVM IR cost
 
 The stock driver first ran this model at 1,392 ms/token, 4.9x slower than now. To see whether the
@@ -284,6 +321,8 @@ $PY llama/run.py --model <snapshot dir> --backend native               # Turnip,
 $PY llama/run.py --model <snapshot dir> --prefill --prompt-file llama/prompts/long.txt  # Adreno 8xx
 $PY llama/run.py --model <snapshot dir> --runner mojo --prefill --quant q4 --prompt-file llama/prompts/long.txt \
     --env LLAMA_GEMM=q                                                 # prefill on fp16 cooperative matrices
+$PY llama/run3.py --model <Llama-3.2-3B-Instruct snapshot> --export-only   # build/llama/llama3b-q4 (2.50 GB)
+$PY llama/run3.py --model <snapshot> --prompt-file llama/prompts/long.txt --check [--env LLAMA_GEMM=q]
 ```
 
 `--backend native` compiles the kernels with a source-built Mojo that has the `adreno710` Vulkan
