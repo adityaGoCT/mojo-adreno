@@ -10,10 +10,12 @@
 # layer of their type (sliding or full), which that layer filled earlier in the same step.
 from std.collections import Dict
 from std.math import sqrt
+from std.os import getenv
 from std.memory import bitcast
 from max.gpu.host import DeviceBuffer, DeviceContext, Dim
 
 import g4k
+import g85
 import lkh
 import lk850
 import p_gemm_q4
@@ -96,6 +98,11 @@ struct Gemma4(Movable):
     var part: DeviceBuffer[DType.float16]  # lkh's fp16 partial products, a K chunk each
 
     var pan: lk850.Panels  # the Adreno 850's int4 panels (lk850.make_panels; LKH_850=1)
+    var gfa: Bool  # LKH_850=1 (LKH_GFA=0: off): the prompt's attention on fp16 matrix products (g85)
+    var qh: DeviceBuffer[DType.float16]  # g85: the batch's q rows in fp16
+    var ph: DeviceBuffer[DType.float16]  # g85: P in fp16, [row][head][CAP + PAD]
+    var kh: Dict[Int, DeviceBuffer[DType.float16]]  # g85: each own-KV layer's K cache in fp16
+    var vth: Dict[Int, DeviceBuffer[DType.float16]]  # g85: and its V cache transposed
 
     def __init__(out self, ctx: DeviceContext, dir: String, checkpoint: String) raises:
         """dir: export.py's manifest.txt, rope tables and convert's gemma4.bin; checkpoint: model.safetensors."""
@@ -180,6 +187,17 @@ struct Gemma4(Movable):
         self.ppg = ctx.enqueue_create_buffer[DType.float32](PMAX * PL)
         self.ppa = ctx.enqueue_create_buffer[DType.float32](PMAX * PL)
         self.pscores = ctx.enqueue_create_buffer[DType.float32](PMAX * self.H * (self.CAP + PAD))
+        self.gfa = lk850.on850() and getenv("LKH_GFA") != "0"
+        self.qh = ctx.enqueue_create_buffer[DType.float16](PMAX * self.H * maxhd if self.gfa else 2)
+        self.ph = ctx.enqueue_create_buffer[DType.float16](PMAX * self.H * (self.CAP + PAD) if self.gfa else 2)
+        self.kh = Dict[Int, DeviceBuffer[DType.float16]]()
+        self.vth = Dict[Int, DeviceBuffer[DType.float16]]()
+        if self.gfa:
+            for l in range(self.L):
+                if self.plan[l].src == l:
+                    var n = (self.CAP + PAD) * self.KVH * self.plan[l].hd
+                    self.kh[l] = ctx.enqueue_create_buffer[DType.float16](n)
+                    self.vth[l] = ctx.enqueue_create_buffer[DType.float16](n)
         self.gemmq = False
         var maxq = (self.H + 2 * self.KVH) * maxhd
         self.xa = ctx.enqueue_create_buffer[DType.float16](PMAX * max(D, maxf, self.H * maxhd))
@@ -405,6 +423,51 @@ struct Gemma4(Movable):
             self.prefill_batch(p0 + c0, c)
             c0 += c
 
+    def attention_h(self, l: Int, p0: Int, count: Int, R: Int, hd: Int, stride: Int, own: Bool, win: Int32) raises:
+        """The batch's attention with g85's fp16 matrix products: q (and, for a layer with its own K/V, the caches) in
+        fp16, S = Q K^T in fp32, P in fp16, P V into patt."""
+        var ctx = self.ctx
+        var H = self.H
+        var KVH = self.KVH
+        var src = self.plan[l].src
+        var kcap = self.CAP + PAD
+        var pk = p0 + R  # the batch reads keys 0 .. p0 + R - 1
+        if pk > kcap:
+            raise Error("g85: positions past the cache")
+        var nq = Int32(H // KVH)
+        var qh32 = self.qh.create_sub_buffer[DType.uint32](0, len(self.qh) // 2)
+        ctx.enqueue_function[g85.to_h](self.pqkv, qh32, Int32(R), Int32(H * hd), Int32(stride), Int32(H * hd),
+                                       grid_dim=groups(R * H * hd // 2, 256), block_dim=256)
+        var kh = self.kh[src]
+        var vt = self.vth[src]
+        if own:
+            var w = KVH * hd
+            ctx.enqueue_function[g85.to_h](self.kc[src], kh.create_sub_buffer[DType.uint32](0, len(kh) // 2), Int32(pk),
+                                           Int32(w), Int32(w), Int32(w), grid_dim=groups(pk * w // 2, 256),
+                                           block_dim=256)
+            ctx.enqueue_function[g85.vt_h](self.vc[src], vt.create_sub_buffer[DType.uint32](0, len(vt) // 2),
+                                           Int32(pk), Int32(w), Int32(kcap), grid_dim=groups(pk * w // 2, 256),
+                                           block_dim=256)
+        if hd == 256:
+            ctx.enqueue_function[g85.p_scores_h[256]](self.qh, kh, self.pscores, Int32(p0), win, nq, Int32(KVH),
+                                                      Int32(H), Int32(kcap), grid_dim=Dim(R // 64, H, pk // 64),
+                                                      block_dim=64)
+        else:
+            ctx.enqueue_function[g85.p_scores_h[512]](self.qh, kh, self.pscores, Int32(p0), win, nq, Int32(KVH),
+                                                      Int32(H), Int32(kcap), grid_dim=Dim(R // 64, H, pk // 64),
+                                                      block_dim=64)
+        ctx.enqueue_function[g85.p_softmax_h](self.pscores, self.ph.create_sub_buffer[DType.uint32](0, len(self.ph) // 2),
+                                              Int32(p0), Int32(count), win, Int32(H), Int32(kcap),
+                                              grid_dim=Dim(H, R), block_dim=64)
+        if hd == 256:
+            ctx.enqueue_function[g85.p_values_h[256]](self.ph, vt, self.patt, Int32(p0), win, nq, Int32(KVH),
+                                                      Int32(H), Int32(kcap), grid_dim=Dim(R // 64, H * 4),
+                                                      block_dim=64)
+        else:
+            ctx.enqueue_function[g85.p_values_h[512]](self.ph, vt, self.patt, Int32(p0), win, nq, Int32(KVH),
+                                                      Int32(H), Int32(kcap), grid_dim=Dim(R // 64, H * 8),
+                                                      block_dim=64)
+
     def prefill_batch(self, p0: Int, count: Int) raises:
         var ctx = self.ctx
         var D = self.D
@@ -441,26 +504,29 @@ struct Gemma4(Movable):
             var win = Int32(self.WIN if self.plan[l].sliding else 0)
             var kcap = Int32(self.CAP + PAD)
             var nq = Int32(H // KVH)
-            if hd == 256:
-                ctx.enqueue_function[g4k.p_scores_mma[256]](self.pqkv, kc, self.pscores, Int32(p0), win, nq,
-                                                            Int32(KVH), Int32(stride), Int32(H), kcap,
-                                                            grid_dim=Dim(R // 64, H), block_dim=64)
-            elif hd == 512:
-                ctx.enqueue_function[g4k.p_scores_mma[512]](self.pqkv, kc, self.pscores, Int32(p0), win, nq,
-                                                            Int32(KVH), Int32(stride), Int32(H), kcap,
-                                                            grid_dim=Dim(R // 64, H), block_dim=64)
+            if self.gfa:
+                self.attention_h(l, p0, count, R, hd, stride, own, win)
             else:
-                raise Error("head dim: 256 or 512")
-            ctx.enqueue_function[g4k.p_softmax](self.pscores, Int32(p0), c, win, Int32(H), kcap,
-                                                grid_dim=Dim(H, R), block_dim=64)
-            if hd == 256:
-                ctx.enqueue_function[g4k.p_values_mma[256]](self.pscores, vc, self.patt, Int32(p0), win, nq,
-                                                            Int32(KVH), Int32(H), kcap,
-                                                            grid_dim=Dim(R // 64, H * 4), block_dim=64)
-            else:
-                ctx.enqueue_function[g4k.p_values_mma[512]](self.pscores, vc, self.patt, Int32(p0), win, nq,
-                                                            Int32(KVH), Int32(H), kcap,
-                                                            grid_dim=Dim(R // 64, H * 8), block_dim=64)
+                if hd == 256:
+                    ctx.enqueue_function[g4k.p_scores_mma[256]](self.pqkv, kc, self.pscores, Int32(p0), win, nq,
+                                                                Int32(KVH), Int32(stride), Int32(H), kcap,
+                                                                grid_dim=Dim(R // 64, H), block_dim=64)
+                elif hd == 512:
+                    ctx.enqueue_function[g4k.p_scores_mma[512]](self.pqkv, kc, self.pscores, Int32(p0), win, nq,
+                                                                Int32(KVH), Int32(stride), Int32(H), kcap,
+                                                                grid_dim=Dim(R // 64, H), block_dim=64)
+                else:
+                    raise Error("head dim: 256 or 512")
+                ctx.enqueue_function[g4k.p_softmax](self.pscores, Int32(p0), c, win, Int32(H), kcap,
+                                                    grid_dim=Dim(H, R), block_dim=64)
+                if hd == 256:
+                    ctx.enqueue_function[g4k.p_values_mma[256]](self.pscores, vc, self.patt, Int32(p0), win, nq,
+                                                                Int32(KVH), Int32(H), kcap,
+                                                                grid_dim=Dim(R // 64, H * 4), block_dim=64)
+                else:
+                    ctx.enqueue_function[g4k.p_values_mma[512]](self.pscores, vc, self.patt, Int32(p0), win, nq,
+                                                                Int32(KVH), Int32(H), kcap,
+                                                                grid_dim=Dim(R // 64, H * 8), block_dim=64)
             self.gemm(n + "o", self.patt, self.ptmp, D, H * hd, R)
             var sc = self.floats[n + "scalar"]
             ctx.enqueue_function[g4k.p_norm_add](self.px, self.ptmp, self.floats[n + "post_attn_norm"], sc,
